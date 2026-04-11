@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      - name: Compile
+        run: dart compile exe bin/rip.dart -o disc-buddy
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disc-buddy-linux-x64
+          path: disc-buddy
+          retention-days: 30
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: disc-buddy
+          generate_release_notes: true

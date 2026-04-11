@@ -1,0 +1,12 @@
+# Dart
+.dart_tool/
+.packages
+build/
+doc/api/
+
+# Compiled binaries
+disc-buddy
+rip
+
+# Output
+output/
