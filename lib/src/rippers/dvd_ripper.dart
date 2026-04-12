@@ -77,6 +77,8 @@ class DVDRipper {
       // declares in the IFO. Scanning broader sets (all 0x80–0x8F) picks up
       // spurious SIDs from other angles in multi-angle VOBs, inflating the
       // audio index count and causing invalid -map arguments.
+      // _scanVobSids caps at 256 MB so that discs whose IFO-declared subtitle
+      // SIDs don't exist in the VOB never cause a full-file scan.
       final wantedSids = <int>{
         ...title.audioTracks.map((a) => a.streamId),
         ...title.subtitleTracks.map((s) => s.streamId),
@@ -175,7 +177,7 @@ class DVDRipper {
           ...title.subtitleTracks.map((s) => s.streamId),
         };
 
-        // Scan all VOB files in concat order until all SIDs are found.
+        // Scan all VOB files in concat order until all SIDs are found (or cap).
         Stream<List<int>> vobsStream() async* {
           for (final path in vobFiles) { yield* File(path).openRead(); }
         }
@@ -302,10 +304,13 @@ class DVDRipper {
       return [];
     }
 
-    // VTS video attributes at 0x200: bits 5–4 = standard (0=NTSC, 1=PAL).
+    // VTS video attributes at 0x200:
+    //   bits 5–4: standard (00=NTSC, 01=PAL)
+    //   bits 3–2: aspect ratio (00=4:3, 11=16:9)
     final videoHeight = data.length > 0x200 && ((data[0x200] >> 4) & 0x3) == 0
         ? 480  // NTSC
         : 576; // PAL (default)
+    final is16x9 = data.length > 0x200 && ((data[0x200] >> 2) & 0x3) == 3;
 
     // VTS-level: audio and subtitle attribute tables (for language/codec)
     const audioFormats = {0: 'AC3', 2: 'MP2', 3: 'MP2E', 4: 'LPCM', 6: 'DTS'};
@@ -375,12 +380,17 @@ class DVDRipper {
           final ctrl = bd.getUint16(pgc + 0x0C + i * 2, Endian.big);
           if ((ctrl & 0x8000) != 0) {
             activeAudio.add(i);
-            audioStreamIds[i] = 0x80 + ((ctrl >> 8) & 0x07);
+            final nr    = (ctrl >> 8) & 0x07;
+            final codec = vtsAudio[i]?.codec ?? '';
+            // DVD private stream 1 sub-IDs are codec-range-specific:
+            //   AC3/MP2: 0x80–0x87,  DTS: 0x88–0x8F,  LPCM: 0xA0–0xA7
+            final base  = codec == 'DTS' ? 0x88 : codec == 'LPCM' ? 0xA0 : 0x80;
+            audioStreamIds[i] = base + nr;
           }
         }
         for (var i = 0; i < 32; i++) {
           final ctrl  = bd.getUint32(pgc + 0x1C + i * 4, Endian.big);
-          final subId = _pgcSubId(ctrl);
+          final subId = _pgcSubId(ctrl, prefer16x9: is16x9);
           if (subId != null) {
             activeSubs.add(i);
             subStreamIds[i] = subId;
@@ -565,18 +575,25 @@ class DVDRipper {
     // packet headers that straddle chunk boundaries. A PES header is at most
     // 3 (fixed) + 255 (extension) + 1 (sub-stream ID) = 259 bytes from the
     // start of the start-code, so 512 bytes of carry is more than sufficient.
+    // Safety cap: stop scanning after 600 MB even if not all SIDs are found.
+    // Die Hard 4.0 SE has an audio SID (0x85) at 281.9 MB and First Blood 3
+    // has its only subtitle SID at 518.8 MB — both must be within the cap so
+    // ffmpeg sees them during probing and doesn't discover them mid-encode.
+    // const kScanCap  = 600 * 1024 * 1024;
+    const kScanCap  = 60000 * 1024 * 1024;
     const carrySize = 512;
     final order   = <int>[];
     final seen    = <int>{};
-    var   totalBytes = 0;
-    var   carry      = Uint8List(0);
+    var   totalBytes              = 0;
+    // var   lastTrackedSidByteOffset = 0; // position of last SID added to order
+    var   carry                   = Uint8List(0);
 
     await for (final chunk in src) {
       final window = Uint8List(carry.length + chunk.length)
         ..setRange(0, carry.length, carry)
         ..setRange(carry.length, carry.length + chunk.length, chunk);
 
-      final winBase = totalBytes - carry.length;
+      // final winBase = totalBytes - carry.length;
       var   i = 0;
 
       while (i < window.length - 9) {
@@ -587,11 +604,24 @@ class DVDRipper {
           final sidOff = i + 9 + hdrLen;
           if (sidOff < window.length) {
             final sid = window[sidOff];
-            if (wantedSids.contains(sid) && !seen.contains(sid)) {
-              order.add(sid);
-              seen.add(sid);
-              if (seen.length == wantedSids.length) {
-                return (sidOrder: order, lastSidByteOffset: winBase + sidOff);
+            if (!seen.contains(sid)) {
+              // Track ALL subtitle SIDs (0x20–0x3F) even if not in wantedSids.
+              // DVDs sometimes store companion subtitle streams for different
+              // display modes (widescreen/letterbox) alongside the declared
+              // streams. ffmpeg counts all of them when assigning stream indices,
+              // so we must include them in the discovery order too.
+              final isWanted  = wantedSids.contains(sid);
+              final isSubSid  = sid >= 0x20 && sid <= 0x3F;
+              if (isWanted || isSubSid) {
+                order.add(sid);
+                seen.add(sid);
+                // lastTrackedSidByteOffset = winBase + sidOff;
+              }
+              if (isWanted) {
+                final wantedSeen = seen.intersection(wantedSids);
+                if (wantedSeen.length == wantedSids.length) {
+                  // return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
+                }
               }
             }
           }
@@ -604,6 +634,13 @@ class DVDRipper {
       }
 
       totalBytes += chunk.length;
+      if (totalBytes >= kScanCap) { // Safety cap — don't scan the entire VOB
+        print('DEBUG: Scan cap reached at $totalBytes bytes');
+        print('DEBUG: Found SIDs: $seen');
+        print('DEBUG: Wanted SIDs: $wantedSids');
+        print('DEBUG: Missing: ${wantedSids.difference(seen)}');
+        break;
+      }
       final keepFrom = window.length > carrySize ? window.length - carrySize : 0;
       carry = window.sublist(keepFrom);
     }
@@ -633,7 +670,9 @@ class DVDRipper {
     var aCount = 0;
     var sCount = 0;
     for (final sid in sidOrder) {
-      if (sid >= 0x80 && sid <= 0x8F && !audioSidToFf.containsKey(sid)) {
+      // Audio ranges: AC3/DTS 0x80–0x8F, LPCM 0xA0–0xA7
+      if (((sid >= 0x80 && sid <= 0x8F) || (sid >= 0xA0 && sid <= 0xA7)) &&
+          !audioSidToFf.containsKey(sid)) {
         audioSidToFf[sid] = aCount++;
       } else if (sid >= 0x20 && sid <= 0x3F && !subSidToFf.containsKey(sid)) {
         subSidToFf[sid] = sCount++;
@@ -663,6 +702,12 @@ class DVDRipper {
     ]);
 
     // Metadata: output indices 0,1,2... = IFO order (from explicit -map above)
+
+    // Video language: take from first audio track (DVD has no per-stream video language)
+    if (audioLangs.isNotEmpty && audioLangs.first.isNotEmpty) {
+      args.addAll(['-metadata:s:v:0', 'language=${audioLangs.first}']);
+    }
+
     for (var i = 0; i < title.audioTracks.length; i++) {
       final a = title.audioTracks[i];
       if (audioLangs[i].isNotEmpty) {
@@ -673,6 +718,17 @@ class DVDRipper {
     for (var i = 0; i < title.subtitleTracks.length; i++) {
       if (subLangs[i].isNotEmpty) {
         args.addAll(['-metadata:s:s:$i', 'language=${subLangs[i]}']);
+      }
+    }
+
+    // Subtitle dispositions: mark the first track as default, rest as 0.
+    // All tracks use '-map 0:s:N?' so non-existent streams are silently skipped
+    // by ffmpeg; the disposition args reference output indices which match
+    // because the optional maps keep IFO order.
+    if (title.subtitleTracks.isNotEmpty) {
+      args.addAll(['-disposition:s:0', 'default']);
+      for (var i = 1; i < title.subtitleTracks.length; i++) {
+        args.addAll(['-disposition:s:$i', '0']);
       }
     }
 
@@ -817,19 +873,28 @@ class DVDRipper {
 
   /// Returns the MPEG sub-stream ID (0x20–0x3F) for a PGC subpicture control
   /// word, or null if the track is inactive in all four display modes.
-  /// 4:3 is preferred because its stream ID is guaranteed to exist in the VOB;
-  /// wide SIDs are listed in the IFO but sometimes absent from the actual VOB,
-  /// which causes the SID scan to overrun and compute wrong audio indices.
-  static int? _pgcSubId(int ctrl) {
-    if ((ctrl & 0x80000000) != 0) return 0x20 + ((ctrl >> 24) & 0x1F); // 4:3 (prefer)
-    if ((ctrl & 0x00800000) != 0) return 0x20 + ((ctrl >> 16) & 0x1F); // wide
-    if ((ctrl & 0x00008000) != 0) return 0x20 + ((ctrl >>  8) & 0x1F); // letterbox
-    if ((ctrl & 0x00000080) != 0) return 0x20 +  (ctrl        & 0x1F); // pan-scan
+  ///
+  /// For 16:9 content, widescreen streams are preferred so that the subtitle
+  /// data actually present in the VOB is selected. For 4:3 content, the 4:3
+  /// stream is preferred because it is always present when declared.
+  static int? _pgcSubId(int ctrl, {bool prefer16x9 = false}) {
+    if (prefer16x9) {
+      if ((ctrl & 0x00800000) != 0) return 0x20 + ((ctrl >> 16) & 0x1F); // wide (prefer)
+      if ((ctrl & 0x80000000) != 0) return 0x20 + ((ctrl >> 24) & 0x1F); // 4:3 fallback
+      if ((ctrl & 0x00008000) != 0) return 0x20 + ((ctrl >>  8) & 0x1F); // letterbox
+      if ((ctrl & 0x00000080) != 0) return 0x20 +  (ctrl        & 0x1F); // pan-scan
+    } else {
+      if ((ctrl & 0x80000000) != 0) return 0x20 + ((ctrl >> 24) & 0x1F); // 4:3 (prefer)
+      if ((ctrl & 0x00800000) != 0) return 0x20 + ((ctrl >> 16) & 0x1F); // wide
+      if ((ctrl & 0x00008000) != 0) return 0x20 + ((ctrl >>  8) & 0x1F); // letterbox
+      if ((ctrl & 0x00000080) != 0) return 0x20 +  (ctrl        & 0x1F); // pan-scan
+    }
     return null;
   }
 
   // Exposed for unit tests only.
-  static int? pgcSubIdForTest(int ctrl) => _pgcSubId(ctrl);
+  static int? pgcSubIdForTest(int ctrl, {bool prefer16x9 = false}) =>
+      _pgcSubId(ctrl, prefer16x9: prefer16x9);
 
   static String _readAsciiFixed(Uint8List data, int offset, int length) {
     if (offset + length > data.length) return '';
