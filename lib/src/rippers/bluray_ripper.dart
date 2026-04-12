@@ -39,7 +39,28 @@ class BlurayRipper {
       // AACS/BD+ detection
       final isEncrypted = await _detectEncryption(mountPath);
       if (isEncrypted) {
-        if (!hasLibbluray) {
+        // Detect 4K UHD (AACS 2.0) via HEVC video stream in first title's CLPI.
+        var isUhd = false;
+        if (selected.isNotEmpty) {
+          final bdmvPath  = p.join(mountPath, 'BDMV');
+          final clipNames = await _getMplsClips(
+            File(p.join(bdmvPath, 'PLAYLIST', '${selected.first.playlist}.mpls')),
+          );
+          if (clipNames.isNotEmpty) {
+            final clpiInfo = await _parseClpi(
+              File(p.join(bdmvPath, 'CLIPINF', '${clipNames.first}.clpi')),
+            );
+            isUhd = clpiInfo?.hasHevc ?? false;
+          }
+        }
+
+        if (isUhd) {
+          stderr.writeln('');
+          stderr.writeln('   ⚠  4K Ultra HD Blu-ray gedetecteerd (AACS 2.0).');
+          stderr.writeln('   libaacs en libbluray ondersteunen alleen AACS 1.0 (standaard Blu-ray).');
+          stderr.writeln('');
+          return null;
+        } else if (!hasLibbluray) {
           stderr.writeln('');
           stderr.writeln('   ⚠  Encrypted Blu-ray detected and ffmpeg lacks libbluray.');
           for (final line in const [
@@ -310,7 +331,7 @@ class BlurayRipper {
     0x06: '5.1',  0x09: '7.1', 0x0C: '7.1',
   };
 
-  static Future<({List<String> audioLangs, List<String> subtitleLangs, Set<int> lpcmAudioIndices, List<String> audioTitles})?> _parseClpi(
+  static Future<({List<String> audioLangs, List<String> subtitleLangs, Set<int> lpcmAudioIndices, List<String> audioTitles, bool hasHevc})?> _parseClpi(
     File clpiFile,
   ) async {
     final Uint8List data;
@@ -334,6 +355,7 @@ class BlurayRipper {
     final subtitleLangs    = <String>[];
     final lpcmAudioIndices = <int>{};
     final audioTitles      = <String>[];
+    var   hasHevc          = false;
 
     // First program sequence contains all streams
     final seqOff = progOff + 6;
@@ -346,6 +368,9 @@ class BlurayRipper {
         if (strmOff + 4 > data.length) break;
         final entryLen   = data[strmOff + 2];
         final codingType = data[strmOff + 3];
+
+        // Video: MPEG-1 (0x01), MPEG-2 (0x02), VC-1 (0xEA), AVC (0x1B), HEVC (0x24)
+        if (codingType == 0x24) hasHevc = true;
 
         // Audio: LPCM (0x80), AC3 (0x81), DTS (0x82), TrueHD (0x83),
         //        AC3+ (0x84), DTS-HD HR (0x85), DTS-HD MA (0x86),
@@ -378,7 +403,7 @@ class BlurayRipper {
       }
     }
 
-    return (audioLangs: audioLangs, subtitleLangs: subtitleLangs, lpcmAudioIndices: lpcmAudioIndices, audioTitles: audioTitles);
+    return (audioLangs: audioLangs, subtitleLangs: subtitleLangs, lpcmAudioIndices: lpcmAudioIndices, audioTitles: audioTitles, hasHevc: hasHevc);
   }
 
   // ---------------------------------------------------------------------------
