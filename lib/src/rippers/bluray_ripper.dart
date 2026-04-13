@@ -98,7 +98,7 @@ class BlurayRipper {
 
       // Phase 2: rip
       for (final title in selected) {
-        await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!);
+        await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!, discTitle);
       }
       return null;
     });
@@ -416,8 +416,9 @@ class BlurayRipper {
     String mountPath,
     bool useLibbluray,
     ({List<String> audioLangs, List<String> subLangs}) langs,
+    String discTitle,
   ) async {
-    final outFile = File(p.join(outDir.path, title.filename));
+    final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
     stdout.writeln('── Ripping: playlist ${title.playlist} → ${outFile.path}');
 
     if (!await confirmOverwrite(outFile, force: options.force)) return;

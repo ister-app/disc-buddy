@@ -146,9 +146,11 @@ Future<void> _ripDVD(RipOptions opts, {bool isIso = false}) async {
     final angleStr = title.totalAngles > 1
         ? '  (angle ${title.pgcIndex + 1}/${title.totalAngles})'
         : '';
+    final nc = title.chapters.length;
     stdout.writeln(
       '  ${title.displayKey.padLeft(4)}: ${title.durationLabel}'
-      '  $na audio  ${ns.toString().padLeft(2)} sub$angleStr',
+      '  $na audio  ${ns.toString().padLeft(2)} sub'
+      '  ${nc.toString().padLeft(2)} ch$angleStr',
     );
   }
 
@@ -219,9 +221,11 @@ Future<void> _ripBluray(RipOptions opts, {bool isIso = false}) async {
   for (final title in titles) {
     final na = title.audioCount;
     final ns = title.subtitleCount;
+    final nc = title.chapters.length;
     stdout.writeln(
       '  ${title.index.toString().padLeft(3)}: ${title.durationLabel}'
       '  $na audio  ${ns.toString().padLeft(2)} sub'
+      '  ${nc.toString().padLeft(2)} ch'
       '  [${title.playlist}]',
     );
   }

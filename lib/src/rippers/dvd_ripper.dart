@@ -53,7 +53,7 @@ class DVDRipper {
       await _ripWithDvdread(device, discTitle, selected, outDir, langsMap);
     } else {
       stdout.writeln('   (libdvdread not found — VOB concat mode; encrypted discs will fail)');
-      await _ripWithVobConcat(device, selected, outDir, langsMap);
+      await _ripWithVobConcat(device, discTitle, selected, outDir, langsMap);
     }
   }
 
@@ -65,7 +65,7 @@ class DVDRipper {
     Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap,
   ) async {
     for (final title in selected) {
-      final outFile = File(p.join(outDir.path, title.filename));
+      final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
       stdout.writeln('── Ripping: ${title.displayKey} → ${outFile.path}');
 
       if (!await confirmOverwrite(outFile, force: options.force)) continue;
@@ -152,13 +152,14 @@ class DVDRipper {
 
   Future<void> _ripWithVobConcat(
     String device,
+    String discTitle,
     List<DvdTitle> selected,
     Directory outDir,
     Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap,
   ) async {
     await withMountedDisc<Object?>(device, (mountPath) async {
       for (final title in selected) {
-        final outFile = File(p.join(outDir.path, title.filename));
+        final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
         stdout.writeln('── Ripping: ${title.displayKey} → ${outFile.path}');
 
         if (!await confirmOverwrite(outFile, force: options.force)) continue;
