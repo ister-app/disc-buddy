@@ -10,3 +10,11 @@ rip
 
 # Output
 output/
+
+# pubspec overrides (local dependency overrides)
+pubspec_overrides.yaml
+
+# IDE
+.idea/
+.vscode/
+*.iml
