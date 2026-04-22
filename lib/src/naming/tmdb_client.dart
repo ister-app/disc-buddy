@@ -11,6 +11,22 @@ typedef EpisodeInfo = ({
   String airDate,    // "YYYY-MM-DD" or empty
 });
 
+/// A candidate returned by [TmdbClient.searchMovieCandidates].
+typedef MovieCandidate = ({
+  int    id,
+  String title,
+  int?   year,
+  String overview,
+});
+
+/// A candidate returned by [TmdbClient.searchTvCandidates].
+typedef TvCandidate = ({
+  int    id,
+  String name,
+  int?   firstAirYear,
+  String overview,
+});
+
 class TmdbClient {
   static const _base = 'https://api.themoviedb.org/3';
   static const _cacheTtl = Duration(days: 7);
@@ -63,9 +79,13 @@ class TmdbClient {
     } catch (_) {}
   }
 
-  /// Returns (title, releaseYear) for the best-matching movie, or null.
-  Future<(String title, int year)?> searchMovie(String query,
-      {int? year}) async {
+  /// Returns up to [limit] movie candidates for [query], ranked by TMDB
+  /// relevance. Empty list on error.
+  Future<List<MovieCandidate>> searchMovieCandidates(
+    String query, {
+    int? year,
+    int limit = 5,
+  }) async {
     try {
       final uri =
           Uri.parse('$_base/search/movie').replace(queryParameters: _params({
@@ -75,39 +95,72 @@ class TmdbClient {
       final response = await _http
           .get(uri, headers: _headers)
           .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) return [];
       final results =
           (jsonDecode(response.body)['results'] as List?) ?? [];
-      if (results.isEmpty) return null;
-      final first = results.first as Map<String, dynamic>;
-      final releaseYear = int.tryParse(
-              (first['release_date'] as String? ?? '').split('-').first) ??
-          0;
-      return (first['title'] as String, releaseYear);
+      return results.take(limit).map<MovieCandidate>((r) {
+        final m = r as Map<String, dynamic>;
+        final y = int.tryParse(
+            (m['release_date'] as String? ?? '').split('-').first);
+        return (
+          id:       m['id']       as int,
+          title:    m['title']    as String? ?? '',
+          year:     y,
+          overview: m['overview'] as String? ?? '',
+        );
+      }).toList();
     } catch (e) {
       stderr.writeln('   TMDB movie search error: $e');
-      return null;
+      return [];
     }
   }
 
-  /// Returns (seriesId, seriesName) for the best-matching TV show, or null.
-  Future<(int id, String name)?> searchTv(String query) async {
+  /// Returns up to [limit] TV series candidates for [query]. Empty on error.
+  Future<List<TvCandidate>> searchTvCandidates(
+    String query, {
+    int limit = 5,
+  }) async {
     try {
       final uri = Uri.parse('$_base/search/tv')
           .replace(queryParameters: _params({'query': query}));
       final response = await _http
           .get(uri, headers: _headers)
           .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) return [];
       final results =
           (jsonDecode(response.body)['results'] as List?) ?? [];
-      if (results.isEmpty) return null;
-      final first = results.first as Map<String, dynamic>;
-      return (first['id'] as int, first['name'] as String);
+      return results.take(limit).map<TvCandidate>((r) {
+        final m = r as Map<String, dynamic>;
+        final y = int.tryParse(
+            (m['first_air_date'] as String? ?? '').split('-').first);
+        return (
+          id:           m['id']       as int,
+          name:         m['name']     as String? ?? '',
+          firstAirYear: y,
+          overview:     m['overview'] as String? ?? '',
+        );
+      }).toList();
     } catch (e) {
       stderr.writeln('   TMDB TV search error: $e');
-      return null;
+      return [];
     }
+  }
+
+  /// Returns (title, releaseYear) for the best-matching movie, or null.
+  Future<(String title, int year)?> searchMovie(String query,
+      {int? year}) async {
+    final candidates = await searchMovieCandidates(query, year: year, limit: 1);
+    if (candidates.isEmpty) return null;
+    final c = candidates.first;
+    return (c.title, c.year ?? 0);
+  }
+
+  /// Returns (seriesId, seriesName) for the best-matching TV show, or null.
+  Future<(int id, String name)?> searchTv(String query) async {
+    final candidates = await searchTvCandidates(query, limit: 1);
+    if (candidates.isEmpty) return null;
+    final c = candidates.first;
+    return (c.id, c.name);
   }
 
   /// Returns the number of seasons for a TV series, or null on error.

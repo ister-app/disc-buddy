@@ -43,7 +43,7 @@ class SubtitleExtractor {
     required this.subtileOcr,
   });
 
-  Future<void> extractAll(File mkvFile) async {
+  Future<void> extractAll(File mkvFile, {Set<String>? languages}) async {
     final streams = await _probeSubtitles(mkvFile);
     if (streams.isEmpty) {
       stdout.writeln('   No subtitle streams found.');
@@ -56,6 +56,10 @@ class SubtitleExtractor {
       final codec   = stream['codec_name']!.toLowerCase();
       final rawLang = stream['language']!;
       final lang    = _toLangCode(rawLang);
+      if (languages != null && !languages.contains(lang)) {
+        subIdx++;
+        continue;
+      }
       final srtFile = File('$stem.$lang.srt');
 
       if (await srtFile.exists()) {
@@ -196,7 +200,12 @@ class SubtitleExtractor {
     final streams = await _probeSubtitles(mkvFile);
     if (streams.isEmpty) return null;
 
-    final stream  = streams.first;
+    // Prefer an English subtitle track for identification; fall back to first.
+    final enIdx = streams.indexWhere(
+      (s) => _toLangCode(s['language']!) == 'en',
+    );
+    final subIdx  = enIdx >= 0 ? enIdx : 0;
+    final stream  = streams[subIdx];
     final codec   = stream['codec_name']!.toLowerCase();
     final rawLang = stream['language']!;
     final lang    = _toLangCode(rawLang);
@@ -206,9 +215,9 @@ class SubtitleExtractor {
       final tmpSrt = File('${tmpDir.path}/sub.srt');
       bool ok;
       if (_textCodecs.contains(codec)) {
-        ok = await _extractText(mkvFile, 0, tmpSrt);
+        ok = await _extractText(mkvFile, subIdx, tmpSrt);
       } else if (_imageCodecs.contains(codec)) {
-        ok = await _extractImage(mkvFile, 0, rawLang, tmpSrt);
+        ok = await _extractImage(mkvFile, subIdx, rawLang, tmpSrt);
       } else {
         return null;
       }

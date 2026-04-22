@@ -4,13 +4,14 @@ import 'package:path/path.dart' as p;
 import '../ffmpeg/ffmpeg_runner.dart';
 import '../models/bluray_title.dart';
 import '../models/rip_options.dart';
+import 'video_disc_ripper.dart';
 import '../utils/file_utils.dart';
 import '../utils/languages.dart';
 import '../utils/mount.dart';
 import '../utils/progress.dart';
 import '../utils/sanitize.dart';
 
-class BlurayRipper {
+class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   final RipOptions options;
   final FfmpegRunner _ffmpeg;
 
@@ -18,7 +19,13 @@ class BlurayRipper {
 
   /// Scans the Blu-ray via MPLS and CLPI files (pure Dart).
   /// Returns null on error.
-  Future<({String discTitle, List<BlurayTitle> titles})?> loadTitles() async {
+  ///
+  /// If [mountPath] is provided the disc is assumed to be already mounted there
+  /// and no additional mount/unmount cycle is performed.
+  @override
+  Future<({String discTitle, List<BlurayTitle> titles})?> loadTitles(
+      {String? mountPath}) async {
+    if (mountPath != null) return _scanMounted(mountPath);
     return withMountedDisc(
       options.device!,
       (mp) => _scanMounted(mp),
@@ -28,80 +35,84 @@ class BlurayRipper {
 
   /// Rips the selected titles as lossless MKV.
   /// Uses libbluray (via ffmpeg) if available, otherwise direct M2TS concat.
-  Future<void> rip(String discTitle, List<BlurayTitle> selected) async {
-    final device = options.device!;
+  ///
+  /// If [mountPath] is provided the disc is assumed to be already mounted there
+  /// and no additional mount/unmount cycle is performed.
+  @override
+  Future<void> rip(String discTitle, List<BlurayTitle> selected,
+      {String? mountPath}) async {
     final outDir = Directory(p.join(options.outputDir, sanitizeFilename(discTitle)));
     await outDir.create(recursive: true);
 
     final hasLibbluray = await _checkLibbluray();
 
-    await withMountedDisc<Object?>(device, (mountPath) async {
-      // AACS/BD+ detection
-      final isEncrypted = await _detectEncryption(mountPath);
-      if (isEncrypted) {
-        // Detect 4K UHD (AACS 2.0) via HEVC video stream in first title's CLPI.
-        var isUhd = false;
-        if (selected.isNotEmpty) {
-          final bdmvPath  = p.join(mountPath, 'BDMV');
-          final clipNames = await _getMplsClips(
-            File(p.join(bdmvPath, 'PLAYLIST', '${selected.first.playlist}.mpls')),
-          );
-          if (clipNames.isNotEmpty) {
-            final clpiInfo = await _parseClpi(
-              File(p.join(bdmvPath, 'CLIPINF', '${clipNames.first}.clpi')),
-            );
-            isUhd = clpiInfo?.hasHevc ?? false;
-          }
+    if (mountPath != null) {
+      await _ripMounted(mountPath, discTitle, selected, outDir, hasLibbluray);
+    } else {
+      await withMountedDisc<Object?>(options.device!, (mp) =>
+          _ripMounted(mp, discTitle, selected, outDir, hasLibbluray));
+    }
+  }
+
+  Future<void> _ripMounted(
+    String mountPath,
+    String discTitle,
+    List<BlurayTitle> selected,
+    Directory outDir,
+    bool hasLibbluray,
+  ) async {
+    // AACS/BD+ detection
+    final isEncrypted = await _detectEncryption(mountPath);
+    if (isEncrypted) {
+      // 4K UHD check: use hasHevc cached in the model — no extra CLPI parse needed.
+      final isUhd = selected.isNotEmpty && selected.first.hasHevc;
+
+      if (isUhd) {
+        stderr.writeln('');
+        stderr.writeln('   ⚠  4K Ultra HD Blu-ray gedetecteerd (AACS 2.0).');
+        stderr.writeln('   libaacs en libbluray ondersteunen alleen AACS 1.0 (standaard Blu-ray).');
+        stderr.writeln('');
+        return;
+      } else if (!hasLibbluray) {
+        stderr.writeln('');
+        stderr.writeln('   ⚠  Encrypted Blu-ray detected and ffmpeg lacks libbluray.');
+        for (final line in const [
+          '   Install ffmpeg with libbluray support:',
+          '      sudo dnf install ffmpeg-free --allowerasing   # Fedora RPMFusion',
+          '      or: sudo dnf install ffmpeg-full              # if available',
+          '   For AACS decryption you also need:',
+          '      sudo dnf install libaacs',
+          '      and: ~/.config/aacs/KEYDB.cfg  (from makemkv or oss-blu-ray)',
+        ]) {
+          stderr.writeln(line);
         }
-
-        if (isUhd) {
-          stderr.writeln('');
-          stderr.writeln('   ⚠  4K Ultra HD Blu-ray gedetecteerd (AACS 2.0).');
-          stderr.writeln('   libaacs en libbluray ondersteunen alleen AACS 1.0 (standaard Blu-ray).');
-          stderr.writeln('');
-          return null;
-        } else if (!hasLibbluray) {
-          stderr.writeln('');
-          stderr.writeln('   ⚠  Encrypted Blu-ray detected and ffmpeg lacks libbluray.');
-          for (final line in const [
-            '   Install ffmpeg with libbluray support:',
-            '      sudo dnf install ffmpeg-free --allowerasing   # Fedora RPMFusion',
-            '      or: sudo dnf install ffmpeg-full              # if available',
-            '   For AACS decryption you also need:',
-            '      sudo dnf install libaacs',
-            '      and: ~/.config/aacs/KEYDB.cfg  (from makemkv or oss-blu-ray)',
-          ]) {
-            stderr.writeln(line);
-          }
-          stderr.writeln('');
-        } else if (_findKeydb() == null) {
-          stderr.writeln('');
-          stderr.writeln('   ⚠  Encrypted Blu-ray — libbluray present but no KEYDB.cfg.');
-          stderr.writeln('   Place KEYDB.cfg in ~/.config/aacs/ for AACS decryption.');
-          stderr.writeln('');
-        }
+        stderr.writeln('');
+      } else if (_findKeydb() == null) {
+        stderr.writeln('');
+        stderr.writeln('   ⚠  Encrypted Blu-ray — libbluray present but no KEYDB.cfg.');
+        stderr.writeln('   Place KEYDB.cfg in ~/.config/aacs/ for AACS decryption.');
+        stderr.writeln('');
       }
+    }
 
-      if (hasLibbluray) {
-        stdout.writeln('   (libbluray available — AACS decryption active if configured)');
-      } else {
-        stdout.writeln('   (libbluray not found — direct M2TS mode)');
-      }
+    if (hasLibbluray) {
+      stdout.writeln('   (libbluray available — AACS decryption active if configured)');
+    } else {
+      stdout.writeln('   (libbluray not found — direct M2TS mode)');
+    }
 
-      // Phase 1: collect languages for all titles upfront
-      final langsMap = <BlurayTitle, ({List<String> audioLangs, List<String> subLangs})>{};
-      for (final title in selected) {
-        stdout.writeln('── Languages: playlist ${title.playlist} [${title.durationLabel}]');
-        langsMap[title] = _collectLanguages(title, force: options.force);
-      }
-      if (!options.force) stdout.writeln('');
+    // Phase 1: collect languages for all titles upfront
+    final langsMap = <BlurayTitle, ({List<String> audioLangs, List<String> subLangs})>{};
+    for (final title in selected) {
+      stdout.writeln('── Languages: playlist ${title.playlist} [${title.durationLabel}]');
+      langsMap[title] = _collectLanguages(title, force: options.force);
+    }
+    if (!options.force) stdout.writeln('');
 
-      // Phase 2: rip
-      for (final title in selected) {
-        await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!, discTitle);
-      }
-      return null;
-    });
+    // Phase 2: rip
+    for (final title in selected) {
+      await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!, discTitle);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -267,16 +278,22 @@ class BlurayRipper {
 
     final duration = Duration(milliseconds: (totalTicks / 45.0).round());
 
-    // Stream info from the first CLPI
-    var audioLangs    = <String>[];
-    var subtitleLangs = <String>[];
+    // Stream info from the first CLPI — parsed once here and stored in the model.
+    var audioLangs       = <String>[];
+    var subtitleLangs    = <String>[];
+    var lpcmAudioIndices = <int>{};
+    var audioTitles      = <String>[];
+    var hasHevc          = false;
 
     for (final clipName in clipNames) {
       final clpiFile = File(p.join(bdmvPath, 'CLIPINF', '$clipName.clpi'));
       final info = await _parseClpi(clpiFile);
       if (info != null) {
-        audioLangs    = info.audioLangs;
-        subtitleLangs = info.subtitleLangs;
+        audioLangs       = info.audioLangs;
+        subtitleLangs    = info.subtitleLangs;
+        lpcmAudioIndices = info.lpcmAudioIndices;
+        audioTitles      = info.audioTitles;
+        hasHevc          = info.hasHevc;
         break;
       }
     }
@@ -284,14 +301,18 @@ class BlurayRipper {
     final playlist = p.basenameWithoutExtension(mplsFile.path);
 
     return BlurayTitle(
-      index:         index,
-      playlist:      playlist,
-      duration:      duration,
-      audioCount:    audioLangs.length,
-      subtitleCount: subtitleLangs.length,
-      audioLangs:    audioLangs,
-      subtitleLangs: subtitleLangs,
-      chapters:      chapters,
+      index:            index,
+      playlist:         playlist,
+      duration:         duration,
+      audioCount:       audioLangs.length,
+      subtitleCount:    subtitleLangs.length,
+      audioLangs:       audioLangs,
+      subtitleLangs:    subtitleLangs,
+      chapters:         chapters,
+      clipNames:        clipNames,
+      lpcmAudioIndices: lpcmAudioIndices,
+      audioTitles:      audioTitles,
+      hasHevc:          hasHevc,
     );
   }
 
@@ -426,21 +447,10 @@ class BlurayRipper {
     final bdmvPath   = p.join(mountPath, 'BDMV');
     final playlistNr = int.tryParse(title.playlist) ?? 1;
 
-    // Clip names for direct M2TS and for ffprobe
-    final clipNames = await _getMplsClips(
-      File(p.join(bdmvPath, 'PLAYLIST', '${title.playlist}.mpls')),
-    );
-
-    // Detect LPCM streams via CLPI (works even on encrypted discs;
-    // CLPI files are never encrypted).
-    Set<int> lpcmIdx    = {};
-    List<String> audioTitles = [];
-    if (clipNames.isNotEmpty) {
-      final clpiFile = File(p.join(bdmvPath, 'CLIPINF', '${clipNames.first}.clpi'));
-      final clpiInfo = await _parseClpi(clpiFile);
-      lpcmIdx      = clpiInfo?.lpcmAudioIndices ?? {};
-      audioTitles  = clpiInfo?.audioTitles ?? [];
-    }
+    // Clip names and LPCM info were cached in the model during the scan phase.
+    final clipNames  = title.clipNames;
+    final lpcmIdx    = title.lpcmAudioIndices;
+    final audioTitles = title.audioTitles;
 
     final chapterFile = await writeChapterMetadata(title.chapters, title.duration);
 
@@ -592,36 +602,6 @@ class BlurayRipper {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
-
-  /// Reads clip names (5 digits) from an MPLS file.
-  static Future<List<String>> _getMplsClips(File mplsFile) async {
-    final Uint8List data;
-    try {
-      data = await mplsFile.readAsBytes();
-    } catch (_) {
-      return [];
-    }
-    if (data.length < 20) return [];
-    if (String.fromCharCodes(data.sublist(0, 4)) != 'MPLS') return [];
-
-    final bd             = ByteData.sublistView(data);
-    final playlistOffset = bd.getUint32(8, Endian.big);
-    if (playlistOffset + 10 > data.length) return [];
-
-    final nrItems    = bd.getUint16(playlistOffset + 6, Endian.big);
-    var   itemOffset = playlistOffset + 10;
-    final clipNames  = <String>[];
-
-    for (var i = 0; i < nrItems; i++) {
-      if (itemOffset + 20 > data.length) break;
-      final itemLen = bd.getUint16(itemOffset, Endian.big);
-      if (itemLen < 16) break;
-      clipNames.add(String.fromCharCodes(data.sublist(itemOffset + 2, itemOffset + 7)));
-      itemOffset += 2 + itemLen;
-    }
-
-    return clipNames;
-  }
 
   /// Checks whether ffmpeg has libbluray support.
   Future<bool> _checkLibbluray() async {

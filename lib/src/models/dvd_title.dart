@@ -1,4 +1,5 @@
 import '../utils/duration_ext.dart';
+import 'video_title.dart';
 
 class AudioTrack {
   final int index;       // IFO index (0-based)
@@ -44,17 +45,17 @@ class SubtitleTrack {
   String get label => language.isNotEmpty ? language.toUpperCase() : '??';
 }
 
-class DvdTitle {
+class DvdTitle implements VideoTitle {
   final int vtsNumber;    // VTS file number (1-based, for VOB files)
   final int pgcIndex;     // 0-based PGC index within the VTS (= angle - 1)
   final int totalAngles;  // number of PGCs in this VTS (1 = no angles)
-  final Duration duration;
+  @override final Duration duration;
   final List<AudioTrack> audioTracks;
   final List<SubtitleTrack> subtitleTracks;
   /// Cells for this PGC (first/last sector), empty = read linearly.
   final List<({int first, int last})> cells;
   /// Chapter start timestamps (relative to title start), one per program.
-  final List<Duration> chapters;
+  @override final List<Duration> chapters;
   /// PGC Color Lookup Table: 16 RGB values (0xRRGGBB). Empty if unavailable.
   final List<int> clut;
   /// Video frame height in lines (480 = NTSC, 576 = PAL). Used in IDX header.
@@ -74,16 +75,32 @@ class DvdTitle {
   });
 
   /// Display key: "7" or "7.1" for multiple angles.
+  @override
   String get displayKey =>
       totalAngles > 1 ? '$vtsNumber.${pgcIndex + 1}' : '$vtsNumber';
 
   /// "HH:MM:SS"
+  @override
   String get durationLabel => duration.hmsLabel;
 
   /// "title_07.mkv" or "title_07_angle2.mkv"
+  @override
   String get filename {
     final n = vtsNumber.toString().padLeft(2, '0');
     if (totalAngles > 1) return 'title_${n}_angle${pgcIndex + 1}.mkv';
     return 'title_$n.mkv';
   }
+
+  @override int     get audioStreamCount    => audioTracks.length;
+  @override int     get subtitleStreamCount => subtitleTracks.length;
+  @override bool    get hasSubtitles        => subtitleTracks.isNotEmpty;
+  @override bool    get isPrimary           => pgcIndex == 0;
+  @override String? get extraInfo =>
+      totalAngles > 1 ? '  (angle ${pgcIndex + 1}/$totalAngles)' : null;
+
+  /// Returns true if [key] matches this title's VTS number and this is the
+  /// primary angle — allows users to type "3" to select VTS 3, angle 1.
+  @override
+  bool matchesKey(String key) =>
+      vtsNumber.toString() == key && pgcIndex == 0;
 }

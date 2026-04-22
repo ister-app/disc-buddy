@@ -2,17 +2,18 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:path/path.dart' as p;
-import '../device/dvdread.dart';
+import '../device/dvdread.dart' show DVDSession, dvdreadAvailable;
 import '../ffmpeg/ffmpeg_runner.dart';
 import '../models/dvd_title.dart';
 import '../models/rip_options.dart';
+import 'video_disc_ripper.dart';
 import '../utils/file_utils.dart';
 import '../utils/languages.dart';
 import '../utils/mount.dart';
 import '../utils/progress.dart';
 import '../utils/sanitize.dart';
 
-class DVDRipper {
+class DVDRipper implements VideoDiscRipper<DvdTitle> {
   final RipOptions options;
   final FfmpegRunner _ffmpeg;
 
@@ -21,7 +22,13 @@ class DVDRipper {
   /// Scans the DVD via the IFO parser.
   /// Returns null on error.
   /// [titles] is sorted by VTS number + PGC index.
-  Future<({String discTitle, List<DvdTitle> titles})?> loadTitles() async {
+  ///
+  /// If [mountPath] is provided the disc is assumed to be already mounted there
+  /// and no additional mount/unmount cycle is performed.
+  @override
+  Future<({String discTitle, List<DvdTitle> titles})?> loadTitles(
+      {String? mountPath}) async {
+    if (mountPath != null) return _scanMounted(mountPath, mountPath);
     return withMountedDisc(
       options.device!,
       (mp) => _scanMounted(mp, mp),
@@ -33,7 +40,12 @@ class DVDRipper {
   /// If libdvdread is available (+ libdvdcss for CSS discs): uses
   /// DVDReadBlocks via pipe → ffmpeg stdin (encrypted or not).
   /// Otherwise: VOB concat fallback (only for unencrypted discs).
-  Future<void> rip(String discTitle, List<DvdTitle> selected) async {
+  ///
+  /// If [mountPath] is provided the disc is assumed to be already mounted there
+  /// (used by the VOB concat path only; dvdread uses the device directly).
+  @override
+  Future<void> rip(String discTitle, List<DvdTitle> selected,
+      {String? mountPath}) async {
     final device = options.device!;
 
     final outDir = Directory(p.join(options.outputDir, sanitizeFilename(discTitle)));
@@ -53,7 +65,8 @@ class DVDRipper {
       await _ripWithDvdread(device, discTitle, selected, outDir, langsMap);
     } else {
       stdout.writeln('   (libdvdread not found — VOB concat mode; encrypted discs will fail)');
-      await _ripWithVobConcat(device, discTitle, selected, outDir, langsMap);
+      await _ripWithVobConcat(device, discTitle, selected, outDir, langsMap,
+          mountPath: mountPath);
     }
   }
 
@@ -64,6 +77,19 @@ class DVDRipper {
     Directory outDir,
     Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap,
   ) async {
+    // Open the disc once for all titles so libdvdcss only retrieves CSS keys once.
+    final session = DVDSession.open(device);
+    if (session == null) {
+      stderr.writeln('   Cannot open disc — libdvdread unavailable.');
+      return;
+    }
+
+    // Cache scan results per VTS number.
+    // SID order is fixed within a VTS across angles on all commercial DVDs
+    // (streams are interleaved in a stable order), so one scan per VTS suffices.
+    final scanCache = <int, ({List<int> sidOrder, int lastSidByteOffset})>{};
+
+    try {
     for (final title in selected) {
       final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
       stdout.writeln('── Ripping: ${title.displayKey} → ${outFile.path}');
@@ -77,28 +103,24 @@ class DVDRipper {
       // declares in the IFO. Scanning broader sets (all 0x80–0x8F) picks up
       // spurious SIDs from other angles in multi-angle VOBs, inflating the
       // audio index count and causing invalid -map arguments.
-      // _scanVobSids caps at 256 MB so that discs whose IFO-declared subtitle
-      // SIDs don't exist in the VOB never cause a full-file scan.
       final wantedSids = <int>{
         ...title.audioTracks.map((a) => a.streamId),
         ...title.subtitleTracks.map((s) => s.streamId),
       };
 
-      // Pass 1: scan the full VOB stream for SID order + position of last SID.
-      // Uses a separate streamVobs call so no data needs to be buffered.
-      final scanStream = streamVobs(device, title.vtsNumber, cells: cells);
-      if (scanStream == null) {
-        stderr.writeln('   streamVobs returned null unexpectedly — skipping.');
-        continue;
+      // Pass 1: scan for SID order — reuse cached result if this VTS was already
+      // scanned. Exits early once all wanted SIDs are found.
+      final ({List<int> sidOrder, int lastSidByteOffset}) scan;
+      if (scanCache.containsKey(title.vtsNumber)) {
+        scan = scanCache[title.vtsNumber]!;
+      } else {
+        final scanStream = session.stream(title.vtsNumber, cells: cells);
+        scan = await _scanVobSids(scanStream, wantedSids);
+        scanCache[title.vtsNumber] = scan;
       }
-      final scan = await _scanVobSids(scanStream, wantedSids);
 
       // Pass 2: rip with a probesize that covers the full scan depth.
-      final ripStream = streamVobs(device, title.vtsNumber, cells: cells);
-      if (ripStream == null) {
-        stderr.writeln('   streamVobs returned null unexpectedly — skipping.');
-        continue;
-      }
+      final ripStream = session.stream(title.vtsNumber, cells: cells);
 
       final mapAndMetaArgs = _buildMapAndMetaArgs(
         title:      title,
@@ -148,6 +170,9 @@ class DVDRipper {
         });
       }
     }
+    } finally {
+      session.close();
+    }
   }
 
   Future<void> _ripWithVobConcat(
@@ -155,16 +180,17 @@ class DVDRipper {
     String discTitle,
     List<DvdTitle> selected,
     Directory outDir,
-    Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap,
-  ) async {
-    await withMountedDisc<Object?>(device, (mountPath) async {
+    Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap, {
+    String? mountPath,
+  }) async {
+    Future<Object?> doRip(String mp) async {
       for (final title in selected) {
         final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
         stdout.writeln('── Ripping: ${title.displayKey} → ${outFile.path}');
 
         if (!await confirmOverwrite(outFile, force: options.force)) continue;
 
-        final vobFiles = _collectVobs(mountPath, title.vtsNumber);
+        final vobFiles = _collectVobs(mp, title.vtsNumber);
         if (vobFiles.isEmpty) {
           stderr.writeln('   No VOB files found for ${title.displayKey}.');
           continue;
@@ -230,7 +256,13 @@ class DVDRipper {
         }
       }
       return null;
-    });
+    }
+
+    if (mountPath != null) {
+      await doRip(mountPath);
+    } else {
+      await withMountedDisc<Object?>(device, doRip);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -257,8 +289,16 @@ class DVDRipper {
     }
 
     if (numVts == 0) {
-      stderr.writeln('Error: no titles found on the DVD.');
-      return null;
+      // VMG reports 0 VTS — fall back to counting IFO files on disk.
+      var n = 0;
+      while (File(p.join(videoTs, 'VTS_${(n + 1).toString().padLeft(2, '0')}_0.IFO')).existsSync()) {
+        n++;
+      }
+      if (n == 0) {
+        stderr.writeln('Error: no titles found on the DVD.');
+        return null;
+      }
+      numVts = n;
     }
 
     final titles = <DvdTitle>[];
@@ -267,7 +307,10 @@ class DVDRipper {
       titles.addAll(vts);
     }
 
-    if (titles.isEmpty) return null;
+    if (titles.isEmpty) {
+      stderr.writeln('Error: no titles found on the DVD (all PGCs too short or unreadable).');
+      return null;
+    }
 
     titles.sort((a, b) {
       final v = a.vtsNumber.compareTo(b.vtsNumber);
@@ -465,31 +508,109 @@ class DVDRipper {
         final nrPrograms = data[pgc + 2];
         int bcdV(int b) => ((b >> 4) & 0xF) * 10 + (b & 0xF);
 
-        // Read each cell: sector range + duration (for chapter timing).
-        final cellSecs = <int>[];
+        // Read each cell's sector range and playback duration.
+        final allFirstSectors = <int>[];
+        final allLastSectors  = <int>[];
+        final allCellSecs     = <int>[];
         for (var c = 0; c < nrCells; c++) {
           final coff = cpbitOff + c * 24;
           if (coff + 24 > data.length) break;
-          final first = bd.getUint32(coff + 8,  Endian.big);
-          final last  = bd.getUint32(coff + 20, Endian.big);
+          allFirstSectors.add(bd.getUint32(coff + 8,  Endian.big));
+          allLastSectors.add(bd.getUint32(coff + 20, Endian.big));
           final h = bcdV(data[coff + 4]);
           final m = bcdV(data[coff + 5]);
           final s = bcdV(data[coff + 6]);
-          cellSecs.add(h * 3600 + m * 60 + s);
-          if (last >= first) cells.add((first: first, last: last));
+          allCellSecs.add(h * 3600 + m * 60 + s);
         }
 
-        // Cumulative cell start times → chapter timestamps via PGMAP.
+        // Copy-protection inserts dummy cells (zero or tiny BCD duration,
+        // referencing other angles' sectors) around the real content.
+        // Real cells are identified via the PGMAP:
+        //
+        //   firstReal: first PGMAP entry with non-zero BCD duration → scan
+        //              backwards to also include any adjacent non-zero
+        //              pre-chapter lead-in cells (not in PGMAP but played
+        //              sequentially before the first chapter on hardware).
+        //   lastReal:  last PGMAP entry, then extended while non-zero
+        //              continuation cells remain (covers genuine multi-cell
+        //              last chapters on unprotected discs).
+        int firstReal = 0;
+        int lastReal  = allCellSecs.isNotEmpty ? allCellSecs.length - 1 : 0;
         if (nrPrograms > 0) {
+          final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
+          final pgmapOff = pgc + pgmapRel;
+          if (pgmapOff < data.length) {
+            // Find first PGMAP cell with non-zero BCD duration.
+            var pgmapAnchor = -1;
+            for (var p = 0; p < nrPrograms && pgmapOff + p < data.length; p++) {
+              final idx = data[pgmapOff + p] - 1;
+              if (idx >= 0 && idx < allCellSecs.length && allCellSecs[idx] > 0) {
+                pgmapAnchor = idx;
+                break;
+              }
+            }
+            if (pgmapAnchor < 0) {
+              // All PGMAP cells are zero-duration; fall back to first entry.
+              firstReal =
+                  (data[pgmapOff] - 1).clamp(0, allCellSecs.length - 1);
+            } else {
+              // Include any non-zero pre-chapter lead-in cells before the
+              // first substantial chapter cell.
+              firstReal = pgmapAnchor;
+              while (firstReal > 0 && allCellSecs[firstReal - 1] > 0) {
+                firstReal--;
+              }
+            }
+
+            // lastReal: last PGMAP cell, then extend while non-zero cells
+            // remain and accumulated duration is still below durSeconds.
+            final lastPgmapIdx = pgmapOff + nrPrograms - 1 < data.length
+                ? (data[pgmapOff + nrPrograms - 1] - 1)
+                    .clamp(firstReal, allCellSecs.length - 1)
+                : firstReal;
+            lastReal = lastPgmapIdx;
+            var accum = 0;
+            for (var i = firstReal; i <= lastReal; i++) {
+              accum += allCellSecs[i];
+            }
+            var next = lastReal + 1;
+            while (next < allCellSecs.length &&
+                   allCellSecs[next] > 0 &&
+                   accum < durSeconds) {
+              accum += allCellSecs[next];
+              lastReal = next;
+              next++;
+            }
+          }
+        }
+
+        // originalToFiltered[i] = filtered index of original cell i, or -1 if
+        // excluded. Used to map PGMAP cell references to filtered chapter times.
+        final originalToFiltered = List.filled(allCellSecs.length, -1);
+        var filteredCount = 0;
+        final cellSecs = <int>[];
+        for (var i = firstReal; i <= lastReal; i++) {
+          final first = allFirstSectors[i];
+          final last  = allLastSectors[i];
+          if (last >= first) cells.add((first: first, last: last));
+          originalToFiltered[i] = filteredCount++;
+          cellSecs.add(allCellSecs[i]);
+        }
+
+        // Cumulative filtered cell start times → chapter timestamps via PGMAP.
+        if (nrPrograms > 0 && cellSecs.isNotEmpty) {
           final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
           final pgmapOff = pgc + pgmapRel;
           final cellStarts = <int>[0];
           for (final d in cellSecs) { cellStarts.add(cellStarts.last + d); }
           for (var prog = 0; prog < nrPrograms; prog++) {
             if (pgmapOff + prog >= data.length) break;
-            final firstCell = data[pgmapOff + prog] - 1; // 0-based
-            if (firstCell >= 0 && firstCell < cellStarts.length) {
-              chapters.add(Duration(seconds: cellStarts[firstCell]));
+            final origCell = data[pgmapOff + prog] - 1; // 0-based original index
+            final filtCell = (origCell >= 0 && origCell < originalToFiltered.length)
+                ? originalToFiltered[origCell]
+                : -1;
+            if (filtCell >= 0 && filtCell < cellStarts.length) {
+              chapters.add(Duration(seconds: cellStarts[filtCell]));
             }
           }
         }
@@ -580,13 +701,12 @@ class DVDRipper {
     // Die Hard 4.0 SE has an audio SID (0x85) at 281.9 MB and First Blood 3
     // has its only subtitle SID at 518.8 MB — both must be within the cap so
     // ffmpeg sees them during probing and doesn't discover them mid-encode.
-    // const kScanCap  = 600 * 1024 * 1024;
     const kScanCap  = 60000 * 1024 * 1024;
     const carrySize = 512;
     final order   = <int>[];
     final seen    = <int>{};
     var   totalBytes              = 0;
-    // var   lastTrackedSidByteOffset = 0; // position of last SID added to order
+    var   lastTrackedSidByteOffset = 0;
     var   carry                   = Uint8List(0);
 
     await for (final chunk in src) {
@@ -594,7 +714,7 @@ class DVDRipper {
         ..setRange(0, carry.length, carry)
         ..setRange(carry.length, carry.length + chunk.length, chunk);
 
-      // final winBase = totalBytes - carry.length;
+      final winBase = totalBytes - carry.length;
       var   i = 0;
 
       while (i < window.length - 9) {
@@ -616,12 +736,12 @@ class DVDRipper {
               if (isWanted || isSubSid) {
                 order.add(sid);
                 seen.add(sid);
-                // lastTrackedSidByteOffset = winBase + sidOff;
+                lastTrackedSidByteOffset = winBase + sidOff;
               }
               if (isWanted) {
                 final wantedSeen = seen.intersection(wantedSids);
                 if (wantedSeen.length == wantedSids.length) {
-                  // return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
+                  return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
                 }
               }
             }
@@ -635,18 +755,12 @@ class DVDRipper {
       }
 
       totalBytes += chunk.length;
-      if (totalBytes >= kScanCap) { // Safety cap — don't scan the entire VOB
-        print('DEBUG: Scan cap reached at $totalBytes bytes');
-        print('DEBUG: Found SIDs: $seen');
-        print('DEBUG: Wanted SIDs: $wantedSids');
-        print('DEBUG: Missing: ${wantedSids.difference(seen)}');
-        break;
-      }
+      if (totalBytes >= kScanCap) break; // Safety cap — don't scan beyond this
       final keepFrom = window.length > carrySize ? window.length - carrySize : 0;
       carry = window.sublist(keepFrom);
     }
 
-    return (sidOrder: order, lastSidByteOffset: totalBytes);
+    return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
   }
 
   // ---------------------------------------------------------------------------

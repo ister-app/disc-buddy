@@ -28,11 +28,28 @@ class LlmClient {
 
   /// Sends a chat request and returns the assistant's reply, or null on error.
   /// [timeout] defaults to 5 minutes; pass a shorter value for quick lookups.
+  /// [maxTokens] caps the generated response length (omit for server default).
+  /// [stop] lists strings that end generation early (e.g. `["}", "\n\n"]`).
+  /// [temperature] overrides the default 0.1; use 0.0 for deterministic output.
+  /// [jsonMode] sets `response_format: {type: json_object}` (Ollama / OpenAI).
   Future<String?> chat(
     List<Map<String, String>> messages, {
     Duration timeout = const Duration(minutes: 5),
+    int? maxTokens,
+    List<String>? stop,
+    double temperature = 0.1,
+    bool jsonMode = false,
   }) async {
     try {
+      final body = <String, dynamic>{
+        'model': model,
+        'messages': messages,
+        'temperature': temperature,
+      };
+      if (maxTokens != null) body['max_tokens'] = maxTokens;
+      if (stop != null && stop.isNotEmpty) body['stop'] = stop;
+      if (jsonMode) body['response_format'] = {'type': 'json_object'};
+
       final response = await _http
           .post(
             Uri.parse('$baseUrl/chat/completions'),
@@ -40,11 +57,7 @@ class LlmClient {
               'Authorization': 'Bearer $apiKey',
               'Content-Type': 'application/json',
             },
-            body: jsonEncode({
-              'model': model,
-              'messages': messages,
-              'temperature': 0.1,
-            }),
+            body: jsonEncode(body),
           )
           .timeout(timeout);
 
@@ -55,8 +68,16 @@ class LlmClient {
       }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final content = (json['choices'] as List?)
-          ?.firstOrNull?['message']?['content'] as String?;
+      final choice = (json['choices'] as List?)?.firstOrNull;
+      final content  = choice?['message']?['content'] as String?;
+      final finish   = choice?['finish_reason'] as String?;
+      if (content == null || content.trim().isEmpty) {
+        final snippet = response.body.length > 400
+            ? response.body.substring(0, 400)
+            : response.body;
+        stderr.writeln('   LLM: empty/null content '
+            '(finish_reason=$finish). Response: $snippet');
+      }
       return content;
     } catch (e) {
       stderr.writeln('   LLM error: $e');

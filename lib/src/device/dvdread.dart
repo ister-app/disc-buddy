@@ -159,38 +159,33 @@ Stream<List<int>> _stream(
   }
 
   try {
-    final file = _dvdOpenFile(dvd, vtsNum, _kReadTitleVobs);
-    if (file == nullptr) {
-      throw Exception('Cannot open VTS $vtsNum on $device');
-    }
+    yield* _streamFromHandle(dvd, vtsNum, cells: cells);
+  } finally {
+    _dvdClose(dvd);
+  }
+}
 
+Stream<List<int>> _streamFromHandle(
+  Pointer<Void> dvd,
+  int vtsNum, {
+  List<({int first, int last})>? cells,
+}) async* {
+  final file = _dvdOpenFile(dvd, vtsNum, _kReadTitleVobs);
+  if (file == nullptr) {
+    throw Exception('Cannot open VTS $vtsNum');
+  }
+
+  try {
+    final buf = calloc<Uint8>(_kChunkBlocks * _kBlockLen);
     try {
-      final buf = calloc<Uint8>(_kChunkBlocks * _kBlockLen);
-      try {
-        if (cells != null && cells.isNotEmpty) {
-          // Cell navigation: read only sectors belonging to this PGC/angle
-          for (final cell in cells) {
-            var offset = cell.first;
-            while (offset <= cell.last) {
-              final toRead = (_kChunkBlocks < cell.last - offset + 1)
-                  ? _kChunkBlocks
-                  : cell.last - offset + 1;
-              final n = _dvdReadBlocks(file, offset, toRead, buf);
-              if (n <= 0) break;
-              final bytes = Uint8List(n * _kBlockLen);
-              for (var i = 0; i < bytes.length; i++) { bytes[i] = buf[i]; }
-              yield bytes;
-              offset += n;
-            }
-          }
-        } else {
-          // Linear read (all blocks)
-          final numBlocks = _dvdFileSize(file);
-          var offset = 0;
-          while (offset < numBlocks) {
-            final toRead = (_kChunkBlocks < numBlocks - offset)
+      if (cells != null && cells.isNotEmpty) {
+        // Cell navigation: read only sectors belonging to this PGC/angle
+        for (final cell in cells) {
+          var offset = cell.first;
+          while (offset <= cell.last) {
+            final toRead = (_kChunkBlocks < cell.last - offset + 1)
                 ? _kChunkBlocks
-                : numBlocks - offset;
+                : cell.last - offset + 1;
             final n = _dvdReadBlocks(file, offset, toRead, buf);
             if (n <= 0) break;
             final bytes = Uint8List(n * _kBlockLen);
@@ -199,13 +194,51 @@ Stream<List<int>> _stream(
             offset += n;
           }
         }
-      } finally {
-        calloc.free(buf);
+      } else {
+        // Linear read (all blocks)
+        final numBlocks = _dvdFileSize(file);
+        var offset = 0;
+        while (offset < numBlocks) {
+          final toRead = (_kChunkBlocks < numBlocks - offset)
+              ? _kChunkBlocks
+              : numBlocks - offset;
+          final n = _dvdReadBlocks(file, offset, toRead, buf);
+          if (n <= 0) break;
+          final bytes = Uint8List(n * _kBlockLen);
+          for (var i = 0; i < bytes.length; i++) { bytes[i] = buf[i]; }
+          yield bytes;
+          offset += n;
+        }
       }
     } finally {
-      _dvdCloseFile(file);
+      calloc.free(buf);
     }
   } finally {
-    _dvdClose(dvd);
+    _dvdCloseFile(file);
   }
+}
+
+/// Keeps a DVD handle open across multiple stream calls so the disc is opened
+/// only once and libdvdcss does not repeat its CSS key-retrieval log per call.
+class DVDSession {
+  final Pointer<Void> _dvd;
+  DVDSession._(this._dvd);
+
+  /// Opens [device] and retrieves CSS keys once.
+  /// Returns null if libdvdread is unavailable or the disc cannot be opened.
+  static DVDSession? open(String device) {
+    if (!dvdreadAvailable) return null;
+    final devPtr = device.toNativeUtf8();
+    final dvd    = _dvdOpenQuiet(devPtr);
+    calloc.free(devPtr);
+    if (dvd == nullptr) return null;
+    return DVDSession._(dvd);
+  }
+
+  /// Streams VOB blocks for [vtsNum], reusing the already-open disc handle.
+  /// Equivalent to [streamVobs] but does not re-open the disc.
+  Stream<List<int>> stream(int vtsNum, {List<({int first, int last})>? cells}) =>
+      _streamFromHandle(_dvd, vtsNum, cells: cells);
+
+  void close() => _dvdClose(_dvd);
 }
