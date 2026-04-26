@@ -28,8 +28,9 @@ class VirtualFileEntry extends DriveEntry {
 }
 
 /// Holds user-added virtual file entries (ISOs, MKVs).
-class VirtualEntriesNotifier extends StateNotifier<List<VirtualEntry>> {
-  VirtualEntriesNotifier() : super([]);
+class VirtualEntriesNotifier extends Notifier<List<VirtualEntry>> {
+  @override
+  List<VirtualEntry> build() => [];
 
   void addIso(String path) {
     if (state.any((e) => e is IsoEntry && e.path == path)) return;
@@ -51,8 +52,8 @@ class VirtualEntriesNotifier extends StateNotifier<List<VirtualEntry>> {
   }
 }
 
-final virtualEntriesProvider = StateNotifierProvider<VirtualEntriesNotifier, List<VirtualEntry>>(
-  (_) => VirtualEntriesNotifier(),
+final virtualEntriesProvider = NotifierProvider<VirtualEntriesNotifier, List<VirtualEntry>>(
+  VirtualEntriesNotifier.new,
 );
 
 /// Real drives polled every 2 seconds.
@@ -78,14 +79,21 @@ final driveListProvider = Provider<AsyncValue<List<DriveEntry>>>((ref) {
   ]);
 });
 
+class _SelectedDriveNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+}
+
 /// ID of the currently selected drive entry.
-final selectedDriveProvider = StateProvider<String?>((ref) => null);
+final selectedDriveProvider = NotifierProvider<_SelectedDriveNotifier, String?>(
+  _SelectedDriveNotifier.new,
+);
 
 /// Always-fresh entry for the selected drive ID, derived from the live drive list.
 final selectedDriveEntryProvider = Provider<DriveEntry?>((ref) {
   final selectedId = ref.watch(selectedDriveProvider);
   if (selectedId == null) return null;
-  final entries = ref.watch(driveListProvider).valueOrNull ?? [];
+  final entries = ref.watch(driveListProvider).value ?? [];
   for (final e in entries) {
     if (e.id == selectedId) return e;
   }

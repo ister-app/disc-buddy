@@ -106,7 +106,7 @@ class _BottomActions extends ConsumerWidget {
 
   Future<void> _pickFile(BuildContext context, WidgetRef ref) async {
     final messenger = ScaffoldMessenger.of(context);
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.any,
       dialogTitle: 'Select file',
     );
@@ -116,7 +116,7 @@ class _BottomActions extends ConsumerWidget {
   }
 
   Future<void> _pickFolder(BuildContext context, WidgetRef ref) async {
-    final path = await FilePicker.platform.getDirectoryPath(
+    final path = await FilePicker.getDirectoryPath(
       dialogTitle: 'Select video directory',
     );
     if (path != null) {

@@ -4,9 +4,11 @@ import 'package:disc_buddy/disc_buddy.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/settings.dart';
 
-class SettingsNotifier extends StateNotifier<Settings> {
-  SettingsNotifier() : super(Settings.defaults()) {
+class SettingsNotifier extends Notifier<Settings> {
+  @override
+  Settings build() {
     _load();
+    return Settings.defaults();
   }
 
   Future<void> _load() async {
@@ -26,8 +28,8 @@ class SettingsNotifier extends StateNotifier<Settings> {
   }
 }
 
-final settingsProvider = StateNotifierProvider<SettingsNotifier, Settings>(
-  (_) => SettingsNotifier(),
+final settingsProvider = NotifierProvider<SettingsNotifier, Settings>(
+  SettingsNotifier.new,
 );
 
 /// Returns true when both mkvextract and subtile-ocr are usable:

@@ -222,16 +222,18 @@ void _ripIsolateMain(_RipJob job) async {
   Isolate.exit();
 }
 
-class RipStateNotifier extends StateNotifier<RipState> {
+class RipStateNotifier extends Notifier<RipState> {
   final String devicePath;
-  final Ref _ref;
   SendPort? _cancelPort;
   Isolate? _spawnedIsolate;
   ReceivePort? _activeReceivePort;
 
-  RipStateNotifier(this.devicePath, this._ref) : super(RipIdle());
+  RipStateNotifier(this.devicePath);
 
-  Settings get _settings => _ref.read(settingsProvider);
+  @override
+  RipState build() => RipIdle();
+
+  Settings get _settings => ref.read(settingsProvider);
 
   void startTitleSelection(String discTitle, List<VideoTitle> titles, Set<String> autoSelected) {
     state = RipTitleSelection(
@@ -731,6 +733,6 @@ class RipStateNotifier extends StateNotifier<RipState> {
   }
 }
 
-final ripStateProvider = StateNotifierProvider.family<RipStateNotifier, RipState, String>(
-  (ref, device) => RipStateNotifier(device, ref),
+final ripStateProvider = NotifierProvider.family<RipStateNotifier, RipState, String>(
+  (device) => RipStateNotifier(device),
 );

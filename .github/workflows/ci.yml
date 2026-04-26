@@ -32,21 +32,21 @@ jobs:
         working-directory: disc_buddy_lib
 
       - name: Compile
-        run: dart compile exe bin/rip.dart -o ../disc-buddy
+        run: dart compile exe bin/rip.dart -o ../disc-buddy-cli-linux-x64
         working-directory: disc_buddy_cli
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: disc-buddy-linux-x64
-          path: disc-buddy
+          name: disc-buddy-cli-linux-x64
+          path: disc-buddy-cli-linux-x64
           retention-days: 30
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: disc-buddy
+          files: disc-buddy-cli-linux-x64
           generate_release_notes: true
 
   build-ui:

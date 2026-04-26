@@ -240,7 +240,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: xdgUserDir('VIDEOS', fallback: r'$HOME/Videos'),
             controller: _videoDir,
             onPick: () async {
-              final path = await FilePicker.platform.getDirectoryPath(
+              final path = await FilePicker.getDirectoryPath(
                 dialogTitle: 'Select video output directory',
               );
               if (path != null) setState(() => _videoDir.text = path);
@@ -251,7 +251,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: xdgUserDir('MUSIC', fallback: r'$HOME/Music'),
             controller: _musicDir,
             onPick: () async {
-              final path = await FilePicker.platform.getDirectoryPath(
+              final path = await FilePicker.getDirectoryPath(
                 dialogTitle: 'Select music output directory',
               );
               if (path != null) setState(() => _musicDir.text = path);

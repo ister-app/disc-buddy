@@ -167,7 +167,7 @@ class _DirRow extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             onPressed: () async {
-              final path = await FilePicker.platform.getDirectoryPath(
+              final path = await FilePicker.getDirectoryPath(
                 dialogTitle: tooltip,
                 initialDirectory: effectiveDir,
               );
