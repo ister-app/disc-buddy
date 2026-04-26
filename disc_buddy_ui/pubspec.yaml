@@ -1,0 +1,30 @@
+name: disc_buddy_ui
+description: Flutter GUI for disc_buddy - rip Audio CDs, DVDs and Blu-rays.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  disc_buddy:
+    path: ../disc_buddy_lib
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+  skeletonizer: ^2.1.3
+  file_picker: ^8.3.7
+  path_provider: ^2.1.5
+  path: ^1.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  riverpod_generator: ^2.6.3
+  build_runner: ^2.4.15
+
+flutter:
+  uses-material-design: true

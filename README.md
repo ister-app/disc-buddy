@@ -1,12 +1,22 @@
 # disc-buddy
 
-A Dart CLI for ripping Audio CDs, DVDs, and Blu-rays on Linux.
+Rip Audio CDs, DVDs, and Blu-rays on Linux — available as a CLI tool and a Flutter desktop GUI.
 
 - **Audio CD** → FLAC, with metadata from MusicBrainz / CDDB / CD-TEXT and cover art from the Cover Art Archive
 - **DVD** → lossless MKV via libdvdread (CSS decryption) or VOB concat fallback
 - **Blu-ray** → lossless MKV via libbluray (AACS/BD+) or direct M2TS concat fallback
 
 Drive detection updates in real time using `udevadm monitor` and the `CDROM_DRIVE_STATUS` ioctl.
+
+---
+
+## Packages
+
+| Package | Path | Description |
+|---------|------|-------------|
+| `disc_buddy` | `disc_buddy_lib/` | Pure-Dart library — disc parsing, ripping, metadata, naming |
+| `disc_buddy_cli` | `disc_buddy_cli/` | CLI binary |
+| `disc_buddy_ui` | `disc_buddy_ui/` | Flutter desktop GUI |
 
 ---
 
@@ -22,11 +32,11 @@ Drive detection updates in real time using `udevadm monitor` and the `CDROM_DRIV
 | `libbluray` + `KEYDB.cfg` (optional) | AACS decryption on encrypted Blu-rays |
 | `discid` (optional) | accurate MusicBrainz disc ID lookup |
 
-**Build:**
+**Build (CLI):** Dart SDK ≥ 3.11
 
-- Dart SDK ≥ 3.11
+**Build (UI):** Flutter stable channel
 
-Install dependencies on Fedora:
+Install runtime dependencies on Fedora:
 
 ```bash
 sudo dnf install ffmpeg lsblk util-linux udev libdvdread libbluray libaacs discid
@@ -37,21 +47,38 @@ sudo dnf install ffmpeg lsblk util-linux udev libdvdread libbluray libaacs disci
 
 ## Build & run
 
+### CLI
+
 ```bash
 dart pub get
-dart run bin/rip.dart [options]
+dart run disc_buddy_cli/bin/rip.dart [options]
 ```
 
 Or compile to a native binary:
 
 ```bash
-dart compile exe bin/rip.dart -o disc-buddy
-./disc-buddy [options]
+dart compile exe disc_buddy_cli/bin/rip.dart -o disc-buddy-cli-linux-x64
+./disc-buddy-cli-linux-x64 [options]
+```
+
+### UI
+
+```bash
+cd disc_buddy_ui
+flutter pub get
+flutter run -d linux
+```
+
+Or build a release bundle:
+
+```bash
+flutter build linux --release
+# Output: disc_buddy_ui/build/linux/x64/release/bundle/
 ```
 
 ---
 
-## Usage
+## CLI usage
 
 ```
 Usage: disc-buddy [options]
@@ -140,29 +167,41 @@ final bytes = await CoverArt.fetchFront(releaseMbid);
 ## Project layout
 
 ```
-bin/
-  rip.dart               Entry point; CLI argument parsing and top-level flow
-lib/src/
-  cli/
-    menu.dart            Drive selection menu (real-time udevadm monitor)
-    title_selector.dart  Auto-selection logic for DVD and Blu-ray titles
-  device/
-    drive_detector.dart  Lists optical drives via lsblk + udevadm
-    drive_status.dart    CDROM_DRIVE_STATUS ioctl (tray open / loading / no disc)
-    disc_type_detector.dart  Detects Audio CD / DVD / Blu-ray via udevadm
-    cdrom_toc.dart       SG_IO READ TOC for exact MusicBrainz disc ID
-    dvdread.dart         libdvdread FFI for CSS-decrypted VOB streaming
-  ffmpeg/
-    ffmpeg_runner.dart   Runs ffmpeg with progress tracking
-  metadata/
-    musicbrainz.dart     MusicBrainz Web Service v2 lookup
-    cddb.dart            CDDB / GnuDB lookup (fallback)
-    disc_id.dart         MusicBrainz disc ID computation
-    cover_art.dart       Cover Art Archive fetch
-  models/                Data classes (DriveInfo, DvdTitle, BlurayTitle, …)
-  rippers/
-    audiocd_ripper.dart  Audio CD → FLAC
-    dvd_ripper.dart      DVD → MKV (libdvdread + VOB concat fallback)
-    bluray_ripper.dart   Blu-ray → MKV (libbluray + M2TS concat fallback)
-  utils/                 Shared utilities (mount, sanitize, languages, …)
+disc_buddy_lib/            Pure-Dart library (Dart workspace)
+  lib/src/
+    cli/
+      title_selector.dart  Auto-selection logic for DVD and Blu-ray titles
+    device/
+      drive_detector.dart  Lists optical drives via lsblk + udevadm
+      drive_status.dart    CDROM_DRIVE_STATUS ioctl (tray open / loading / no disc)
+      disc_type_detector.dart  Detects Audio CD / DVD / Blu-ray via udevadm
+      cdrom_toc.dart       SG_IO READ TOC for exact MusicBrainz disc ID
+      dvdread.dart         libdvdread FFI for CSS-decrypted VOB streaming
+    ffmpeg/
+      ffmpeg_runner.dart   Runs ffmpeg with progress tracking
+    metadata/
+      musicbrainz.dart     MusicBrainz Web Service v2 lookup
+      cddb.dart            CDDB / GnuDB lookup (fallback)
+      disc_id.dart         MusicBrainz disc ID computation
+      cover_art.dart       Cover Art Archive fetch
+    models/                Data classes (DriveInfo, DvdTitle, BlurayTitle, …)
+    rippers/
+      audiocd_ripper.dart  Audio CD → FLAC
+      dvd_ripper.dart      DVD → MKV (libdvdread + VOB concat fallback)
+      bluray_ripper.dart   Blu-ray → MKV (libbluray + M2TS concat fallback)
+    utils/                 Shared utilities (mount, sanitize, languages, …)
+
+disc_buddy_cli/            CLI binary (Dart workspace)
+  bin/rip.dart             Entry point; CLI argument parsing and top-level flow
+  lib/src/cli/
+    menu.dart              Drive selection menu (real-time udevadm monitor)
+
+disc_buddy_ui/             Flutter desktop GUI (outside workspace)
+  lib/
+    main.dart              App entry point
+    screens/               Home and settings screens
+    widgets/               Drive list, title selection, rip progress, …
+    providers/             Riverpod state management
+    models/                UI-side data models
+  linux/                   Linux runner (CMake)
 ```

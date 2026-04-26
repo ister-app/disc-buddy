@@ -19,11 +19,21 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
-      - name: Analyze
+      - name: Analyze lib
         run: dart analyze --fatal-infos
+        working-directory: disc_buddy_lib
+
+      - name: Analyze CLI
+        run: dart analyze --fatal-infos
+        working-directory: disc_buddy_cli
+
+      - name: Test
+        run: dart test
+        working-directory: disc_buddy_lib
 
       - name: Compile
-        run: dart compile exe bin/rip.dart -o disc-buddy
+        run: dart compile exe bin/rip.dart -o ../disc-buddy
+        working-directory: disc_buddy_cli
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -38,3 +48,47 @@ jobs:
         with:
           files: disc-buddy
           generate_release_notes: true
+
+  build-ui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - name: Install dependencies
+        run: flutter pub get
+        working-directory: disc_buddy_ui
+
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+        working-directory: disc_buddy_ui
+
+      - name: Build Linux
+        run: flutter build linux --release
+        working-directory: disc_buddy_ui
+
+      - name: Archive bundle
+        run: tar -czf disc-buddy-ui-linux-x64.tar.gz -C disc_buddy_ui/build/linux/x64/release bundle
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disc-buddy-ui-linux-x64
+          path: disc-buddy-ui-linux-x64.tar.gz
+          retention-days: 30
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: disc-buddy-ui-linux-x64.tar.gz
+          generate_release_notes: false
