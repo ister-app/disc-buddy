@@ -122,7 +122,7 @@ final _dvdClose =
 
 const _kReadTitleVobs = 3; // DVD_READ_TITLE_VOBS
 const _kBlockLen      = 2048;
-const _kChunkBlocks   = 512; // 1 MB per chunk
+const _kChunkBlocks   = 8192; // 16 MB per chunk (16 MiB / 2048-byte block)
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -190,8 +190,9 @@ Stream<List<int>> _streamFromHandle(
                 : cell.last - offset + 1;
             final n = _dvdReadBlocks(file, offset, toRead, buf);
             if (n <= 0) break;
-            final bytes = Uint8List(n * _kBlockLen);
-            for (var i = 0; i < bytes.length; i++) { bytes[i] = buf[i]; }
+            // Copy the native buffer in one memcpy (asTypedList is a view over
+            // [buf], which is reused next iteration, so fromList must copy it).
+            final bytes = Uint8List.fromList(buf.asTypedList(n * _kBlockLen));
             yield bytes;
             offset += n;
           }
@@ -206,8 +207,7 @@ Stream<List<int>> _streamFromHandle(
               : numBlocks - offset;
           final n = _dvdReadBlocks(file, offset, toRead, buf);
           if (n <= 0) break;
-          final bytes = Uint8List(n * _kBlockLen);
-          for (var i = 0; i < bytes.length; i++) { bytes[i] = buf[i]; }
+          final bytes = Uint8List.fromList(buf.asTypedList(n * _kBlockLen));
           yield bytes;
           offset += n;
         }
