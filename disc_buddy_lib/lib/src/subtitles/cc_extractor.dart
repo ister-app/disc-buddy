@@ -231,11 +231,23 @@ class _Mpeg2Scanner {
     //   [4-0]   reserved
     final w = (_buf[off] << 24) | (_buf[off + 1] << 16) |
               (_buf[off + 2] << 8) | _buf[off + 3];
+    final dropFrame = (w >> 31) & 0x1;
     final h = (w >> 26) & 0x1F;
     final m = (w >> 20) & 0x3F;
     final s = (w >> 13) & 0x3F;
     final f = (w >>  7) & 0x3F;
-    _gopTicks = h * 108000 + m * 1800 + s * 30 + f;
+    // Convert HH:MM:SS:FF to an absolute frame count. NTSC DVDs use drop-frame
+    // timecode: frame numbers 0 and 1 are skipped at the start of every minute
+    // except every 10th minute, so the timecode tracks real (29.97 fps) time.
+    // Treating it as a plain 30 fps count overcounts by ~2 frames/minute, which
+    // (after the ×1001/30 ms conversion) drifts ~0.1 %/min — visibly late by the
+    // end of an episode. Subtract the dropped frames to get the true count.
+    var ticks = h * 108000 + m * 1800 + s * 30 + f;
+    if (dropFrame == 1) {
+      final totalMinutes = h * 60 + m;
+      ticks -= 2 * (totalMinutes - totalMinutes ~/ 10);
+    }
+    _gopTicks = ticks;
     _firstTicks ??= _gopTicks;
   }
 
@@ -342,12 +354,6 @@ class _Eia608Decoder {
   int _prevB1 = -1;
   int _prevB2 = -1;
 
-  // Pop-on end-time heuristic: after an EOC flip, close the displayed entry
-  // when the encoder starts pre-loading the NEXT caption into NDM. This
-  // matches MakeMKV behaviour on discs that do not emit EDM commands — the
-  // caption visually disappears when new text starts arriving for the next one.
-  bool _waitingToCloseEntry = false;
-
   // EIA-608 basic character substitutions (after parity strip, 0x20–0x7F range).
   static const _charSub = <int, String>{
     0x2A: 'á', 0x5C: 'é', 0x5E: 'í', 0x5F: 'ó', 0x60: 'ú',
@@ -374,12 +380,9 @@ class _Eia608Decoder {
     if (b1 < 0x20) {
       _handleControl(ms, b1, b2);
     } else {
-      // Printable characters being loaded into NDM signal that new text is
-      // arriving. In pop-on mode this closes the currently displayed entry.
-      if (_waitingToCloseEntry && !_isRollUp) {
-        _closeEntry(ms);
-        _waitingToCloseEntry = false;
-      }
+      // Printable characters load into NDM (the off-screen buffer) and do NOT
+      // affect the currently displayed caption — it stays until the next EOC
+      // flip or EDM erase.
       _appendChar(b1);
       if (b2 >= 0x20) _appendChar(b2);
     }
@@ -389,13 +392,8 @@ class _Eia608Decoder {
     // PAC (Preamble Address Code): b2 in 0x40–0x7F for these b1 values.
     // Must be checked first because 0x14/0x1C also have PAC variants (b2 >= 0x40).
     if (b2 >= 0x40 && b2 <= 0x7F) {
-      // A PAC marks the start of a new text segment loading into NDM.
-      // In pop-on mode this is the earliest reliable signal that the currently
-      // displayed entry should end (the encoder is pre-loading the next one).
-      if (_waitingToCloseEntry && !_isRollUp) {
-        _closeEntry(ms);
-        _waitingToCloseEntry = false;
-      }
+      // A PAC marks the row for text loading into NDM (off-screen). It does not
+      // change what's currently displayed, so it must not end the shown caption.
       final row = _pacRow(b1, b2);
       if (row > 0 && row != _currentRow) {
         _flushLine();
@@ -430,12 +428,20 @@ class _Eia608Decoder {
           }
 
         case 0x2C: // ENM — Erase Non-Displayed Memory
-          // Flush any in-progress line, but do NOT clear _ndm.
-          // Some DVD encoders send ENM immediately before EOC in the same GOP
-          // while text is already loaded — clearing _ndm here would erase the
-          // caption. In the normal case (ENM between captions), _ndm is already
-          // empty because the previous EOC cleared it.
-          _flushLine();
+          if (_lineBuf.isEmpty && _ndm.isEmpty) {
+            // Standalone ENM with nothing being loaded. The previous EOC already
+            // cleared NDM, so this isn't part of a caption load — this encoder
+            // uses it to BLANK the screen during silences (it emits no EDM and
+            // no empty EOC). Close the currently displayed caption so it doesn't
+            // linger until the next one. (~86 of these match the ~83 gaps that
+            // MakeMKV shows on this disc.)
+            _closeEntry(ms);
+          } else {
+            // ENM as part of a load sequence (text already pending in NDM):
+            // some encoders send it right before EOC. Flush the in-progress
+            // line but do NOT erase the loaded caption.
+            _flushLine();
+          }
 
         case 0x2D: // CR — Carriage Return
           _flushLine();
@@ -449,20 +455,18 @@ class _Eia608Decoder {
           }
 
         case 0x2E: // EDM — Erase Displayed Memory
-          _waitingToCloseEntry = false;
           _closeEntry(ms);
           if (_isRollUp) _ndm.clear();
 
         case 0x2F: // EOC — End of Caption (Flip Memories)
           _isRollUp = false;
-          _waitingToCloseEntry = false;
           _flushLine();
+          // The flip ends the currently displayed caption and shows the NDM
+          // contents (if any). A displayed caption therefore lasts from its EOC
+          // until the next EOC or EDM — not until the next caption pre-loads.
           _closeEntry(ms);
           if (_ndm.isNotEmpty) {
             _emitEntry(ms, _ndm.join('\n'));
-            // After EOC flip, wait for the first PAC or printable char of the
-            // NEXT caption's pre-load phase to set the accurate end time.
-            _waitingToCloseEntry = true;
           }
           _ndm.clear();
       }
