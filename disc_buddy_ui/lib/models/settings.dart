@@ -17,6 +17,9 @@ class Settings {
   /// Re-encode Blu-ray LPCM audio to FLAC (smaller, but CPU-heavy). When false
   /// (default) LPCM is stored as raw PCM — much faster.
   final bool lpcmFlac;
+  /// DVD single-pass mode (default false): map streams by id in one read.
+  /// Mainly helps slow optical drives; costs more memory on fast media.
+  final bool dvdSinglePass;
   /// Comma-separated ISO 639 language codes for audio tracks to keep in the MKV.
   /// Null / empty = keep all.
   final String? audioLangs;
@@ -39,6 +42,7 @@ class Settings {
     this.autoName = false,
     this.batchAssign = false,
     this.lpcmFlac = false,
+    this.dvdSinglePass = false,
     this.audioLangs,
     this.subtitleTrackLangs,
   });
@@ -67,6 +71,7 @@ class Settings {
     autoName: json['auto-name'] as bool? ?? false,
     batchAssign: json['batch-assign'] as bool? ?? false,
     lpcmFlac: json['lpcm-flac'] as bool? ?? false,
+    dvdSinglePass: json['dvd-single-pass'] as bool? ?? false,
     audioLangs: json['audio-langs'] as String?,
     subtitleTrackLangs: json['subtitle-track-langs'] as String?,
   );
@@ -85,6 +90,7 @@ class Settings {
     'auto-name': autoName,
     'batch-assign': batchAssign,
     'lpcm-flac': lpcmFlac,
+    'dvd-single-pass': dvdSinglePass,
     if (audioLangs != null) 'audio-langs': audioLangs,
     if (subtitleTrackLangs != null) 'subtitle-track-langs': subtitleTrackLangs,
   };
@@ -110,6 +116,7 @@ class Settings {
     autoName: autoName,
     batchAssign: batchAssign,
     lpcmFlac: lpcmFlac,
+    dvdSinglePass: dvdSinglePass,
     audioMkvLangs: _parseLangs(audioLangs),
     subtitleMkvLangs: _parseLangs(subtitleTrackLangs),
   );
@@ -129,6 +136,7 @@ class Settings {
     bool? autoName,
     bool? batchAssign,
     bool? lpcmFlac,
+    bool? dvdSinglePass,
     Object? audioLangs = _sentinel,
     Object? subtitleTrackLangs = _sentinel,
   }) => Settings(
@@ -146,6 +154,7 @@ class Settings {
     autoName: autoName ?? this.autoName,
     batchAssign: batchAssign ?? this.batchAssign,
     lpcmFlac: lpcmFlac ?? this.lpcmFlac,
+    dvdSinglePass: dvdSinglePass ?? this.dvdSinglePass,
     audioLangs: audioLangs == _sentinel ? this.audioLangs : audioLangs as String?,
     subtitleTrackLangs: subtitleTrackLangs == _sentinel ? this.subtitleTrackLangs : subtitleTrackLangs as String?,
   );

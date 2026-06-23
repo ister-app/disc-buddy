@@ -36,6 +36,12 @@ class RipOptions {
   /// (`pcm_s24le`) — cheap, like MakeMKV; true re-encodes to FLAC (smaller
   /// files, but CPU-heavy for multichannel 24-bit audio).
   final bool lpcmFlac;
+  /// DVD single-pass mode (default false): map streams by MPEG stream id in one
+  /// read instead of a separate pre-scan pass, falling back to the two-pass scan
+  /// if the mapping doesn't resolve all streams. Mainly helps slow optical
+  /// drives — on fast media (SSD ISOs) the scan is cheap and the larger probe
+  /// this needs costs more memory than it saves, so it's opt-in.
+  final bool dvdSinglePass;
 
   const RipOptions({
     this.device,
@@ -60,6 +66,7 @@ class RipOptions {
     this.audioMkvLangs,
     this.subtitleMkvLangs,
     this.lpcmFlac = false,
+    this.dvdSinglePass = false,
   });
 
   /// True when all tools and credentials needed for LLM-based auto-naming
@@ -97,6 +104,7 @@ class RipOptions {
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
+    dvdSinglePass: dvdSinglePass,
   );
 
   RipOptions copyWithOutputDir(String newOutputDir) => RipOptions(
@@ -122,6 +130,7 @@ class RipOptions {
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
+    dvdSinglePass: dvdSinglePass,
   );
 
   RipOptions copyWithHints({String? titleHint, List<int>? seasonHint, bool? autoName, bool? batchAssign}) => RipOptions(
@@ -147,6 +156,7 @@ class RipOptions {
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
+    dvdSinglePass: dvdSinglePass,
   );
 }
 

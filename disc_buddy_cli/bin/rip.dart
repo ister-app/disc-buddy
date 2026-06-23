@@ -47,6 +47,9 @@ Future<void> main(List<String> arguments) async {
     ..addFlag('lpcm-flac', negatable: false,
         help: 'Re-encode Blu-ray LPCM audio to FLAC (smaller files, slower). '
               'Default keeps LPCM as raw PCM, which is much faster.')
+    ..addFlag('dvd-single-pass', defaultsTo: false,
+        help: 'Map DVD streams by id in a single read instead of a pre-scan. '
+              'Mainly helps slow optical drives; uses more memory on fast media.')
     ..addFlag('loop',         abbr: 'l', negatable: false,
         help: 'After each rip, eject and wait for the next disc automatically')
     ..addFlag('help',      abbr: 'h', negatable: false, help: 'Show help');
@@ -185,6 +188,9 @@ Future<void> main(List<String> arguments) async {
     lpcmFlac:       args.wasParsed('lpcm-flac')
         ? args['lpcm-flac'] as bool
         : (config['lpcm-flac'] as bool?) ?? false,
+    dvdSinglePass:  args.wasParsed('dvd-single-pass')
+        ? args['dvd-single-pass'] as bool
+        : (config['dvd-single-pass'] as bool?) ?? false,
   );
 
   if (isMkv) {

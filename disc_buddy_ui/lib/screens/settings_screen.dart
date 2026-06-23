@@ -87,6 +87,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
   bool _autoName = false;
   bool _batchAssign = false;
   bool _lpcmFlac = false;
+  bool _dvdSinglePass = false;
 
   // null = not yet checked; true = found; false = not found
   final _binaryFound = <String, bool>{};
@@ -110,6 +111,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     _autoName           = s.autoName;
     _batchAssign        = s.batchAssign;
     _lpcmFlac           = s.lpcmFlac;
+    _dvdSinglePass      = s.dvdSinglePass;
     for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr]) {
       c.addListener(_onFieldChanged);
     }
@@ -165,6 +167,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       autoName:           _autoName,
       batchAssign:        _batchAssign,
       lpcmFlac:           _lpcmFlac,
+      dvdSinglePass:      _dvdSinglePass,
       audioLangs:         _audioLangs.text.trim().isEmpty         ? null : _audioLangs.text.trim(),
       subtitleTrackLangs: _subtitleTrackLangs.text.trim().isEmpty ? null : _subtitleTrackLangs.text.trim(),
     );
@@ -305,6 +308,12 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             subtitle: const Text('Smaller files but much slower. Off keeps raw PCM (faster).'),
             value: _lpcmFlac,
             onChanged: (v) => setState(() => _lpcmFlac = v),
+          ),
+          SwitchListTile(
+            title: const Text('DVD single-pass read'),
+            subtitle: const Text('Maps streams by id in one read. Mainly helps slow optical drives; uses more memory.'),
+            value: _dvdSinglePass,
+            onChanged: (v) => setState(() => _dvdSinglePass = v),
           ),
         ]),
         const SizedBox(height: 24),

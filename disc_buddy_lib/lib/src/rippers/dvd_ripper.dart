@@ -21,6 +21,10 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   final LogCallback? onLog;
   final ProgressCallback? onProgress;
 
+  /// Set once a single-pass (map-by-id) attempt fails verification, so the rest
+  /// of this disc's titles skip straight to the proven two-pass scan.
+  bool _singlePassDisabled = false;
+
   DVDRipper(this.options, {this.onLog, this.onProgress, void Function(Process)? onFfmpegProcess})
       : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess, onLog: onLog);
 
@@ -162,131 +166,159 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         ...title.subtitleTracks.map((s) => s.streamId),
       };
 
-      // Pass 1: scan for SID order — reuse cached result if this VTS was already
-      // scanned. Exits early once all wanted SIDs are found.
-      final ({List<int> sidOrder, int lastSidByteOffset}) scan;
-      if (scanCache.containsKey(title.vtsNumber)) {
-        scan = scanCache[title.vtsNumber]!;
-      } else {
-        final scanStream = session.stream(title.vtsNumber, cells: cells);
-        scan = await _scanVobSids(scanStream, wantedSids);
-        scanCache[title.vtsNumber] = scan;
-      }
-
-      // Pass 2: rip with a probesize that covers the full scan depth.
-      final ripStream = session.stream(title.vtsNumber, cells: cells);
-
-      // CC extraction tee: NTSC discs without IFO subtitles otherwise need a
-      // SECOND full read of the disc to scan for EIA-608 captions. Instead, fan
-      // the rip's MPEG-PS bytes out to the CC scanner as they stream past, so
-      // the disc is read once. Bounded + fail-soft: if the CC side can't keep up
-      // (in-flight > cap) or errors, abandon the tee and fall back to the
-      // original second-read path — the output is always correct either way.
-      final teeCc = _willExtractCc(title);
-      Future<File?>? ccScanFuture;
-      var ccTeeOk = teeCc;
-      var ripInput = ripStream;
-      if (teeCc) {
-        final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
-        final ctrl = StreamController<List<int>>();
-        var inFlight = 0;
-        const ccCap = 128 * 1024 * 1024; // abandon the tee if CC falls this far behind
-        final ccInput = ctrl.stream.map((c) { inFlight -= c.length; return c; });
-        ccScanFuture = CcExtractor(ffmpeg: options.ffmpeg, onLog: onLog)
-            .extractFromMpegPsStream(ccInput, File('$stem.en.srt'))
-            .catchError((_) => null); // fail-soft: never break the rip
-        ripInput = () async* {
-          try {
-            await for (final chunk in ripStream) {
-              if (ccTeeOk) {
-                if (inFlight > ccCap) {
-                  ccTeeOk = false; // CC too slow — abandon; fall back after the rip
-                  if (!ctrl.isClosed) await ctrl.close();
-                } else {
-                  inFlight += chunk.length;
-                  ctrl.add(chunk);
-                }
-              }
-              yield chunk;
-            }
-          } finally {
-            if (!ctrl.isClosed) await ctrl.close();
+      // Rips the title once. In single-pass mode streams are mapped by MPEG
+      // stream id (-map 0:i:0x80) with NO pre-scan; otherwise a scan first
+      // determines ffmpeg's discovery order (a second read). Returns true when a
+      // valid MKV was produced; single-pass returns false on rip error or when
+      // the audio-stream count comes up short, so the caller can fall back.
+      Future<bool> ripAttempt(bool singlePass) async {
+        // Pass 1: scan for SID order (skipped in single-pass mode). Cached per
+        // VTS; exits early once all wanted SIDs are found.
+        ({List<int> sidOrder, int lastSidByteOffset})? scan;
+        if (!singlePass) {
+          if (scanCache.containsKey(title.vtsNumber)) {
+            scan = scanCache[title.vtsNumber]!;
+          } else {
+            final scanStream = session.stream(title.vtsNumber, cells: cells);
+            scan = await _scanVobSids(scanStream, wantedSids);
+            scanCache[title.vtsNumber] = scan;
           }
-        }();
-      }
+        }
 
-      final mapAndMetaArgs = _buildMapAndMetaArgs(
-        title:      title,
-        sidOrder:   scan.sidOrder,
-        audioLangs: langs.audioLangs,
-        subLangs:   langs.subLangs,
-      );
+        final ripStream = session.stream(title.vtsNumber, cells: cells);
 
-      // probeBytes: scan position + 16 MiB headroom, passed as raw bytes to ffmpeg.
-      // analyzeduration is in microseconds (not bytes) — use full title duration + 60 s margin.
-      final probeBytes   = scan.lastSidByteOffset + 16 * 1024 * 1024;
-      final analyzeDurUs = title.duration.inMicroseconds + 60 * 1000000;
+        // CC extraction tee (see _willExtractCc): fan the rip's MPEG-PS bytes
+        // out to the CC scanner so the disc is read once. Bounded + fail-soft.
+        final teeCc = _willExtractCc(title);
+        Future<File?>? ccScanFuture;
+        var ccTeeOk = teeCc;
+        var ripInput = ripStream;
+        if (teeCc) {
+          final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
+          final ctrl = StreamController<List<int>>();
+          var inFlight = 0;
+          const ccCap = 128 * 1024 * 1024; // abandon the tee if CC falls behind
+          final ccInput = ctrl.stream.map((c) { inFlight -= c.length; return c; });
+          ccScanFuture = CcExtractor(ffmpeg: options.ffmpeg, onLog: onLog)
+              .extractFromMpegPsStream(ccInput, File('$stem.en.srt'))
+              .catchError((_) => null); // fail-soft: never break the rip
+          ripInput = () async* {
+            try {
+              await for (final chunk in ripStream) {
+                if (ccTeeOk) {
+                  if (inFlight > ccCap) {
+                    ccTeeOk = false; // CC too slow — abandon, fall back later
+                    if (!ctrl.isClosed) await ctrl.close();
+                  } else {
+                    inFlight += chunk.length;
+                    ctrl.add(chunk);
+                  }
+                }
+                yield chunk;
+              }
+            } finally {
+              if (!ctrl.isClosed) await ctrl.close();
+            }
+          }();
+        }
 
-      final chapterFile = await writeChapterMetadata(title.chapters, title.duration);
-      final args = [
-        '-loglevel', 'warning', '-stats',
-        '-fflags', '+genpts',
-        '-probesize', '$probeBytes',
-        '-analyzeduration', '$analyzeDurUs',
-        '-f', 'mpeg',
-        '-i', 'pipe:0',
-        if (chapterFile != null) ...['-i', chapterFile.path, '-map_chapters', '1'],
-        ...mapAndMetaArgs,
-        outFile.path,
-      ];
+        Future<void> cleanupCcPartial() async {
+          if (!teeCc) return;
+          await ccScanFuture;
+          final partial =
+              File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
+          if (await partial.exists()) {
+            await partial.delete().catchError((_) => File(''));
+          }
+        }
 
-      final dur      = title.duration.inSeconds;
-      final exitCode = await _ffmpeg.run(
-        args,
-        stdinData:        ripInput,
-        timeout:          Duration(seconds: dur + 120),
-        expectedDuration: title.duration,
-        onProgress:       onProgress ?? logProgress,
-      );
-      await chapterFile?.delete().catchError((_) => File(''));
-      _log('');
+        final mapAndMetaArgs = singlePass
+            ? _buildMapAndMetaArgsById(
+                title: title, audioLangs: langs.audioLangs, subLangs: langs.subLangs)
+            : _buildMapAndMetaArgs(
+                title: title, sidOrder: scan!.sidOrder,
+                audioLangs: langs.audioLangs, subLangs: langs.subLangs);
 
-      final fileSize = await outFile.exists() ? await outFile.length() : 0;
-      if (exitCode == 0 && fileSize > 0) {
+        // probeBytes: in two-pass mode the scan says how far to probe. In
+        // single-pass mode use the same 600 MB ceiling the scan would cap at, so
+        // late-appearing streams (e.g. a subtitle 518 MB in) are still seen. The
+        // ceiling only forces deep buffering on those rare discs; normal discs
+        // find every stream early and write the header immediately.
+        final probeBytes = singlePass
+            ? 600 * 1024 * 1024
+            : scan!.lastSidByteOffset + 16 * 1024 * 1024;
+        final analyzeDurUs = title.duration.inMicroseconds + 60 * 1000000;
+
+        final chapterFile = await writeChapterMetadata(title.chapters, title.duration);
+        final args = [
+          '-loglevel', 'warning', '-stats',
+          '-fflags', '+genpts',
+          '-probesize', '$probeBytes',
+          '-analyzeduration', '$analyzeDurUs',
+          '-f', 'mpeg',
+          '-i', 'pipe:0',
+          if (chapterFile != null) ...['-i', chapterFile.path, '-map_chapters', '1'],
+          ...mapAndMetaArgs,
+          outFile.path,
+        ];
+
+        final dur      = title.duration.inSeconds;
+        final exitCode = await _ffmpeg.run(
+          args,
+          stdinData:        ripInput,
+          timeout:          Duration(seconds: dur + 120),
+          expectedDuration: title.duration,
+          onProgress:       onProgress ?? logProgress,
+        );
+        await chapterFile?.delete().catchError((_) => File(''));
+        _log('');
+
+        final fileSize = await outFile.exists() ? await outFile.length() : 0;
+        if (exitCode != 0 || fileSize == 0) {
+          _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
+          await cleanupCcPartial();
+          await outFile.delete().catchError((e) {
+            _log('   Cannot delete file: $e', isError: true);
+            return File('');
+          });
+          return false;
+        }
+
+        // Single-pass guard: confirm every audio stream made it in. If the id
+        // mapping didn't resolve them all, discard and let the caller fall back.
+        if (singlePass &&
+            !await _verifyDvdAudioCount(outFile, title.audioTracks.length)) {
+          _log('   Single-pass audio-stream check failed — discarding.', isError: true);
+          await cleanupCcPartial();
+          await outFile.delete().catchError((_) => File(''));
+          return false;
+        }
+
         _log('   Done: ${outFile.path}');
         await _injectSubtitlePalette(outFile, title, langs.subLangs);
         if (teeCc && ccTeeOk) {
           // CC was scanned during the rip (single disc read) — finalize it.
-          final srt = await ccScanFuture;
-          await _finalizeCc(outFile, srt);
+          await _finalizeCc(outFile, await ccScanFuture);
         } else {
-          // Tee abandoned (CC fell behind) or not applicable. Discard any partial
-          // SRT the abandoned scan wrote, then fall back to the original path
-          // (a no-op for non-CC titles).
-          if (teeCc) {
-            await ccScanFuture;
-            final partial = File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
-            if (await partial.exists()) await partial.delete().catchError((_) => File(''));
-          }
+          // Tee abandoned or not applicable: drop any partial, then use the
+          // original path (a no-op for non-CC titles).
+          await cleanupCcPartial();
           final ccCells = title.cells.isNotEmpty ? title.cells : null;
           await _extractClosedCaptions(
-            outFile,
-            title,
+            outFile, title,
             sourceStreamFactory: () => session.stream(title.vtsNumber, cells: ccCells),
           );
         }
-      } else {
-        _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
-        // Let the CC tee settle and drop any partial sidecar it may have written.
-        if (teeCc) {
-          await ccScanFuture;
-          final partial = File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
-          if (await partial.exists()) await partial.delete().catchError((_) => File(''));
-        }
-        await outFile.delete().catchError((e) {
-          _log('   Cannot delete file: $e', isError: true);
-          return File('');
-        });
+        return true;
+      }
+
+      final trySingle = options.dvdSinglePass && !_singlePassDisabled;
+      var produced = await ripAttempt(trySingle);
+      if (!produced && trySingle) {
+        _singlePassDisabled = true;
+        _log('   Single-pass mapping failed — using the two-pass scan for the '
+            'remaining titles.', isError: true);
+        produced = await ripAttempt(false);
       }
     }
     } finally {
@@ -1048,14 +1080,38 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       args.addAll(['-map', '0:s:$ffIdx?']);
     }
 
-    args.addAll([
+    args.addAll(_codecAndMetaArgs(
+      title: title, audioLangs: audioLangs, keptSubs: keptSubs));
+    return args;
+  }
+
+  /// Computes the kept-subtitle list (drops tracks the user cleared via an empty
+  /// language entry), preserving IFO order.
+  static List<(SubtitleTrack, String)> _keptSubs(
+      DvdTitle title, List<String> subLangs) {
+    final keptSubs = <(SubtitleTrack, String)>[];
+    for (var i = 0; i < title.subtitleTracks.length; i++) {
+      final lang = i < subLangs.length ? subLangs[i] : '';
+      if (lang.isNotEmpty) keptSubs.add((title.subtitleTracks[i], lang));
+    }
+    return keptSubs;
+  }
+
+  /// Codec selection + per-stream metadata + subtitle dispositions, shared by
+  /// the discovery-order ([_buildMapAndMetaArgs]) and stream-id
+  /// ([_buildMapAndMetaArgsById]) map builders. Output indices 0,1,2… follow the
+  /// map order (= IFO order), independent of how the streams were mapped.
+  static List<String> _codecAndMetaArgs({
+    required DvdTitle title,
+    required List<String> audioLangs,
+    required List<(SubtitleTrack, String)> keptSubs,
+  }) {
+    final args = <String>[
       '-c:v', 'copy',
       '-c:a', 'copy',
       '-c:s', 'copy',
       '-avoid_negative_ts', 'make_zero',
-    ]);
-
-    // Metadata: output indices 0,1,2... = kept-subs order
+    ];
 
     // Video language: take from first audio track (DVD has no per-stream video language)
     if (audioLangs.isNotEmpty && audioLangs.first.isNotEmpty) {
@@ -1083,6 +1139,53 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     }
 
     return args;
+  }
+
+  /// Builds -map/-metadata args WITHOUT a pre-scan, mapping each stream by its
+  /// MPEG stream id (`-map 0:i:0x80`). ffmpeg resolves the id to whatever output
+  /// index it lands on, so we don't need to know the discovery order.
+  ///
+  /// Audio maps are non-optional: if a declared id isn't found, ffmpeg fails,
+  /// which the caller detects and falls back to the two-pass scan. Subtitle maps
+  /// are optional (`?`) since declared subs may legitimately be absent.
+  static List<String> _buildMapAndMetaArgsById({
+    required DvdTitle title,
+    required List<String> audioLangs,
+    required List<String> subLangs,
+  }) {
+    final args = <String>['-map', '0:v:0'];
+    for (final a in title.audioTracks) {
+      args.addAll(['-map', '0:i:0x${a.streamId.toRadixString(16)}']);
+    }
+    final keptSubs = _keptSubs(title, subLangs);
+    for (final (s, _) in keptSubs) {
+      args.addAll(['-map', '0:i:0x${s.streamId.toRadixString(16)}?']);
+    }
+    args.addAll(_codecAndMetaArgs(
+      title: title, audioLangs: audioLangs, keptSubs: keptSubs));
+    return args;
+  }
+
+  /// Verifies the ripped MKV actually contains at least [expected] audio streams.
+  /// Used after a single-pass (map-by-id) rip to detect dropped streams and
+  /// trigger the two-pass fallback. Returns true (don't fall back) on any
+  /// ffprobe error so a probe failure doesn't needlessly discard a good rip.
+  Future<bool> _verifyDvdAudioCount(File outFile, int expected) async {
+    if (expected <= 0) return true;
+    try {
+      final r = await Process.run(options.ffprobe, [
+        '-v', 'quiet', '-select_streams', 'a',
+        '-show_entries', 'stream=index', '-of', 'csv=p=0', outFile.path,
+      ]);
+      if (r.exitCode != 0) return true;
+      final count = (r.stdout as String)
+          .split('\n')
+          .where((l) => l.trim().isNotEmpty)
+          .length;
+      return count >= expected;
+    } catch (_) {
+      return true;
+    }
   }
 
   // ---------------------------------------------------------------------------
