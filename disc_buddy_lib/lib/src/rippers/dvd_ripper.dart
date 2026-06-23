@@ -176,6 +176,45 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       // Pass 2: rip with a probesize that covers the full scan depth.
       final ripStream = session.stream(title.vtsNumber, cells: cells);
 
+      // CC extraction tee: NTSC discs without IFO subtitles otherwise need a
+      // SECOND full read of the disc to scan for EIA-608 captions. Instead, fan
+      // the rip's MPEG-PS bytes out to the CC scanner as they stream past, so
+      // the disc is read once. Bounded + fail-soft: if the CC side can't keep up
+      // (in-flight > cap) or errors, abandon the tee and fall back to the
+      // original second-read path — the output is always correct either way.
+      final teeCc = _willExtractCc(title);
+      Future<File?>? ccScanFuture;
+      var ccTeeOk = teeCc;
+      var ripInput = ripStream;
+      if (teeCc) {
+        final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
+        final ctrl = StreamController<List<int>>();
+        var inFlight = 0;
+        const ccCap = 128 * 1024 * 1024; // abandon the tee if CC falls this far behind
+        final ccInput = ctrl.stream.map((c) { inFlight -= c.length; return c; });
+        ccScanFuture = CcExtractor(ffmpeg: options.ffmpeg, onLog: onLog)
+            .extractFromMpegPsStream(ccInput, File('$stem.en.srt'))
+            .catchError((_) => null); // fail-soft: never break the rip
+        ripInput = () async* {
+          try {
+            await for (final chunk in ripStream) {
+              if (ccTeeOk) {
+                if (inFlight > ccCap) {
+                  ccTeeOk = false; // CC too slow — abandon; fall back after the rip
+                  if (!ctrl.isClosed) await ctrl.close();
+                } else {
+                  inFlight += chunk.length;
+                  ctrl.add(chunk);
+                }
+              }
+              yield chunk;
+            }
+          } finally {
+            if (!ctrl.isClosed) await ctrl.close();
+          }
+        }();
+      }
+
       final mapAndMetaArgs = _buildMapAndMetaArgs(
         title:      title,
         sidOrder:   scan.sidOrder,
@@ -204,7 +243,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       final dur      = title.duration.inSeconds;
       final exitCode = await _ffmpeg.run(
         args,
-        stdinData:        ripStream,
+        stdinData:        ripInput,
         timeout:          Duration(seconds: dur + 120),
         expectedDuration: title.duration,
         onProgress:       onProgress ?? logProgress,
@@ -216,14 +255,34 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       if (exitCode == 0 && fileSize > 0) {
         _log('   Done: ${outFile.path}');
         await _injectSubtitlePalette(outFile, title, langs.subLangs);
-        final ccCells = title.cells.isNotEmpty ? title.cells : null;
-        await _extractClosedCaptions(
-          outFile,
-          title,
-          sourceStreamFactory: () => session.stream(title.vtsNumber, cells: ccCells),
-        );
+        if (teeCc && ccTeeOk) {
+          // CC was scanned during the rip (single disc read) — finalize it.
+          final srt = await ccScanFuture;
+          await _finalizeCc(outFile, srt);
+        } else {
+          // Tee abandoned (CC fell behind) or not applicable. Discard any partial
+          // SRT the abandoned scan wrote, then fall back to the original path
+          // (a no-op for non-CC titles).
+          if (teeCc) {
+            await ccScanFuture;
+            final partial = File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
+            if (await partial.exists()) await partial.delete().catchError((_) => File(''));
+          }
+          final ccCells = title.cells.isNotEmpty ? title.cells : null;
+          await _extractClosedCaptions(
+            outFile,
+            title,
+            sourceStreamFactory: () => session.stream(title.vtsNumber, cells: ccCells),
+          );
+        }
       } else {
         _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
+        // Let the CC tee settle and drop any partial sidecar it may have written.
+        if (teeCc) {
+          await ccScanFuture;
+          final partial = File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
+          if (await partial.exists()) await partial.delete().catchError((_) => File(''));
+        }
         await outFile.delete().catchError((e) {
           _log('   Cannot delete file: $e', isError: true);
           return File('');
@@ -1038,15 +1097,28 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// MPEG-PS source (dvdread stream or VOB files) instead of the ripped MKV.
   /// This preserves EDM user_data packets that ffmpeg may drop when remuxing
   /// MPEG-PS → MKV, giving accurate caption end-times.
+  /// Whether [title] is a candidate for EIA-608 CC extraction: NTSC (480-line)
+  /// and with no IFO-declared subtitle tracks. Mirrors the guards below; used to
+  /// decide upfront whether to tee the rip stream into the CC scanner.
+  bool _willExtractCc(DvdTitle title) =>
+      title.videoHeight == 480 && title.subtitleTracks.isEmpty;
+
+  /// Embeds [srtFile] when non-null, otherwise strips the leftover user_data
+  /// identifiers so players don't show empty "Closed Captions 1-4" tracks.
+  Future<void> _finalizeCc(File outFile, File? srtFile) async {
+    if (srtFile == null) {
+      await _stripMkvCcUserData(outFile);
+      return;
+    }
+    await _embedSrtInMkv(outFile, srtFile, 'eng');
+  }
+
   Future<void> _extractClosedCaptions(
     File outFile,
     DvdTitle title, {
     Stream<List<int>> Function()? sourceStreamFactory,
   }) async {
-    // CC is an NTSC-only standard. PAL discs use teletext instead.
-    if (title.videoHeight != 480) return;
-    // Skip if the IFO already provided subtitle tracks (they were ripped above).
-    if (title.subtitleTracks.isNotEmpty) return;
+    if (!_willExtractCc(title)) return;
 
     final extractor = CcExtractor(ffmpeg: options.ffmpeg, onLog: onLog);
 
@@ -1061,14 +1133,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       srtFile = await extractor.extractFromMkv(outFile);
     }
 
-    if (srtFile == null) {
-      // No CC content, but strip the user_data identifiers anyway so players
-      // don't show empty "Closed Captions 1-4" tracks from the MPEG-2 stream.
-      await _stripMkvCcUserData(outFile);
-      return;
-    }
-
-    await _embedSrtInMkv(outFile, srtFile, 'eng');
+    await _finalizeCc(outFile, srtFile);
   }
 
   /// Embeds [srtFile] as a subtitle track in [mkvFile] and deletes the sidecar.
