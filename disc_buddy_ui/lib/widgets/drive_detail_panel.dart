@@ -32,24 +32,48 @@ class DriveDetailPanel extends ConsumerWidget {
         final wasNoDisc = _isNoDisc(prev.info.status);
         final nowNoDisc = _isNoDisc(next.info.status);
 
-        // Disc removed: reset stale title-selection UI immediately.
+        // Disc removed: clear stale cached titles and reset title-selection UI (skip in loop mode).
         if (!wasNoDisc && nowNoDisc) {
+          ref.invalidate(discTitlesProvider(next.id));
           final rip = ref.read(ripStateProvider(next.id));
-          if (rip is! RipInProgress && rip is! RipAudioCdProgress && rip is! MkvProcessing) {
+          if (rip is! RipInProgress && rip is! RipAudioCdProgress &&
+              rip is! MkvProcessing && rip is! LoopWaiting) {
             ref.read(ripStateProvider(next.id).notifier).reset();
           }
         }
 
-        // Disc became readable (e.g. loading → dataDisc): re-scan titles.
-        // This fires AFTER the disc is actually ready, avoiding the race where
-        // the provider runs while the disc is still spinning up and caches EmptyDisc.
+        // Disc became readable: re-scan titles.
         if (!wasReady && nowReady) {
           ref.invalidate(discTitlesProvider(next.id));
           final rip = ref.read(ripStateProvider(next.id));
-          if (rip is! RipInProgress && rip is! RipAudioCdProgress && rip is! MkvProcessing) {
+          if (rip is! RipInProgress && rip is! RipAudioCdProgress &&
+              rip is! MkvProcessing && rip is! LoopWaiting) {
             ref.read(ripStateProvider(next.id).notifier).reset();
           }
         }
+      }
+    });
+
+    // In loop mode: auto-start rip when a new disc is scanned.
+    ref.listen<AsyncValue<DiscContent?>>(discTitlesProvider(entry.id), (prev, next) {
+      final rip = ref.read(ripStateProvider(entry.id));
+      if (rip is! LoopWaiting) return;
+      switch (next) {
+        case AsyncData(:final value):
+          if (value is VideoDiscContent) {
+            final selected = value.titles
+                .where((t) => value.suggestion.contains(t.displayKey))
+                .toList();
+            ref.read(ripStateProvider(entry.id).notifier)
+                .startRipDirect(value.discTitle, selected);
+          } else if (value is AudioCdContent) {
+            final tracks =
+                List.generate(value.metadata.tracks.length, (i) => i + 1);
+            ref.read(ripStateProvider(entry.id).notifier)
+                .startAudioCdRip(value.metadata, tracks);
+          }
+        default:
+          break;
       }
     });
 
@@ -67,6 +91,9 @@ class DriveDetailPanel extends ConsumerWidget {
     if (ripState is RipError) {
       return _ErrorPanel(message: ripState.message, devicePath: entry.id);
     }
+    if (ripState is LoopWaiting) {
+      return _LoopWaitingPanel(devicePath: entry.id, state: ripState);
+    }
 
     // No active rip: show disc content.
     return _DiscContentView(entry: entry, ripState: ripState);
@@ -81,11 +108,13 @@ class _DiscContentView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // For real drives: check if a disc is present.
-    if (entry is RealDriveEntry) {
-      final info = (entry as RealDriveEntry).info;
+    if (entry case RealDriveEntry(:final info)) {
       if (info.status == DiscStatus.noDisc ||
           info.status == DiscStatus.ejected) {
         return _NoDiscPlaceholder(status: info.statusLabel);
+      }
+      if (info.status == DiscStatus.loading) {
+        return _SkeletonDetail();
       }
     }
 
@@ -202,13 +231,13 @@ class _CompletedPanel extends ConsumerWidget {
                 label: const Text('Rip another'),
                 onPressed: () => ref.read(ripStateProvider(devicePath).notifier).reset(),
               ),
-              if (entry is RealDriveEntry) ...[
+              if (entry case RealDriveEntry(:final info)) ...[
                 const SizedBox(width: 12),
                 OutlinedButton.icon(
                   icon: const Icon(Icons.eject_outlined),
                   label: const Text('Eject'),
                   onPressed: () async {
-                    await Process.run('eject', [(entry as RealDriveEntry).info.device]);
+                    await Process.run('eject', [info.device]);
                     ref.read(ripStateProvider(devicePath).notifier).reset();
                   },
                 ),
@@ -242,6 +271,47 @@ class _ErrorPanel extends ConsumerWidget {
           ElevatedButton(
             onPressed: () => ref.read(ripStateProvider(devicePath).notifier).reset(),
             child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoopWaitingPanel extends ConsumerWidget {
+  final String devicePath;
+  final LoopWaiting state;
+  const _LoopWaitingPanel({required this.devicePath, required this.state});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.album_outlined, size: 72,
+              color: Theme.of(context).colorScheme.primary),
+          const SizedBox(height: 16),
+          Text('Waiting for next disc…',
+              style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 4),
+          Text('Insert the next disc to continue automatically.',
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center),
+          if (state.lastOutputFiles.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ...state.lastOutputFiles.map((f) => Text(f,
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center,
+            )),
+          ],
+          const SizedBox(height: 24),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.stop_circle_outlined),
+            label: const Text('Stop loop'),
+            onPressed: () =>
+                ref.read(ripStateProvider(devicePath).notifier).stopLoop(),
           ),
         ],
       ),

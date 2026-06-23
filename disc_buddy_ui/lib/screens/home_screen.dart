@@ -81,7 +81,7 @@ class _NarrowLayoutState extends ConsumerState<_NarrowLayout> {
       return Scaffold(
         appBar: AppBar(
           leading: BackButton(
-            onPressed: () => ref.read(selectedDriveProvider.notifier).state = null,
+            onPressed: () => ref.read(selectedDriveProvider.notifier).select(null),
           ),
           title: Text(selected.displayName),
           titleTextStyle: Theme.of(context).textTheme.titleMedium,

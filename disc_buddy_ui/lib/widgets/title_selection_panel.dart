@@ -49,6 +49,24 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
   }
 
   @override
+  void didUpdateWidget(TitleSelectionPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.content, widget.content)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final s = ref.read(ripStateProvider(widget.entry.id));
+        if (s is RipIdle || s is RipTitleSelection) {
+          ref.read(ripStateProvider(widget.entry.id).notifier).startTitleSelection(
+            widget.content.discTitle,
+            widget.content.titles,
+            _computeAutoSelect(),
+          );
+        }
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _nameController.dispose();
     _seasonController.dispose();
@@ -76,6 +94,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _Header(
+          entryId: widget.entry.id,
           discTitle: widget.content.discTitle,
           discType: widget.content.discType,
           titleCount: widget.content.titles.length,
@@ -119,23 +138,43 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
   }
 }
 
-class _Header extends StatelessWidget {
+class _Header extends ConsumerWidget {
+  final String entryId;
   final String discTitle;
   final DiscType discType;
   final int titleCount;
-  const _Header({required this.discTitle, required this.discType, required this.titleCount});
+  const _Header({
+    required this.entryId,
+    required this.discTitle,
+    required this.discType,
+    required this.titleCount,
+  });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final typeLabel = discType == DiscType.dvd ? 'DVD' : 'Blu-ray';
+    final loopEnabled = ref.watch(loopEnabledProvider(entryId));
     return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
         children: [
-          Text(discTitle, style: Theme.of(context).textTheme.titleLarge),
-          Text('$typeLabel · $titleCount title${titleCount == 1 ? '' : 's'} found',
-            style: Theme.of(context).textTheme.bodySmall),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(discTitle, style: Theme.of(context).textTheme.titleLarge),
+                Text('$typeLabel · $titleCount title${titleCount == 1 ? '' : 's'} found',
+                  style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
+          ),
+          FilterChip(
+            label: const Text('Loop'),
+            avatar: const Icon(Icons.loop, size: 16),
+            selected: loopEnabled,
+            onSelected: (_) =>
+                ref.read(ripStateProvider(entryId).notifier).toggleLoop(),
+          ),
         ],
       ),
     );

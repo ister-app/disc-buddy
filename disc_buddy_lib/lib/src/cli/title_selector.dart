@@ -77,6 +77,11 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
   //     (each within ±30 % of their mutual median duration), and
   //   • the primary (pgcIndex 0) is ≥ 1.5× that median (i.e. clearly longer).
   // Return the individual episodes only; the compilation is discarded.
+  //
+  // Also handles the reverse layout: if the compilation is stored at a
+  // non-zero pgcIndex while pgcIndex 0 is itself an episode-length PGC,
+  // include pgcIndex 0 among the returned episodes and discard the
+  // non-primary compilation angle.
   final compilationEps = <DvdTitle>[];
   for (final group in byVts.values) {
     final others = group
@@ -88,7 +93,13 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
       (t) => t.pgcIndex == 0,
       orElse: () => group.first,
     );
-    if (primary.duration < minDur) continue;
+
+    // If pgcIndex 0 is a short menu stub (< minDur) and there are enough
+    // episode-like non-primary angles, treat it as the menu-stub variant of
+    // the compilation pattern; otherwise require the primary to be real content.
+    final primaryIsStub = primary.duration < minDur;
+
+    if (primaryIsStub && others.length < 3) continue;
 
     final otherSecs = others.map((t) => t.duration.inSeconds).toList()..sort();
     final median    = otherSecs[(otherSecs.length - 1) ~/ 2];
@@ -97,20 +108,38 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
     // Non-primary angles must be coherent amongst themselves.
     // Double-episode PGCs (≈ 2× median) are tolerated: some discs pack one
     // two-episode entry alongside single episodes in the same VTS.
-    final seriesLike = others.every((t) {
+    // Split others into episode-like and compilation-like: if a non-primary
+    // angle is much longer than the median it may itself be the play-all
+    // compilation rather than an individual episode.
+    bool isEpLike(DvdTitle t) {
       final diff  = (t.duration.inSeconds - median).abs();
       if (diff <= median * 0.3) return true;
       final diff2 = (t.duration.inSeconds - 2 * median).abs();
       return diff2 <= 2 * median * 0.3;
-    });
-    if (!seriesLike) continue;
+    }
+    final epOthers   = others.where(isEpLike).toList();
+    final compOthers = others.where(
+        (t) => !isEpLike(t) && t.duration.inSeconds > median * 1.5).toList();
+    if (epOthers.length < 2) continue;
 
-    // Primary must be notably longer (compilation threshold).
-    if (primary.duration.inSeconds < median * 1.5) continue;
-
-    compilationEps.addAll(
-      others..sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex)),
-    );
+    if (primary.duration.inSeconds >= median * 1.5) {
+      // Original case: pgcIndex 0 is the compilation.
+      compilationEps.addAll(
+        epOthers..sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex)),
+      );
+    } else if (compOthers.isNotEmpty && isEpLike(primary)) {
+      // A non-primary angle is the compilation; primary is also an episode.
+      compilationEps.addAll(
+        ([primary, ...epOthers]
+          ..sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex))),
+      );
+    } else if (primaryIsStub && compOthers.isNotEmpty && epOthers.length >= 2) {
+      // pgcIndex 0 is a menu stub; the compilation is a non-primary angle and
+      // the individual episodes are the remaining non-primary angles.
+      compilationEps.addAll(
+        epOthers..sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex)),
+      );
+    }
   }
   if (compilationEps.isNotEmpty) {
     // Also pick up standalone episodes from other VTS groups that have a
@@ -310,16 +339,15 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
   });
 }
 
-/// Returns a deduplicated list of [titles] where cross-VTS groups that
-/// represent the same episode (DVD navigation artifact) are collapsed to their
-/// first occurrence.
+/// Returns a deduplicated list of [titles] where:
 ///
-/// Two VTS groups are considered the same episode when their primary angles
-/// (pgcIndex 0) share the same duration (within 1 s) and audio/subtitle track
-/// counts.  Matching chapter timestamps confirm the match; mismatching
-/// timestamps do not override the structural match because different IFO
-/// entries for the same physical VOB content can carry differing timing
-/// metadata.
+/// 1. Cross-VTS groups that represent the same episode (DVD navigation
+///    artifact) are collapsed to their first occurrence.
+/// 2. Within each surviving VTS group, angles whose chapter timestamps match
+///    the primary angle (pgcIndex 0) are removed — they are true camera-angle
+///    duplicates (same content, different camera position).  Angles with
+///    different chapter positions are kept because they store different episode
+///    content in the angle slots (e.g. a play-all PGC plus individual episodes).
 List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
   const chapTol = Duration(seconds: 2);
 
@@ -358,15 +386,32 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
     return true;
   }
 
+  // Returns true if [other] is a true camera-angle duplicate of [primary]:
+  // same content recorded from a different angle.  Chapter timestamps are the
+  // authoritative signal; duration (within 1 s) is the fallback when no
+  // chapter data is available.
+  bool isCameraAngleDuplicate(DvdTitle primary, DvdTitle other) {
+    final pc = primary.chapters;
+    final oc = other.chapters;
+    if (pc.length >= 2 && pc.length == oc.length) {
+      return pc.indexed.every((e) => (e.$2 - oc[e.$1]).abs() <= chapTol);
+    }
+    return (primary.duration.inSeconds - other.duration.inSeconds).abs() <= 1;
+  }
+
   final seen = <List<DvdTitle>>[];
   for (final entry in groups) {
     final group = entry.value;
     if (!seen.any((s) => isDuplicate(s, group))) seen.add(group);
   }
 
-  return seen
-      .expand((g) => g..sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex)))
-      .toList();
+  return seen.expand((g) {
+    g.sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex));
+    final primary = g.firstWhere((t) => t.pgcIndex == 0, orElse: () => g.first);
+    return g.where(
+      (t) => t.pgcIndex == 0 || !isCameraAngleDuplicate(primary, t),
+    );
+  }).toList();
 }
 
 // ---------------------------------------------------------------------------

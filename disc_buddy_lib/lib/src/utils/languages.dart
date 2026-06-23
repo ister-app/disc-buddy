@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'tty.dart';
+import '../rippers/video_disc_ripper.dart' show LogCallback;
 
 /// ISO 639-1 (2-letter) → ISO 639-2/B (3-letter bibliographic).
 const iso639_1to2B = {
@@ -56,24 +57,29 @@ String channelLabel(int ch) => channelLabels[ch] ?? '${ch}ch';
   required List<String> audioCurrents,
   required List<String> subCurrents,
   required bool force,
+  LogCallback? onLog,
 }) {
   if (audioCurrents.isEmpty && subCurrents.isEmpty) {
     return (audioLangs: [], subLangs: []);
   }
 
-  stdout.writeln('   Current languages:');
+  void emit(String msg) {
+    if (onLog != null) { onLog(msg); } else { stdout.writeln(msg); }
+  }
+
+  emit('   Current languages:');
   for (var i = 0; i < audioCurrents.length; i++) {
     final extra = i < audioLabels.length ? audioLabels[i] : '';
     final e = extra.isNotEmpty ? ' ($extra)' : '';
     final lang = audioCurrents[i];
-    stdout.writeln('     Audio ${i + 1}$e: ${lang.isNotEmpty ? lang : "?"}');
+    emit('     Audio ${i + 1}$e: ${lang.isNotEmpty ? lang : "?"}');
   }
   for (var i = 0; i < subCurrents.length; i++) {
     final lang = subCurrents[i];
-    stdout.writeln('     Subtitle ${i + 1}: ${lang.isNotEmpty ? lang : "?"}');
+    emit('     Subtitle ${i + 1}: ${lang.isNotEmpty ? lang : "?"}');
   }
 
-  if (force) {
+  if (force || onLog != null) {
     return (audioLangs: List.of(audioCurrents), subLangs: List.of(subCurrents));
   }
 

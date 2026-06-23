@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/rip_state.dart';
 import '../providers/rip_state_provider.dart';
@@ -263,19 +264,46 @@ class _LogViewState extends State<_LogView> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.all(8),
-      itemCount: widget.log.length,
-      itemBuilder: (context, i) => Text(
-        widget.log[i],
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          fontFamily: 'monospace',
-          color: widget.log[i].startsWith('[ERR]')
-              ? Theme.of(context).colorScheme.error
-              : null,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            icon: const Icon(Icons.copy, size: 14),
+            label: const Text('Copy log'),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              textStyle: Theme.of(context).textTheme.labelSmall,
+            ),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: widget.log.join('\n')));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Log copied to clipboard'), duration: Duration(seconds: 2)),
+              );
+            },
+          ),
         ),
-      ),
+        Expanded(
+          child: SelectionArea(
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              itemCount: widget.log.length,
+              itemBuilder: (context, i) => Text(
+                widget.log[i],
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  color: widget.log[i].startsWith('[ERR]')
+                      ? Theme.of(context).colorScheme.error
+                      : null,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

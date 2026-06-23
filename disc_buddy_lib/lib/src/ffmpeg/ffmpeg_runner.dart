@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import '../rippers/video_disc_ripper.dart' show LogCallback;
 
 class FfmpegProgress {
   final Duration elapsed;
@@ -12,18 +13,22 @@ typedef ProgressCallback = void Function(FfmpegProgress);
 class FfmpegRunner {
   final String executable;
   final void Function(Process)? onProcessStarted;
+  final LogCallback? onLog;
 
-  const FfmpegRunner({this.executable = 'ffmpeg', this.onProcessStarted});
+  const FfmpegRunner({this.executable = 'ffmpeg', this.onProcessStarted, this.onLog});
 
   /// Runs ffmpeg with the given arguments.
   ///
+  /// [stdinData] — optional stream piped to ffmpeg's stdin (-i pipe:0).
   /// [timeout] — hard maximum run time as a safety net.
   /// [expectedDuration] — expected output duration; once ffmpeg's progress
   ///   reaches this, the process is gracefully stopped after 3 seconds.
   ///   This prevents libcdio from hanging after the last CD track.
   /// [onProgress] — callback for each progress line on stderr.
+  /// [stderrCollect] — if provided, all non-progress stderr lines are appended.
   Future<int> run(
     List<String> args, {
+    Stream<List<int>>? stdinData,
     Duration? timeout,
     Duration? expectedDuration,
     ProgressCallback? onProgress,
@@ -32,7 +37,11 @@ class FfmpegRunner {
     final process = await Process.start(executable, args);
     onProcessStarted?.call(process);
 
-    // Hard timeout safety net
+    if (stdinData != null) {
+      // Ignore broken-pipe errors when ffmpeg finishes early.
+      stdinData.pipe(process.stdin).catchError((_) {});
+    }
+
     Timer? killTimer;
     Timer? killSigkillTimer;
     if (timeout != null) {
@@ -65,69 +74,8 @@ class FfmpegRunner {
             });
           }
         } else if (line.trim().isNotEmpty) {
-          // Forward ffmpeg messages (errors, warnings) to stderr
-          stderr.writeln(line);
+          if (onLog != null) { onLog!(line, isError: true); } else { stderr.writeln(line); }
           stderrCollect?.add(line);
-        }
-      }
-    });
-
-    process.stdout.drain<void>();
-
-    final exitCode = await process.exitCode;
-    killTimer?.cancel();
-    killSigkillTimer?.cancel();
-    completionTimer?.cancel();
-    completionSigkillTimer?.cancel();
-    return exitCode;
-  }
-
-  /// Runs ffmpeg with a stream as stdin (-i pipe:0).
-  Future<int> runWithStdin(
-    List<String> args,
-    Stream<List<int>> stdinData, {
-    Duration? timeout,
-    Duration? expectedDuration,
-    ProgressCallback? onProgress,
-  }) async {
-    final process = await Process.start(executable, args);
-    onProcessStarted?.call(process);
-
-    // Pipe stdinData to the process; ignore write errors (broken pipe when
-    // ffmpeg finishes early)
-    stdinData.pipe(process.stdin).catchError((_) {});
-
-    Timer? killTimer;
-    Timer? killSigkillTimer;
-    if (timeout != null) {
-      killTimer = Timer(timeout, () {
-        process.kill(ProcessSignal.sigterm);
-        killSigkillTimer = Timer(
-            const Duration(seconds: 5), () => process.kill(ProcessSignal.sigkill));
-      });
-    }
-
-    Timer? completionTimer;
-    Timer? completionSigkillTimer;
-
-    process.stderr
-        .transform(const SystemEncoding().decoder)
-        .listen((chunk) {
-      for (final line in chunk.split('\r')) {
-        final progress = _parseProgress(line);
-        if (progress != null) {
-          onProgress?.call(progress);
-          if (expectedDuration != null &&
-              completionTimer == null &&
-              progress.elapsed >= expectedDuration) {
-            completionTimer = Timer(const Duration(seconds: 3), () {
-              process.kill(ProcessSignal.sigterm);
-              completionSigkillTimer = Timer(const Duration(seconds: 5),
-                  () => process.kill(ProcessSignal.sigkill));
-            });
-          }
-        } else if (line.trim().isNotEmpty) {
-          stderr.writeln(line);
         }
       }
     });

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:isolate';
 import 'package:disc_buddy/disc_buddy.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/disc_content.dart';
@@ -57,12 +59,16 @@ final virtualEntriesProvider = NotifierProvider<VirtualEntriesNotifier, List<Vir
 );
 
 /// Real drives polled every 2 seconds.
+/// DriveDetector.detect() contains synchronous FFI (CDROM_DRIVE_STATUS ioctl)
+/// which can block while drives are under heavy I/O. Running in a background
+/// isolate keeps the UI thread responsive during ripping.
 final realDrivesProvider = StreamProvider<List<DriveInfo>>((ref) async* {
   while (true) {
     try {
-      final drives = await DriveDetector.detect();
+      final drives = await Isolate.run(DriveDetector.detect);
       yield drives;
-    } catch (_) {
+    } catch (e) {
+      stderr.writeln('DriveDetector error: $e');
       yield [];
     }
     await Future.delayed(const Duration(seconds: 2));
@@ -82,6 +88,8 @@ final driveListProvider = Provider<AsyncValue<List<DriveEntry>>>((ref) {
 class _SelectedDriveNotifier extends Notifier<String?> {
   @override
   String? build() => null;
+
+  void select(String? id) => state = id;
 }
 
 /// ID of the currently selected drive entry.

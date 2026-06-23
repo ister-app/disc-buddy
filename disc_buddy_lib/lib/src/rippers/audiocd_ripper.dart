@@ -22,7 +22,7 @@ class AudioCDRipper {
   final ProgressCallback? onProgress;
 
   AudioCDRipper(this.options, {this.onLog, this.onProgress})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg);
+      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onLog: onLog);
 
   void _log(String msg, {bool isError = false}) {
     if (onLog != null) {
@@ -202,7 +202,7 @@ class AudioCDRipper {
 
       _log('── Ripping: track $nr → ${outFile.path}');
 
-      if (!await confirmOverwrite(outFile, force: options.force)) continue;
+      if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
 
       final trackArtist = track.artist.isNotEmpty ? track.artist : meta.albumArtist;
       final dur = track.duration;

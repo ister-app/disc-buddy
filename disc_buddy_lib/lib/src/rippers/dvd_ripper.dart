@@ -22,7 +22,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   final ProgressCallback? onProgress;
 
   DVDRipper(this.options, {this.onLog, this.onProgress, void Function(Process)? onFfmpegProcess})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess);
+      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess, onLog: onLog);
 
   static List<T> _filterByLang<T>(
       List<T> tracks, Set<String> langs, String Function(T) getLang) {
@@ -109,7 +109,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     final langsMap = <DvdTitle, ({List<String> audioLangs, List<String> subLangs})>{};
     for (final title in selected) {
       _log('── Languages: title ${title.displayKey} [${title.durationLabel}]');
-      langsMap[title] = _collectLanguages(title, force: options.force);
+      langsMap[title] = _collectLanguages(title, force: options.force, onLog: onLog);
     }
     if (!options.force) _log('');
 
@@ -148,7 +148,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
       _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
-      if (!await confirmOverwrite(outFile, force: options.force)) continue;
+      if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
 
       final langs = langsMap[title]!;
       final cells = title.cells.isNotEmpty ? title.cells : null;
@@ -202,9 +202,9 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       ];
 
       final dur      = title.duration.inSeconds;
-      final exitCode = await _ffmpeg.runWithStdin(
+      final exitCode = await _ffmpeg.run(
         args,
-        ripStream,
+        stdinData:        ripStream,
         timeout:          Duration(seconds: dur + 120),
         expectedDuration: title.duration,
         onProgress:       onProgress ?? logProgress,
@@ -216,7 +216,12 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       if (exitCode == 0 && fileSize > 0) {
         _log('   Done: ${outFile.path}');
         await _injectSubtitlePalette(outFile, title, langs.subLangs);
-        await _extractClosedCaptions(outFile, title);
+        final ccCells = title.cells.isNotEmpty ? title.cells : null;
+        await _extractClosedCaptions(
+          outFile,
+          title,
+          sourceStreamFactory: () => session.stream(title.vtsNumber, cells: ccCells),
+        );
       } else {
         _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
         await outFile.delete().catchError((e) {
@@ -243,7 +248,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
         _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
-        if (!await confirmOverwrite(outFile, force: options.force)) continue;
+        if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
 
         final vobFiles = _collectVobs(mp, title.vtsNumber);
         if (vobFiles.isEmpty) {
@@ -302,7 +307,13 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         if (exitCode == 0 && fileSize > 0) {
           _log('   Done: ${outFile.path}');
           await _injectSubtitlePalette(outFile, title, langs.subLangs);
-          await _extractClosedCaptions(outFile, title);
+          await _extractClosedCaptions(
+            outFile,
+            title,
+            sourceStreamFactory: () async* {
+              for (final path in vobFiles) { yield* File(path).openRead(); }
+            },
+          );
         } else {
           _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
           await outFile.delete().catchError((e) {
@@ -460,35 +471,8 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         : 576; // PAL (default)
     final is16x9 = data.length > 0x200 && ((data[0x200] >> 2) & 0x3) == 3;
 
-    // VTS-level: audio and subtitle attribute tables (for language/codec)
-    const audioFormats = {0: 'AC3', 2: 'MP2', 3: 'MP2E', 4: 'LPCM', 6: 'DTS'};
-    final vtsAudio = <int, ({String lang, String codec, int channels})>{};
-    try {
-      final numAudio = bd.getUint16(0x202, Endian.big);
-      for (var i = 0; i < numAudio && i < 8; i++) {
-        final off  = 0x204 + i * 8;
-        if (off + 4 > data.length) break;
-        final fmt  = (data[off] >> 5) & 0x7;
-        final ch   = (data[off + 1] & 0x7) + 1;
-        final lang = (data[off + 2] > 0x20 && data[off + 3] > 0x20)
-            ? String.fromCharCodes([data[off + 2], data[off + 3]])
-            : '';
-        vtsAudio[i] = (lang: lang, codec: audioFormats[fmt] ?? 'PCM', channels: ch);
-      }
-    } catch (_) {}
-
-    final vtsSub = <int, String>{};
-    try {
-      final numSubs = bd.getUint16(0x254, Endian.big);
-      for (var i = 0; i < numSubs && i < 32; i++) {
-        final off  = 0x256 + i * 6;
-        if (off + 4 > data.length) break;
-        final lang = (data[off + 2] > 0x20 && data[off + 3] > 0x20)
-            ? String.fromCharCodes([data[off + 2], data[off + 3]])
-            : '';
-        vtsSub[i] = lang;
-      }
-    } catch (_) {}
+    final vtsAudio = _readVtsAudioAttribs(data, bd);
+    final vtsSub   = _readVtsSubtitleAttribs(data, bd);
 
     // Scan each PGC
     final results = <DvdTitle>[];
@@ -510,227 +494,11 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       }
       if (durSeconds < 5) continue;
 
-      // PGC audio control (pgc + 0x0C, 8 × uint16):
-      //   byte 0 (high byte): bit7 = active, bits2-0 = sub-stream nr → MPEG ID 0x80+nr
-      // PGC subtitle control (pgc + 0x1C, 32 × uint32 per DVD spec):
-      //   byte 0 (bits31-24): bit31=active_4:3,        bits28:24=stream_nr
-      //   byte 1 (bits23-16): bit23=active_widescreen,  bits20:16=stream_nr
-      //   byte 2 (bits15-8):  bit15=active_letterbox,   bits12:8 =stream_nr
-      //   byte 3 (bits7-0):   bit7 =active_pan_scan,    bits4:0  =stream_nr
-      //   MPEG sub-stream ID = 0x20 + stream_nr. Widescreen discs leave byte 0 zero.
-      final activeAudio    = <int>{};
-      final audioStreamIds = <int, int>{}; // ifo_idx → MPEG sub-stream ID
-      final activeSubs     = <int>{};
-      final subStreamIds   = <int, int>{}; // ifo_idx → MPEG sub-stream ID
-      final pgcOk = pgc + 0x1C + 32 * 4 <= data.length;
-      if (pgcOk) {
-        for (var i = 0; i < 8; i++) {
-          final ctrl = bd.getUint16(pgc + 0x0C + i * 2, Endian.big);
-          if ((ctrl & 0x8000) != 0) {
-            activeAudio.add(i);
-            final nr    = (ctrl >> 8) & 0x07;
-            final codec = vtsAudio[i]?.codec ?? '';
-            // DVD private stream 1 sub-IDs are codec-range-specific:
-            //   AC3/MP2: 0x80–0x87,  DTS: 0x88–0x8F,  LPCM: 0xA0–0xA7
-            final base  = codec == 'DTS' ? 0x88 : codec == 'LPCM' ? 0xA0 : 0x80;
-            audioStreamIds[i] = base + nr;
-          }
-        }
-        for (var i = 0; i < 32; i++) {
-          final ctrl  = bd.getUint32(pgc + 0x1C + i * 4, Endian.big);
-          final subId = _pgcSubId(ctrl, prefer16x9: is16x9);
-          if (subId != null) {
-            activeSubs.add(i);
-            subStreamIds[i] = subId;
-          }
-        }
-
-        // Post-process: when multiple IFO subtitle entries map to the same SID
-        // (e.g. a disc where ALL entries share 4:3 stream_nr=0), look at the
-        // widescreen/letterbox/pan-scan stream_nr bytes (even if inactive) for
-        // a unique stream number to differentiate them.
-        final usedSids = <int, int>{};
-        for (var i = 0; i < 32; i++) {
-          if (!subStreamIds.containsKey(i)) continue;
-          final sid = subStreamIds[i]!;
-          if (!usedSids.containsKey(sid)) {
-            usedSids[sid] = i;
-            continue;
-          }
-          // Duplicate SID — try wide, letterbox, pan-scan stream_nrs in order.
-          final ctrl = bd.getUint32(pgc + 0x1C + i * 4, Endian.big);
-          final altNrs = [
-            (ctrl >> 16) & 0x1F, // widescreen stream_nr
-            (ctrl >>  8) & 0x1F, // letterbox stream_nr
-             ctrl        & 0x1F, // pan-scan stream_nr
-          ];
-          for (final nr in altNrs) {
-            final altSid = 0x20 + nr;
-            if (!usedSids.containsKey(altSid)) {
-              subStreamIds[i] = altSid;
-              usedSids[altSid] = i;
-              break;
-            }
-          }
-          // If still duplicate after all alternatives, fall back to IFO index.
-          if (subStreamIds[i] == sid) {
-            subStreamIds[i] = 0x20 + i;
-          }
-        }
-      }
-
-      final audioTracks = <AudioTrack>[];
-      for (final entry in vtsAudio.entries) {
-        if (pgcOk && !activeAudio.contains(entry.key)) continue;
-        final a = entry.value;
-        audioTracks.add(AudioTrack(
-          index:    entry.key,
-          streamId: audioStreamIds[entry.key] ?? (0x80 + entry.key),
-          language: a.lang,
-          codec:    a.codec,
-          channels: a.channels,
-        ));
-      }
-
-      final subtitleTracks = <SubtitleTrack>[];
-      for (final entry in vtsSub.entries) {
-        if (pgcOk && !activeSubs.contains(entry.key)) continue;
-        subtitleTracks.add(SubtitleTrack(
-          index:    entry.key,
-          streamId: subStreamIds[entry.key] ?? (0x20 + entry.key),
-          language: entry.value,
-        ));
-      }
-
-      // Cell table + chapter timestamps for this PGC
-      final cells    = <({int first, int last})>[];
-      final chapters = <Duration>[];
-      try {
-        final cpbitRel   = bd.getUint16(pgc + 0xE8, Endian.big);
-        final cpbitOff   = pgc + cpbitRel;
-        final nrCells    = data[pgc + 3];
-        final nrPrograms = data[pgc + 2];
-        int bcdV(int b) => ((b >> 4) & 0xF) * 10 + (b & 0xF);
-
-        // Read each cell's sector range and playback duration.
-        final allFirstSectors = <int>[];
-        final allLastSectors  = <int>[];
-        final allCellSecs     = <int>[];
-        for (var c = 0; c < nrCells; c++) {
-          final coff = cpbitOff + c * 24;
-          if (coff + 24 > data.length) break;
-          allFirstSectors.add(bd.getUint32(coff + 8,  Endian.big));
-          allLastSectors.add(bd.getUint32(coff + 20, Endian.big));
-          final h = bcdV(data[coff + 4]);
-          final m = bcdV(data[coff + 5]);
-          final s = bcdV(data[coff + 6]);
-          allCellSecs.add(h * 3600 + m * 60 + s);
-        }
-
-        // Copy-protection inserts dummy cells (zero or tiny BCD duration,
-        // referencing other angles' sectors) around the real content.
-        // Real cells are identified via the PGMAP:
-        //
-        //   firstReal: first PGMAP entry with non-zero BCD duration → scan
-        //              backwards to also include any adjacent non-zero
-        //              pre-chapter lead-in cells (not in PGMAP but played
-        //              sequentially before the first chapter on hardware).
-        //   lastReal:  last PGMAP entry, then extended while non-zero
-        //              continuation cells remain (covers genuine multi-cell
-        //              last chapters on unprotected discs).
-        int firstReal = 0;
-        int lastReal  = allCellSecs.isNotEmpty ? allCellSecs.length - 1 : 0;
-        if (nrPrograms > 0) {
-          final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
-          final pgmapOff = pgc + pgmapRel;
-          if (pgmapOff < data.length) {
-            // Find first PGMAP cell with non-zero BCD duration.
-            var pgmapAnchor = -1;
-            for (var p = 0; p < nrPrograms && pgmapOff + p < data.length; p++) {
-              final idx = data[pgmapOff + p] - 1;
-              if (idx >= 0 && idx < allCellSecs.length && allCellSecs[idx] > 0) {
-                pgmapAnchor = idx;
-                break;
-              }
-            }
-            if (pgmapAnchor < 0) {
-              // All PGMAP cells are zero-duration; fall back to first entry.
-              firstReal =
-                  (data[pgmapOff] - 1).clamp(0, allCellSecs.length - 1);
-            } else {
-              // Include any non-zero pre-chapter lead-in cells before the
-              // first substantial chapter cell.
-              firstReal = pgmapAnchor;
-              while (firstReal > 0 && allCellSecs[firstReal - 1] > 0) {
-                firstReal--;
-              }
-            }
-
-            // lastReal: last PGMAP cell, then extend while non-zero cells
-            // remain and accumulated duration is still below durSeconds.
-            final lastPgmapIdx = pgmapOff + nrPrograms - 1 < data.length
-                ? (data[pgmapOff + nrPrograms - 1] - 1)
-                    .clamp(firstReal, allCellSecs.length - 1)
-                : firstReal;
-            lastReal = lastPgmapIdx;
-            var accum = 0;
-            for (var i = firstReal; i <= lastReal; i++) {
-              accum += allCellSecs[i];
-            }
-            var next = lastReal + 1;
-            while (next < allCellSecs.length &&
-                   allCellSecs[next] > 0 &&
-                   accum < durSeconds) {
-              accum += allCellSecs[next];
-              lastReal = next;
-              next++;
-            }
-          }
-        }
-
-        // originalToFiltered[i] = filtered index of original cell i, or -1 if
-        // excluded. Used to map PGMAP cell references to filtered chapter times.
-        final originalToFiltered = List.filled(allCellSecs.length, -1);
-        var filteredCount = 0;
-        final cellSecs = <int>[];
-        for (var i = firstReal; i <= lastReal; i++) {
-          final first = allFirstSectors[i];
-          final last  = allLastSectors[i];
-          if (last >= first) cells.add((first: first, last: last));
-          originalToFiltered[i] = filteredCount++;
-          cellSecs.add(allCellSecs[i]);
-        }
-
-        // Cumulative filtered cell start times → chapter timestamps via PGMAP.
-        if (nrPrograms > 0 && cellSecs.isNotEmpty) {
-          final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
-          final pgmapOff = pgc + pgmapRel;
-          final cellStarts = <int>[0];
-          for (final d in cellSecs) { cellStarts.add(cellStarts.last + d); }
-          for (var prog = 0; prog < nrPrograms; prog++) {
-            if (pgmapOff + prog >= data.length) break;
-            final origCell = data[pgmapOff + prog] - 1; // 0-based original index
-            final filtCell = (origCell >= 0 && origCell < originalToFiltered.length)
-                ? originalToFiltered[origCell]
-                : -1;
-            if (filtCell >= 0 && filtCell < cellStarts.length) {
-              chapters.add(Duration(seconds: cellStarts[filtCell]));
-            }
-          }
-        }
-      } catch (_) {}
-
-      // PGC Color Lookup Table at pgc + 0xA4 (16 × 4 bytes).
-      // DVD format per entry: byte0=0x00, byte1=Y, byte2=Cb, byte3=Cr (BT.601).
-      final clut = <int>[];
-      if (pgc + 0xA4 + 64 <= data.length) {
-        for (var i = 0; i < 16; i++) {
-          final y  = data[pgc + 0xA4 + i * 4 + 1];
-          final cb = data[pgc + 0xA4 + i * 4 + 2];
-          final cr = data[pgc + 0xA4 + i * 4 + 3];
-          clut.add(_ycbcrToRgb(y, cb, cr));
-        }
-      }
+      final streams      = _scanPgcStreams(data, bd, pgc, is16x9, vtsAudio);
+      final audioTracks  = _buildAudioTracks(vtsAudio, streams);
+      final subtitleTracks = _buildSubtitleTracks(vtsSub, streams);
+      final cellsAndChapters = _scanPgcCells(data, bd, pgc, durSeconds);
+      final clut         = _readPgcClut(data, pgc);
 
       results.add(DvdTitle(
         vtsNumber:      vtsNum,
@@ -739,13 +507,304 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         duration:       Duration(seconds: durSeconds),
         audioTracks:    audioTracks,
         subtitleTracks: subtitleTracks,
-        cells:          cells,
-        chapters:       chapters,
+        cells:          cellsAndChapters.cells,
+        chapters:       cellsAndChapters.chapters,
         clut:           clut,
         videoHeight:    videoHeight,
       ));
     }
     return results;
+  }
+
+  // ---------------------------------------------------------------------------
+  // _scanVts helpers
+  // ---------------------------------------------------------------------------
+
+  static const _audioFormats = {0: 'AC3', 2: 'MP2', 3: 'MP2E', 4: 'LPCM', 6: 'DTS'};
+
+  /// Reads the VTS-level audio attribute table (offset 0x202).
+  static Map<int, ({String lang, String codec, int channels})> _readVtsAudioAttribs(
+      Uint8List data, ByteData bd) {
+    final result = <int, ({String lang, String codec, int channels})>{};
+    try {
+      final numAudio = bd.getUint16(0x202, Endian.big);
+      for (var i = 0; i < numAudio && i < 8; i++) {
+        final off  = 0x204 + i * 8;
+        if (off + 4 > data.length) break;
+        final fmt  = (data[off] >> 5) & 0x7;
+        final ch   = (data[off + 1] & 0x7) + 1;
+        final lang = (data[off + 2] > 0x20 && data[off + 3] > 0x20)
+            ? String.fromCharCodes([data[off + 2], data[off + 3]])
+            : '';
+        result[i] = (lang: lang, codec: _audioFormats[fmt] ?? 'PCM', channels: ch);
+      }
+    } catch (_) {}
+    return result;
+  }
+
+  /// Reads the VTS-level subtitle attribute table (offset 0x254).
+  static Map<int, String> _readVtsSubtitleAttribs(Uint8List data, ByteData bd) {
+    final result = <int, String>{};
+    try {
+      final numSubs = bd.getUint16(0x254, Endian.big);
+      for (var i = 0; i < numSubs && i < 32; i++) {
+        final off  = 0x256 + i * 6;
+        if (off + 4 > data.length) break;
+        final lang = (data[off + 2] > 0x20 && data[off + 3] > 0x20)
+            ? String.fromCharCodes([data[off + 2], data[off + 3]])
+            : '';
+        result[i] = lang;
+      }
+    } catch (_) {}
+    return result;
+  }
+
+  /// Scans the PGC audio/subtitle control words and returns the active stream IDs.
+  ///
+  /// PGC audio control (pgc + 0x0C, 8 × uint16):
+  ///   high byte: bit7 = active, bits2-0 = sub-stream nr → MPEG ID 0x80+nr
+  /// PGC subtitle control (pgc + 0x1C, 32 × uint32):
+  ///   see _pgcSubId for bit layout.
+  static ({
+    bool pgcOk,
+    Set<int> activeAudio,
+    Map<int, int> audioStreamIds,
+    Set<int> activeSubs,
+    Map<int, int> subStreamIds,
+  }) _scanPgcStreams(
+    Uint8List data,
+    ByteData bd,
+    int pgc,
+    bool is16x9,
+    Map<int, ({String lang, String codec, int channels})> vtsAudio,
+  ) {
+    final activeAudio    = <int>{};
+    final audioStreamIds = <int, int>{};
+    final activeSubs     = <int>{};
+    final subStreamIds   = <int, int>{};
+    final pgcOk          = pgc + 0x1C + 32 * 4 <= data.length;
+
+    if (!pgcOk) {
+      return (pgcOk: false, activeAudio: activeAudio, audioStreamIds: audioStreamIds,
+              activeSubs: activeSubs, subStreamIds: subStreamIds);
+    }
+
+    for (var i = 0; i < 8; i++) {
+      final ctrl = bd.getUint16(pgc + 0x0C + i * 2, Endian.big);
+      if ((ctrl & 0x8000) != 0) {
+        activeAudio.add(i);
+        final nr    = (ctrl >> 8) & 0x07;
+        final codec = vtsAudio[i]?.codec ?? '';
+        // DVD private stream 1 sub-IDs are codec-range-specific:
+        //   AC3/MP2: 0x80–0x87,  DTS: 0x88–0x8F,  LPCM: 0xA0–0xA7
+        final base  = codec == 'DTS' ? 0x88 : codec == 'LPCM' ? 0xA0 : 0x80;
+        audioStreamIds[i] = base + nr;
+      }
+    }
+
+    for (var i = 0; i < 32; i++) {
+      final ctrl  = bd.getUint32(pgc + 0x1C + i * 4, Endian.big);
+      final subId = _pgcSubId(ctrl, prefer16x9: is16x9);
+      if (subId != null) {
+        activeSubs.add(i);
+        subStreamIds[i] = subId;
+      }
+    }
+
+    // Post-process: when multiple IFO subtitle entries map to the same SID
+    // (e.g. a disc where ALL entries share 4:3 stream_nr=0), look at the
+    // widescreen/letterbox/pan-scan stream_nr bytes (even if inactive) for
+    // a unique stream number to differentiate them.
+    final usedSids = <int, int>{};
+    for (var i = 0; i < 32; i++) {
+      if (!subStreamIds.containsKey(i)) continue;
+      final sid = subStreamIds[i]!;
+      if (!usedSids.containsKey(sid)) {
+        usedSids[sid] = i;
+        continue;
+      }
+      // Duplicate SID — try wide, letterbox, pan-scan stream_nrs in order.
+      final ctrl   = bd.getUint32(pgc + 0x1C + i * 4, Endian.big);
+      final altNrs = [
+        (ctrl >> 16) & 0x1F, // widescreen stream_nr
+        (ctrl >>  8) & 0x1F, // letterbox stream_nr
+         ctrl        & 0x1F, // pan-scan stream_nr
+      ];
+      for (final nr in altNrs) {
+        final altSid = 0x20 + nr;
+        if (!usedSids.containsKey(altSid)) {
+          subStreamIds[i] = altSid;
+          usedSids[altSid] = i;
+          break;
+        }
+      }
+      if (subStreamIds[i] == sid) subStreamIds[i] = 0x20 + i;
+    }
+
+    return (pgcOk: pgcOk, activeAudio: activeAudio, audioStreamIds: audioStreamIds,
+            activeSubs: activeSubs, subStreamIds: subStreamIds);
+  }
+
+  static List<AudioTrack> _buildAudioTracks(
+    Map<int, ({String lang, String codec, int channels})> vtsAudio,
+    ({bool pgcOk, Set<int> activeAudio, Map<int, int> audioStreamIds,
+      Set<int> activeSubs, Map<int, int> subStreamIds}) streams,
+  ) {
+    final tracks = <AudioTrack>[];
+    for (final entry in vtsAudio.entries) {
+      if (streams.pgcOk && !streams.activeAudio.contains(entry.key)) continue;
+      final a = entry.value;
+      tracks.add(AudioTrack(
+        index:    entry.key,
+        streamId: streams.audioStreamIds[entry.key] ?? (0x80 + entry.key),
+        language: a.lang,
+        codec:    a.codec,
+        channels: a.channels,
+      ));
+    }
+    return tracks;
+  }
+
+  static List<SubtitleTrack> _buildSubtitleTracks(
+    Map<int, String> vtsSub,
+    ({bool pgcOk, Set<int> activeAudio, Map<int, int> audioStreamIds,
+      Set<int> activeSubs, Map<int, int> subStreamIds}) streams,
+  ) {
+    final tracks = <SubtitleTrack>[];
+    for (final entry in vtsSub.entries) {
+      if (streams.pgcOk && !streams.activeSubs.contains(entry.key)) continue;
+      tracks.add(SubtitleTrack(
+        index:    entry.key,
+        streamId: streams.subStreamIds[entry.key] ?? (0x20 + entry.key),
+        language: entry.value,
+      ));
+    }
+    return tracks;
+  }
+
+  /// Extracts the cell sector ranges and chapter timestamps for one PGC.
+  static ({List<({int first, int last})> cells, List<Duration> chapters})
+      _scanPgcCells(Uint8List data, ByteData bd, int pgc, int durSeconds) {
+    final cells    = <({int first, int last})>[];
+    final chapters = <Duration>[];
+    try {
+      final cpbitRel   = bd.getUint16(pgc + 0xE8, Endian.big);
+      final cpbitOff   = pgc + cpbitRel;
+      final nrCells    = data[pgc + 3];
+      final nrPrograms = data[pgc + 2];
+      int bcdV(int b) => ((b >> 4) & 0xF) * 10 + (b & 0xF);
+
+      final allFirstSectors = <int>[];
+      final allLastSectors  = <int>[];
+      final allCellSecs     = <int>[];
+      for (var c = 0; c < nrCells; c++) {
+        final coff = cpbitOff + c * 24;
+        if (coff + 24 > data.length) break;
+        allFirstSectors.add(bd.getUint32(coff + 8,  Endian.big));
+        allLastSectors.add(bd.getUint32(coff + 20, Endian.big));
+        final h = bcdV(data[coff + 4]);
+        final m = bcdV(data[coff + 5]);
+        final s = bcdV(data[coff + 6]);
+        allCellSecs.add(h * 3600 + m * 60 + s);
+      }
+
+      // Copy-protection inserts dummy cells (zero or tiny BCD duration,
+      // referencing other angles' sectors) around the real content.
+      // Real cells are identified via the PGMAP:
+      //
+      //   firstReal: first PGMAP entry with non-zero BCD duration → scan
+      //              backwards to also include any adjacent non-zero
+      //              pre-chapter lead-in cells (not in PGMAP but played
+      //              sequentially before the first chapter on hardware).
+      //   lastReal:  last PGMAP entry, then extended while non-zero
+      //              continuation cells remain (covers genuine multi-cell
+      //              last chapters on unprotected discs).
+      int firstReal = 0;
+      int lastReal  = allCellSecs.isNotEmpty ? allCellSecs.length - 1 : 0;
+      if (nrPrograms > 0) {
+        final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
+        final pgmapOff = pgc + pgmapRel;
+        if (pgmapOff < data.length) {
+          var pgmapAnchor = -1;
+          for (var p = 0; p < nrPrograms && pgmapOff + p < data.length; p++) {
+            final idx = data[pgmapOff + p] - 1;
+            if (idx >= 0 && idx < allCellSecs.length && allCellSecs[idx] > 0) {
+              pgmapAnchor = idx;
+              break;
+            }
+          }
+          if (pgmapAnchor < 0) {
+            firstReal = (data[pgmapOff] - 1).clamp(0, allCellSecs.length - 1);
+          } else {
+            firstReal = pgmapAnchor;
+            while (firstReal > 0 && allCellSecs[firstReal - 1] > 0) {
+              firstReal--;
+            }
+          }
+
+          final lastPgmapIdx = pgmapOff + nrPrograms - 1 < data.length
+              ? (data[pgmapOff + nrPrograms - 1] - 1)
+                  .clamp(firstReal, allCellSecs.length - 1)
+              : firstReal;
+          lastReal = lastPgmapIdx;
+          var accum = 0;
+          for (var i = firstReal; i <= lastReal; i++) {
+            accum += allCellSecs[i];
+          }
+          var next = lastReal + 1;
+          while (next < allCellSecs.length &&
+                 allCellSecs[next] > 0 &&
+                 accum < durSeconds) {
+            accum += allCellSecs[next];
+            lastReal = next;
+            next++;
+          }
+        }
+      }
+
+      final originalToFiltered = List.filled(allCellSecs.length, -1);
+      var filteredCount = 0;
+      final cellSecs = <int>[];
+      for (var i = firstReal; i <= lastReal; i++) {
+        final first = allFirstSectors[i];
+        final last  = allLastSectors[i];
+        if (last >= first) cells.add((first: first, last: last));
+        originalToFiltered[i] = filteredCount++;
+        cellSecs.add(allCellSecs[i]);
+      }
+
+      if (nrPrograms > 0 && cellSecs.isNotEmpty) {
+        final pgmapRel = bd.getUint16(pgc + 0xE6, Endian.big);
+        final pgmapOff = pgc + pgmapRel;
+        final cellStarts = <int>[0];
+        for (final d in cellSecs) { cellStarts.add(cellStarts.last + d); }
+        for (var prog = 0; prog < nrPrograms; prog++) {
+          if (pgmapOff + prog >= data.length) break;
+          final origCell = data[pgmapOff + prog] - 1;
+          final filtCell = (origCell >= 0 && origCell < originalToFiltered.length)
+              ? originalToFiltered[origCell]
+              : -1;
+          if (filtCell >= 0 && filtCell < cellStarts.length) {
+            chapters.add(Duration(seconds: cellStarts[filtCell]));
+          }
+        }
+      }
+    } catch (_) {}
+    return (cells: cells, chapters: chapters);
+  }
+
+  /// Reads the PGC Color Lookup Table at pgc + 0xA4 (16 × 4 bytes, YCbCr BT.601).
+  static List<int> _readPgcClut(Uint8List data, int pgc) {
+    final clut = <int>[];
+    if (pgc + 0xA4 + 64 <= data.length) {
+      for (var i = 0; i < 16; i++) {
+        final y  = data[pgc + 0xA4 + i * 4 + 1];
+        final cb = data[pgc + 0xA4 + i * 4 + 2];
+        final cr = data[pgc + 0xA4 + i * 4 + 3];
+        clut.add(_ycbcrToRgb(y, cb, cr));
+      }
+    }
+    return clut;
   }
 
   // ---------------------------------------------------------------------------
@@ -755,6 +814,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   static ({List<String> audioLangs, List<String> subLangs}) _collectLanguages(
     DvdTitle title, {
     bool force = false,
+    LogCallback? onLog,
   }) {
     final audioLabels   = [
       for (final a in title.audioTracks)
@@ -771,6 +831,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       audioCurrents: audioCurrents,
       subCurrents:   subCurrents,
       force:         force,
+      onLog:         onLog,
     );
   }
 
@@ -957,18 +1018,43 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   // Closed Caption extraction (EIA-608 / NTSC DVDs)
   // ---------------------------------------------------------------------------
 
-  /// Extracts EIA-608 CC subtitles from [outFile] for NTSC titles (videoHeight == 480)
+  /// Extracts EIA-608 CC subtitles for NTSC titles (videoHeight == 480)
   /// that have no IFO-declared subtitle tracks. The SRT is embedded in the MKV as a
   /// subtitle track and the sidecar file is removed.
-  Future<void> _extractClosedCaptions(File outFile, DvdTitle title) async {
+  ///
+  /// When [sourceStreamFactory] is provided, CC is extracted from the original
+  /// MPEG-PS source (dvdread stream or VOB files) instead of the ripped MKV.
+  /// This preserves EDM user_data packets that ffmpeg may drop when remuxing
+  /// MPEG-PS → MKV, giving accurate caption end-times.
+  Future<void> _extractClosedCaptions(
+    File outFile,
+    DvdTitle title, {
+    Stream<List<int>> Function()? sourceStreamFactory,
+  }) async {
     // CC is an NTSC-only standard. PAL discs use teletext instead.
     if (title.videoHeight != 480) return;
     // Skip if the IFO already provided subtitle tracks (they were ripped above).
     if (title.subtitleTracks.isNotEmpty) return;
 
     final extractor = CcExtractor(ffmpeg: options.ffmpeg, onLog: onLog);
-    final srtFile = await extractor.extractFromMkv(outFile);
-    if (srtFile == null) return;
+
+    File? srtFile;
+    if (sourceStreamFactory != null) {
+      final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
+      srtFile = await extractor.extractFromMpegPsStream(
+        sourceStreamFactory(),
+        File('$stem.en.srt'),
+      );
+    } else {
+      srtFile = await extractor.extractFromMkv(outFile);
+    }
+
+    if (srtFile == null) {
+      // No CC content, but strip the user_data identifiers anyway so players
+      // don't show empty "Closed Captions 1-4" tracks from the MPEG-2 stream.
+      await _stripMkvCcUserData(outFile);
+      return;
+    }
 
     await _embedSrtInMkv(outFile, srtFile, 'eng');
   }

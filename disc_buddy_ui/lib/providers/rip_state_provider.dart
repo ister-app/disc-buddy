@@ -185,12 +185,14 @@ void _ripIsolateMain(_RipJob job) async {
       final sOver = config?.subtitleLangOverrides;
 
       if (job.discType == DiscType.dvd) {
+        if (title is! DvdTitle) throw StateError('Expected DvdTitle but got ${title.runtimeType}');
         final ripper = DVDRipper(titleOptions, onLog: log, onProgress: onProgress, onFfmpegProcess: trackProcess);
-        final dvd = _applyDvdLangOverrides(title as DvdTitle, aOver, sOver);
+        final dvd = _applyDvdLangOverrides(title, aOver, sOver);
         await ripper.rip(job.discTitle, [dvd], mountPath: job.mountPath);
       } else if (job.discType == DiscType.bluray) {
+        if (title is! BlurayTitle) throw StateError('Expected BlurayTitle but got ${title.runtimeType}');
         final ripper = BlurayRipper(titleOptions, onLog: log, onProgress: onProgress, onFfmpegProcess: trackProcess);
-        final blu = _applyBlurayLangOverrides(title as BlurayTitle, aOver, sOver);
+        final blu = _applyBlurayLangOverrides(title, aOver, sOver);
         await ripper.rip(job.discTitle, [blu], mountPath: job.mountPath);
       }
 
@@ -392,7 +394,13 @@ class RipStateNotifier extends Notifier<RipState> {
 
     try {
       await ripper.rip(metadata, tracks);
-      state = RipCompleted([]);
+      if (ref.read(loopEnabledProvider(devicePath)) &&
+          devicePath.startsWith('/dev/')) {
+        await Process.run('eject', [devicePath]);
+        state = LoopWaiting(lastOutputFiles: []);
+      } else {
+        state = RipCompleted([]);
+      }
     } catch (e) {
       state = RipError(e.toString());
     }
@@ -682,7 +690,13 @@ class RipStateNotifier extends Notifier<RipState> {
             }
           case _RipDone(:final files):
             receivePort.close();
-            state = RipCompleted(files);
+            if (ref.read(loopEnabledProvider(devicePath)) &&
+                devicePath.startsWith('/dev/')) {
+              await Process.run('eject', [devicePath]);
+              state = LoopWaiting(lastOutputFiles: files);
+            } else {
+              state = RipCompleted(files);
+            }
             return;
           case _RipFail(:final error):
             receivePort.close();
@@ -725,6 +739,16 @@ class RipStateNotifier extends Notifier<RipState> {
     }
   }
 
+  void toggleLoop() {
+    ref.read(loopEnabledProvider(devicePath).notifier).toggle();
+  }
+
+  void stopLoop() {
+    ref.read(loopEnabledProvider(devicePath).notifier).disable();
+    final s = state;
+    if (s is LoopWaiting) state = RipCompleted(s.lastOutputFiles);
+  }
+
   void reset() {
     _cancelPort = null;
     _spawnedIsolate = null;
@@ -732,6 +756,22 @@ class RipStateNotifier extends Notifier<RipState> {
     state = RipIdle();
   }
 }
+
+class _LoopEnabledNotifier extends Notifier<bool> {
+  final String devicePath;
+  _LoopEnabledNotifier(this.devicePath);
+
+  @override
+  bool build() => false;
+
+  void toggle() => state = !state;
+  void disable() => state = false;
+}
+
+final loopEnabledProvider =
+    NotifierProvider.family<_LoopEnabledNotifier, bool, String>(
+  (devicePath) => _LoopEnabledNotifier(devicePath),
+);
 
 final ripStateProvider = NotifierProvider.family<RipStateNotifier, RipState, String>(
   (device) => RipStateNotifier(device),

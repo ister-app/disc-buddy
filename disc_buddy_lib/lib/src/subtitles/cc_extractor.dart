@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import '../rippers/video_disc_ripper.dart' show LogCallback;
@@ -54,7 +55,66 @@ class CcExtractor {
 
     final srt = scanner.decoder.buildSrt();
     if (srt.isEmpty) {
-      _log('   No CC captions found.');
+      if (scanner.userDataPackets == 0) {
+        _log('   No CC captions found (no MPEG-2 user_data packets in stream).');
+      } else {
+        _log('   No CC captions found (${scanner.userDataPackets} user_data packet(s) scanned, no EIA-608 data decoded).');
+      }
+      return null;
+    }
+
+    await srtFile.writeAsString(srt, encoding: utf8);
+    _log('   CC subtitle written → ${srtFile.path}');
+    return srtFile;
+  }
+
+  /// Extracts CC subtitles from a raw MPEG-PS stream (dvdread or VOB concat).
+  ///
+  /// Pipes [mpegPsStream] through ffmpeg to demux the video elementary stream,
+  /// then scans for EIA-608 user_data. Using the source stream instead of the
+  /// ripped MKV preserves user_data packets (including EDM) that ffmpeg may
+  /// drop when remuxing MPEG-PS → MKV.
+  ///
+  /// Returns the [File] written, or null if no CC found / on error.
+  Future<File?> extractFromMpegPsStream(
+    Stream<List<int>> mpegPsStream,
+    File srtFile,
+  ) async {
+    if (await srtFile.exists()) {
+      _log('   CC subtitle: already exists, skipping.');
+      return srtFile;
+    }
+
+    _log('   Scanning source stream for EIA-608 closed captions…');
+
+    final process = await Process.start(ffmpeg, [
+      '-loglevel', 'error',
+      '-f', 'mpeg',
+      '-i', 'pipe:0',
+      '-map', '0:v:0',
+      '-c:v', 'copy',
+      '-f', 'mpeg2video',
+      'pipe:1',
+    ]);
+
+    // Feed MPEG-PS to stdin concurrently with scanning stdout.
+    // Ignore broken pipe in case ffmpeg exits before consuming all input.
+    unawaited(mpegPsStream.pipe(process.stdin).catchError((_) {}));
+
+    final scanner = _Mpeg2Scanner();
+    final stderrFuture = process.stderr.drain<void>();
+    await for (final chunk in process.stdout) {
+      scanner.addChunk(chunk);
+    }
+    await Future.wait([process.exitCode, stderrFuture]);
+
+    final srt = scanner.decoder.buildSrt();
+    if (srt.isEmpty) {
+      if (scanner.userDataPackets == 0) {
+        _log('   No CC captions found (no MPEG-2 user_data packets in stream).');
+      } else {
+        _log('   No CC captions found (${scanner.userDataPackets} user_data packet(s) scanned, no EIA-608 data decoded).');
+      }
       return null;
     }
 
@@ -80,6 +140,9 @@ class _Mpeg2Scanner {
   int _frameInGop = 0;
 
   final _Eia608Decoder decoder = _Eia608Decoder();
+
+  // Count of user_data packets encountered (useful for diagnosing missing CC).
+  int userDataPackets = 0;
 
   void addChunk(List<int> chunk) {
     _buf.addAll(chunk);
@@ -109,11 +172,12 @@ class _Mpeg2Scanner {
         _frameInGop++;
         i += 4;
       } else if (type == 0xB2) {
-        // user_data — look for CC ("43 43") payload.
+        // user_data — look for CC payload.
         final dataStart = i + 4;
         final dataEnd   = _findNextStartCode(dataStart);
         if (dataEnd < 0) break; // need more data
         if (dataEnd - dataStart >= 4) {
+          userDataPackets++;
           _parseUserData(dataStart, dataEnd);
         }
         i = dataEnd;
@@ -164,28 +228,58 @@ class _Mpeg2Scanner {
   }
 
   void _parseUserData(int start, int end) {
-    // Layout after start code (00 00 01 B2):
-    //   [43][43]   CC marker (ASCII "CC")
-    //   [01][f8]   2-byte ATSC header (version=0x01, flags byte)
-    //   [CC]       cc_count: number of 3-byte ATSC A/53 triples (parity bit stripped)
-    //   [T][D1][D2]  per triple: type byte + 2 EIA-608 data bytes
+    // user_data bytes after start code (00 00 01 B2).
     //
-    // Triple type byte values:
-    //   0xFC = NTSC field 1, valid (standard ATSC A/53)
+    // Supported CC formats:
+    //
+    // A) DVS 053 / SCTE-20 "CC" prefix  (0x4343xx…):
+    //    [43][43]  CC marker
+    //    [type]    0x01 (DVS053): flags byte + cc_count follow
+    //              0x03 (SCTE-20): packed byte [process|zero|cc_count:5|marker]
+    //              other: treated like 0x03 (packed, no extra flags byte)
+    //    type 0x01: [flags][cc_count & 0x7F][triples…]
+    //    type 0x03+: [packed_byte → cc_count=(byte>>1)&0x1F][triples…]
+    //
+    // B) ATSC A/53 "GA94" format  (0x47413934 03 …):
+    //    [47][41][39][34]  "GA94"
+    //    [03]              user_data_type_code
+    //    [packed_byte]     process_cc_data_flag(1)|zero(1)|cc_count(5)|marker(1)
+    //    [triples…]
+    //
+    // Triple type bytes:
+    //   0xFC = NTSC field 1, valid
     //   0xFD = NTSC field 2, valid
-    //   0xFE = DTVCC packet data (skip for EIA-608)
-    //   0xFF = DTVCC packet start; many SD-DVD encoders repurpose this
-    //          as the EIA-608 CC1 data triple (non-standard but common)
-    //   0xF8/0xF9 = NTSC F1/F2 invalid (null pair) — skip
-    if (end - start < 6) return;
-    if (_buf[start] != 0x43 || _buf[start + 1] != 0x43) return; // not CC
-    if (_buf[start + 2] != 0x01) return;                         // not DVS 053 / ATSC
+    //   0xFE = DTVCC packet data (skip)
+    //   0xFF = DTVCC packet start / non-standard F1 (common on SD-DVDs)
+    if (end - start < 4) return;
 
-    // Byte 4 (relative to start) is the cc_count; parity bit may be set.
-    final ccCount = _buf[start + 4] & 0x7F;
+    int ccCountOff;   // index of cc_count byte relative to [start]
+    bool scteStyle;   // true → cc_count = (byte >> 1) & 0x1F; false → byte & 0x7F
+
+    if (_buf[start] == 0x43 && _buf[start + 1] == 0x43) {
+      // "CC" prefix variants
+      final type = _buf[start + 2];
+      if (type == 0x01) {
+        ccCountOff = 4; scteStyle = false;  // flags byte at +3, cc_count at +4
+      } else {
+        ccCountOff = 3; scteStyle = true;   // packed byte at +3
+      }
+    } else if (end - start >= 7 &&
+        _buf[start] == 0x47 && _buf[start + 1] == 0x41 &&
+        _buf[start + 2] == 0x39 && _buf[start + 3] == 0x34 &&
+        _buf[start + 4] == 0x03) {
+      // ATSC A/53 "GA94" format
+      ccCountOff = 5; scteStyle = true;
+    } else {
+      return; // not a recognised CC user_data packet
+    }
+
+    if (start + ccCountOff >= end) return;
+    final countByte = _buf[start + ccCountOff];
+    final ccCount   = scteStyle ? (countByte >> 1) & 0x1F : countByte & 0x7F;
     if (ccCount == 0) return;
 
-    final tripleStart = start + 5;
+    final tripleStart = start + ccCountOff + 1;
     if (tripleStart + ccCount * 3 > end) return; // truncated packet
 
     // Compute millisecond timestamp relative to first GOP timecode.
@@ -197,8 +291,8 @@ class _Mpeg2Scanner {
       final t0 = _buf[off];
       final b1 = _buf[off + 1] & 0x7F;
       final b2 = _buf[off + 2] & 0x7F;
-      // Standard NTSC F1 (0xFC) or non-standard 0xFF EIA-608 triple.
-      if (t0 == 0xFC || t0 == 0xFF) {
+      // NTSC field 1 (0xFC), field 2 (0xFD), or non-standard 0xFF EIA-608 triple.
+      if (t0 == 0xFC || t0 == 0xFD || t0 == 0xFF) {
         if (b1 != 0 || b2 != 0) {
           decoder.processPair(ms, b1, b2);
         }
@@ -223,14 +317,24 @@ class _Eia608Decoder {
   final _lineBuf = StringBuffer();
   int _currentRow = 0;  // row set by last PAC (1–15)
 
-  // Pending SRT entry: start_ms set on EOC, end_ms set on EDM or next EOC.
+  // Pending SRT entry: start_ms set on EOC (pop-on) or CR (roll-up).
   int? _entryStartMs;
   String? _entryText;
   int _lastProcessedMs = 0;
 
+  // Roll-up mode state.
+  bool _isRollUp  = false;
+  int  _ruLines   = 2;
+
   // Deduplication: skip if pair == previous pair (EIA-608 sends each code twice).
   int _prevB1 = -1;
   int _prevB2 = -1;
+
+  // Pop-on end-time heuristic: after an EOC flip, close the displayed entry
+  // when the encoder starts pre-loading the NEXT caption into NDM. This
+  // matches MakeMKV behaviour on discs that do not emit EDM commands — the
+  // caption visually disappears when new text starts arriving for the next one.
+  bool _waitingToCloseEntry = false;
 
   // EIA-608 basic character substitutions (after parity strip, 0x20–0x7F range).
   static const _charSub = <int, String>{
@@ -258,7 +362,12 @@ class _Eia608Decoder {
     if (b1 < 0x20) {
       _handleControl(ms, b1, b2);
     } else {
-      // One or two printable characters.
+      // Printable characters being loaded into NDM signal that new text is
+      // arriving. In pop-on mode this closes the currently displayed entry.
+      if (_waitingToCloseEntry && !_isRollUp) {
+        _closeEntry(ms);
+        _waitingToCloseEntry = false;
+      }
       _appendChar(b1);
       if (b2 >= 0x20) _appendChar(b2);
     }
@@ -268,6 +377,13 @@ class _Eia608Decoder {
     // PAC (Preamble Address Code): b2 in 0x40–0x7F for these b1 values.
     // Must be checked first because 0x14/0x1C also have PAC variants (b2 >= 0x40).
     if (b2 >= 0x40 && b2 <= 0x7F) {
+      // A PAC marks the start of a new text segment loading into NDM.
+      // In pop-on mode this is the earliest reliable signal that the currently
+      // displayed entry should end (the encoder is pre-loading the next one).
+      if (_waitingToCloseEntry && !_isRollUp) {
+        _closeEntry(ms);
+        _waitingToCloseEntry = false;
+      }
       final row = _pacRow(b1, b2);
       if (row > 0 && row != _currentRow) {
         _flushLine();
@@ -280,14 +396,18 @@ class _Eia608Decoder {
     if (b1 == 0x14 || b1 == 0x1C) {
       switch (b2) {
         case 0x20: // RCL — Resume Caption Loading (pop-on mode)
+          _isRollUp = false;
         case 0x25: // RU2 — Roll-Up 2 lines
+          _isRollUp = true; _ruLines = 2;
         case 0x26: // RU3
+          _isRollUp = true; _ruLines = 3;
         case 0x27: // RU4
+          _isRollUp = true; _ruLines = 4;
         case 0x28: // FON — Flash On
         case 0x29: // RDC — Resume Direct Caption
         case 0x2A: // TR  — Text Restart
         case 0x2B: // RTD — Resume Text Display
-          break; // mode switches — ignore for now
+          break;
 
         case 0x21: // BS — Backspace
           if (_lineBuf.isNotEmpty) {
@@ -298,20 +418,39 @@ class _Eia608Decoder {
           }
 
         case 0x2C: // ENM — Erase Non-Displayed Memory
-          _ndm.clear();
-          _lineBuf.clear();
+          // Flush any in-progress line, but do NOT clear _ndm.
+          // Some DVD encoders send ENM immediately before EOC in the same GOP
+          // while text is already loaded — clearing _ndm here would erase the
+          // caption. In the normal case (ENM between captions), _ndm is already
+          // empty because the previous EOC cleared it.
+          _flushLine();
 
         case 0x2D: // CR — Carriage Return
           _flushLine();
+          if (_isRollUp && _ndm.isNotEmpty) {
+            // Emit the visible window (last N lines) as a subtitle entry.
+            _closeEntry(ms);
+            final lines = _ruLines >= _ndm.length
+                ? _ndm
+                : _ndm.sublist(_ndm.length - _ruLines);
+            _emitEntry(ms, lines.join('\n'));
+          }
 
         case 0x2E: // EDM — Erase Displayed Memory
+          _waitingToCloseEntry = false;
           _closeEntry(ms);
+          if (_isRollUp) _ndm.clear();
 
         case 0x2F: // EOC — End of Caption (Flip Memories)
+          _isRollUp = false;
+          _waitingToCloseEntry = false;
           _flushLine();
           _closeEntry(ms);
           if (_ndm.isNotEmpty) {
             _emitEntry(ms, _ndm.join('\n'));
+            // After EOC flip, wait for the first PAC or printable char of the
+            // NEXT caption's pre-load phase to set the accurate end time.
+            _waitingToCloseEntry = true;
           }
           _ndm.clear();
       }

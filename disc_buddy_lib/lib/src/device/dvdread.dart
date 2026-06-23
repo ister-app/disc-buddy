@@ -39,30 +39,32 @@ final _close = _libc.lookupFunction<_CloseC2, _CloseD2>('close');
 
 const _kOWronly = 1; // O_WRONLY
 
+/// Redirects fd 2 to /dev/null for the synchronous [fn] call, then restores it.
+/// A no-op when [_dvdOpen2] is available — the null logger already silences everything.
+T _suppressStderr<T>(T Function() fn) {
+  if (_dvdOpen2 != null) return fn();
+
+  final savedStderr = _dup(2);
+  final devNull     = '/dev/null'.toNativeUtf8();
+  final nullFd      = _open(devNull, _kOWronly);
+  calloc.free(devNull);
+  if (nullFd >= 0) _dup2(nullFd, 2);
+  try {
+    return fn();
+  } finally {
+    if (savedStderr >= 0) { _dup2(savedStderr, 2); _close(savedStderr); }
+    if (nullFd >= 0) _close(nullFd);
+  }
+}
+
 /// Opens the DVD without logging output.
 ///
 /// Prefers DVDOpen2 (libdvdread 6.x) with a nullptr callback — that suppresses
 /// logging cleanly at the source.
 /// Falls back to DVDOpen with fd redirect (dup2) for older versions.
 Pointer<Void> _dvdOpenQuiet(Pointer<Utf8> devPtr) {
-  // Prefer: DVDOpen2 with null logger → no output
-  if (_dvdOpen2 != null) {
-    return _dvdOpen2!(nullptr, nullptr, devPtr);
-  }
-
-  // Fallback: redirect fd 2 to /dev/null for the duration of DVDOpen
-  final savedStderr = _dup(2);
-  final devNull     = '/dev/null'.toNativeUtf8();
-  final nullFd      = _open(devNull, _kOWronly);
-  calloc.free(devNull);
-  if (nullFd >= 0) _dup2(nullFd, 2);
-
-  final dvd = _dvdOpen(devPtr);
-
-  if (savedStderr >= 0) { _dup2(savedStderr, 2); _close(savedStderr); }
-  if (nullFd >= 0) _close(nullFd);
-
-  return dvd;
+  if (_dvdOpen2 != null) return _dvdOpen2!(nullptr, nullptr, devPtr);
+  return _suppressStderr(() => _dvdOpen(devPtr));
 }
 
 /// True if libdvdread is available (and thus CSS-encrypted discs can be read).
@@ -170,7 +172,7 @@ Stream<List<int>> _streamFromHandle(
   int vtsNum, {
   List<({int first, int last})>? cells,
 }) async* {
-  final file = _dvdOpenFile(dvd, vtsNum, _kReadTitleVobs);
+  final file = _suppressStderr(() => _dvdOpenFile(dvd, vtsNum, _kReadTitleVobs));
   if (file == nullptr) {
     throw Exception('Cannot open VTS $vtsNum');
   }

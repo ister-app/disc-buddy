@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'tty.dart';
+import '../rippers/video_disc_ripper.dart' show LogCallback;
 
 /// Writes a temporary ffmetadata file containing chapter marks.
 /// Returns null if [chapters] has fewer than 2 entries.
@@ -28,15 +29,21 @@ Future<File?> writeChapterMetadata(
 ///
 /// Returns `true` if ripping may proceed (file did not exist, or was deleted
 /// after confirmation). Returns `false` if the file should be skipped.
-Future<bool> confirmOverwrite(File file, {required bool force}) async {
+Future<bool> confirmOverwrite(File file, {required bool force, LogCallback? onLog}) async {
   if (!await file.exists()) return true;
-  if (force || ttyConfirm('   File already exists — delete? [y/N] ')) {
+  final shouldDelete = force ||
+      (onLog == null && ttyConfirm('   File already exists — delete? [y/N] '));
+  if (shouldDelete) {
     await file.delete().catchError((e) {
-      stderr.writeln('   Cannot delete file: $e');
+      if (onLog != null) {
+        onLog('   Cannot delete file: $e', isError: true);
+      } else {
+        stderr.writeln('   Cannot delete file: $e');
+      }
       return File('');
     });
     return true;
   }
-  stdout.writeln('   Skipped.');
+  if (onLog != null) { onLog('   Skipped.'); } else { stdout.writeln('   Skipped.'); }
   return false;
 }

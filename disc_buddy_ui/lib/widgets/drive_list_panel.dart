@@ -37,7 +37,7 @@ class DriveListPanel extends ConsumerWidget {
                     entry: entry,
                     isSelected: selectedId == entry.id,
                     onTap: () {
-                      ref.read(selectedDriveProvider.notifier).state = entry.id;
+                      ref.read(selectedDriveProvider.notifier).select(entry.id);
                     },
                   );
                 },
@@ -121,7 +121,7 @@ class _BottomActions extends ConsumerWidget {
     );
     if (path != null) {
       ref.read(virtualEntriesProvider.notifier).addDir(path);
-      ref.read(selectedDriveProvider.notifier).state = path;
+      ref.read(selectedDriveProvider.notifier).select(path);
     }
   }
 
@@ -129,16 +129,16 @@ class _BottomActions extends ConsumerWidget {
     final type = FileSystemEntity.typeSync(path);
     if (type == FileSystemEntityType.directory) {
       ref.read(virtualEntriesProvider.notifier).addDir(path);
-      ref.read(selectedDriveProvider.notifier).state = path;
+      ref.read(selectedDriveProvider.notifier).select(path);
       return;
     }
     final lower = path.toLowerCase();
     if (lower.endsWith('.iso')) {
       ref.read(virtualEntriesProvider.notifier).addIso(path);
-      ref.read(selectedDriveProvider.notifier).state = path;
+      ref.read(selectedDriveProvider.notifier).select(path);
     } else if (lower.endsWith('.mkv')) {
       ref.read(virtualEntriesProvider.notifier).addMkv(path);
-      ref.read(selectedDriveProvider.notifier).state = path;
+      ref.read(selectedDriveProvider.notifier).select(path);
     } else {
       messenger.showSnackBar(
         const SnackBar(content: Text('Unsupported file type. Select an .iso or .mkv file.')),

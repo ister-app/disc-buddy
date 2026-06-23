@@ -19,7 +19,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   final ProgressCallback? onProgress;
 
   BlurayRipper(this.options, {this.onLog, this.onProgress, void Function(Process)? onFfmpegProcess})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess);
+      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess, onLog: onLog);
 
   static Set<int>? _langsToIndices(List<String> trackLangs, Set<String>? filter) {
     if (filter == null || filter.isEmpty) return null;
@@ -130,7 +130,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     final langsMap = <BlurayTitle, ({List<String> audioLangs, List<String> subLangs})>{};
     for (final title in selected) {
       _log('── Languages: playlist ${title.playlist} [${title.durationLabel}]');
-      langsMap[title] = _collectLanguages(title, force: options.force);
+      langsMap[title] = _collectLanguages(title, force: options.force, onLog: onLog);
     }
     if (!options.force) _log('');
 
@@ -467,7 +467,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
     _log('── Ripping: playlist ${title.playlist} → ${outFile.path}');
 
-    if (!await confirmOverwrite(outFile, force: options.force)) return;
+    if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) return;
 
     final bdmvPath   = p.join(mountPath, 'BDMV');
     final playlistNr = int.tryParse(title.playlist) ?? 1;
@@ -743,12 +743,14 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   static ({List<String> audioLangs, List<String> subLangs}) _collectLanguages(
     BlurayTitle title, {
     bool force = false,
+    LogCallback? onLog,
   }) {
     return askLanguages(
       audioLabels:   const [],  // Blu-ray shows codec in audioTitles; no extra label needed
       audioCurrents: title.audioLangs,
       subCurrents:   title.subtitleLangs,
       force:         force,
+      onLog:         onLog,
     );
   }
 }

@@ -181,3 +181,8 @@ class RipError extends RipState {
   final String message;
   RipError(this.message);
 }
+
+class LoopWaiting extends RipState {
+  final List<String> lastOutputFiles;
+  LoopWaiting({required this.lastOutputFiles});
+}

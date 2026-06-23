@@ -11,7 +11,9 @@ Future<void> main(List<String> arguments) async {
     ..addOption('input',   abbr: 'i',
         help: 'Optical drive (e.g. /dev/sr0), ISO image, MKV file, or directory of video files',
         defaultsTo: Platform.environment['DISC_ISO'] ?? Platform.environment['DISC_DEVICE'])
-    ..addOption('output',  abbr: 'o', help: 'Output directory',
+    ..addOption('video-output', help: 'Output directory for video discs',
+        defaultsTo: null)
+    ..addOption('music-output', help: 'Output directory for audio CDs',
         defaultsTo: null)
     ..addOption('ffmpeg',       help: 'Path to ffmpeg',       defaultsTo: null)
     ..addOption('ffprobe',      help: 'Path to ffprobe',      defaultsTo: null)
@@ -140,8 +142,16 @@ Future<void> main(List<String> arguments) async {
     device = drive.device;
   }
 
-  final outputDir = cfgStr('output',
-      Platform.environment['OUTDIR'] ?? p.join(Directory.current.path, 'output'));
+  // CLI flag is --video-output; config-file key is 'output' (shared with the UI).
+  final outputDir =
+      (args['video-output'] as String?) ??
+      (config['output'] as String?) ??
+      Platform.environment['OUTDIR'] ??
+      xdgUserDir('VIDEOS', fallback: r'$HOME/Videos');
+  final musicOutputDir =
+      (args['music-output'] as String?) ??
+      (config['music-output'] as String?) ??
+      xdgUserDir('MUSIC', fallback: r'$HOME/Music');
   final opts = RipOptions(
     device:     (isMkv || isDir) ? null : device,
     outputDir:  outputDir,
@@ -189,7 +199,7 @@ Future<void> main(List<String> arguments) async {
       stdout.writeln('');
       switch (discType) {
         case DiscType.audioCD:
-          await _ripAudioCD(opts);
+          await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
         case DiscType.dvd:
           await _ripVideoDisc(DVDRipper(opts),
             autoSelect:    autoSelectDvd,
@@ -231,16 +241,17 @@ Future<void> main(List<String> arguments) async {
       DiscType.unknown => 'unknown',
     };
 
+    final effectiveOutput = discType == DiscType.audioCD ? musicOutputDir : outputDir;
     stdout.writeln('Disc type: $discTypeStr');
     stdout.writeln('Device:    $device');
-    stdout.writeln('Output:    $outputDir');
+    stdout.writeln('Output:    $effectiveOutput');
     stdout.writeln('ffmpeg:    $ffmpegBin');
     stdout.writeln('');
 
     bool continueLoop;
     switch (discType) {
       case DiscType.audioCD:
-        continueLoop = await _ripAudioCD(opts);
+        continueLoop = await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
       case DiscType.dvd:
         continueLoop = await _ripVideoDisc(DVDRipper(opts),
           autoSelect:    autoSelectDvd,

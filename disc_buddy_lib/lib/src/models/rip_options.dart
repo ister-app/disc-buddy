@@ -93,6 +93,30 @@ class RipOptions {
     subtitleMkvLangs: subtitleMkvLangs,
   );
 
+  RipOptions copyWithOutputDir(String newOutputDir) => RipOptions(
+    device: device,
+    outputDir: newOutputDir,
+    ffmpeg: ffmpeg,
+    ffprobe: ffprobe,
+    force: force,
+    autoName: autoName,
+    loop: loop,
+    mkvextract: mkvextract,
+    subtileOcr: subtileOcr,
+    tmdbToken: tmdbToken,
+    llmUrl: llmUrl,
+    llmKey: llmKey,
+    llmModel: llmModel,
+    titleHint: titleHint,
+    seasonHint: seasonHint,
+    batchAssign: batchAssign,
+    subtitleLangs: subtitleLangs,
+    audioTrackIndices: audioTrackIndices,
+    subtitleTrackIndices: subtitleTrackIndices,
+    audioMkvLangs: audioMkvLangs,
+    subtitleMkvLangs: subtitleMkvLangs,
+  );
+
   RipOptions copyWithHints({String? titleHint, List<int>? seasonHint, bool? autoName, bool? batchAssign}) => RipOptions(
     device: device,
     outputDir: outputDir,
@@ -111,6 +135,8 @@ class RipOptions {
     seasonHint: seasonHint ?? this.seasonHint,
     batchAssign: batchAssign ?? this.batchAssign,
     subtitleLangs: subtitleLangs,
+    audioTrackIndices: audioTrackIndices,
+    subtitleTrackIndices: subtitleTrackIndices,
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
   );
