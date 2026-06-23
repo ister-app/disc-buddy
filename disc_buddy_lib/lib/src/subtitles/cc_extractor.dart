@@ -144,9 +144,13 @@ class _Mpeg2Scanner {
   // Sliding buffer; kept small by trimming after each _process() call.
   final _buf = <int>[];
 
-  // GOP timecodes in "NTSC ticks": h*108000 + m*1800 + s*30 + frames.
-  int _gopTicks      = 0;
-  int? _firstTicks;
+  // Continuous output position (in frame-ticks) at the START of the current GOP.
+  // Accumulated from per-GOP timecode deltas so it tracks the ripped (contiguous)
+  // output rather than the on-disc timecode, which is non-contiguous for cells of
+  // an interleaved multi-angle title.
+  int _outputTicks = 0;
+  // Previous GOP's drop-frame-corrected timecode, to measure the delta.
+  int? _lastGopTicks;
 
   // Frame counter within current GOP (for sub-second timing).
   int _frameInGop = 0;
@@ -247,8 +251,17 @@ class _Mpeg2Scanner {
       final totalMinutes = h * 60 + m;
       ticks -= 2 * (totalMinutes - totalMinutes ~/ 10);
     }
-    _gopTicks = ticks;
-    _firstTicks ??= _gopTicks;
+    // Advance the continuous output position by the timecode delta when GOPs are
+    // contiguous (this stays wall-clock accurate, e.g. for 3:2 pulldown). A
+    // negative or large jump means a cell/angle boundary: the on-disc timecode
+    // is discontinuous but the ripped output is not, so advance by the frames
+    // actually decoded in the GOP that just ended instead of the bogus jump.
+    if (_lastGopTicks != null) {
+      final delta = ticks - _lastGopTicks!;
+      const maxNormalDelta = 150; // ~5s; real DVD GOPs are well under ~0.5s
+      _outputTicks += (delta >= 0 && delta < maxNormalDelta) ? delta : _frameInGop;
+    }
+    _lastGopTicks = ticks;
   }
 
   void _parseUserData(int start, int end) {
@@ -306,9 +319,8 @@ class _Mpeg2Scanner {
     final tripleStart = start + ccCountOff + 1;
     if (tripleStart + ccCount * 3 > end) return; // truncated packet
 
-    // Compute millisecond timestamp relative to first GOP timecode.
-    final normTicks = _gopTicks - (_firstTicks ?? _gopTicks) + _frameInGop;
-    final ms = (normTicks * 1001) ~/ 30;
+    // Continuous output position = ticks at this GOP's start + frames since it.
+    final ms = ((_outputTicks + _frameInGop) * 1001) ~/ 30;
 
     for (int i = 0; i < ccCount; i++) {
       final off = tripleStart + i * 3;
@@ -349,6 +361,12 @@ class _Eia608Decoder {
   // Roll-up mode state.
   bool _isRollUp  = false;
   int  _ruLines   = 2;
+
+  // Timestamp of the last RCL (Resume Caption Loading). Used to tell an erase
+  // that is part of a caption load (RCL+erase at the same instant — this
+  // disc emits an EDM in every load) from a standalone erase that blanks the
+  // screen during a silence. Only the latter ends the displayed caption.
+  int _lastRclMs = -1;
 
   // Deduplication: skip if pair == previous pair (EIA-608 sends each code twice).
   int _prevB1 = -1;
@@ -407,6 +425,7 @@ class _Eia608Decoder {
       switch (b2) {
         case 0x20: // RCL — Resume Caption Loading (pop-on mode)
           _isRollUp = false;
+          _lastRclMs = ms;
         case 0x25: // RU2 — Roll-Up 2 lines
           _isRollUp = true; _ruLines = 2;
         case 0x26: // RU3
@@ -428,18 +447,15 @@ class _Eia608Decoder {
           }
 
         case 0x2C: // ENM — Erase Non-Displayed Memory
-          if (_lineBuf.isEmpty && _ndm.isEmpty) {
-            // Standalone ENM with nothing being loaded. The previous EOC already
-            // cleared NDM, so this isn't part of a caption load — this encoder
-            // uses it to BLANK the screen during silences (it emits no EDM and
-            // no empty EOC). Close the currently displayed caption so it doesn't
-            // linger until the next one. (~86 of these match the ~83 gaps that
-            // MakeMKV shows on this disc.)
+          if (_isStandaloneClear(ms)) {
+            // Standalone ENM (nothing being loaded, not coincident with an RCL):
+            // this encoder uses it to BLANK the screen during a silence. End the
+            // displayed caption so it doesn't linger until the next one.
             _closeEntry(ms);
           } else {
-            // ENM as part of a load sequence (text already pending in NDM):
-            // some encoders send it right before EOC. Flush the in-progress
-            // line but do NOT erase the loaded caption.
+            // Part of a caption load (text pending, or sent with the load's RCL):
+            // flush the in-progress line but don't erase the displayed caption,
+            // which lasts until the next EOC.
             _flushLine();
           }
 
@@ -455,8 +471,16 @@ class _Eia608Decoder {
           }
 
         case 0x2E: // EDM — Erase Displayed Memory
-          _closeEntry(ms);
-          if (_isRollUp) _ndm.clear();
+          if (_isRollUp) {
+            _closeEntry(ms);
+            _ndm.clear();
+          } else if (_isStandaloneClear(ms)) {
+            // A genuine erase during a silence (see ENM). NOTE: this disc emits
+            // an EDM inside every pop-on load sequence (right at the RCL); that
+            // is NOT a clear — the caption stays until the next EOC — so it is
+            // excluded by the RCL-coincidence check.
+            _closeEntry(ms);
+          }
 
         case 0x2F: // EOC — End of Caption (Flip Memories)
           _isRollUp = false;
@@ -503,6 +527,12 @@ class _Eia608Decoder {
     _lineBuf.clear();
     if (line.isNotEmpty) _ndm.add(line);
   }
+
+  /// True when an erase command (ENM/EDM) is a real screen-blank rather than
+  /// part of a caption load: nothing is being loaded into NDM and it doesn't
+  /// coincide with this load's RCL (this disc emits an EDM with every RCL).
+  bool _isStandaloneClear(int ms) =>
+      _lineBuf.isEmpty && _ndm.isEmpty && ms != _lastRclMs;
 
   void _emitEntry(int startMs, String text) {
     _entryStartMs = startMs;
