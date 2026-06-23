@@ -86,6 +86,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
   late TextEditingController _subtitleTrackLangs;
   bool _autoName = false;
   bool _batchAssign = false;
+  bool _lpcmFlac = false;
 
   // null = not yet checked; true = found; false = not found
   final _binaryFound = <String, bool>{};
@@ -108,6 +109,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     _subtitleTrackLangs = TextEditingController(text: s.subtitleTrackLangs ?? '');
     _autoName           = s.autoName;
     _batchAssign        = s.batchAssign;
+    _lpcmFlac           = s.lpcmFlac;
     for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr]) {
       c.addListener(_onFieldChanged);
     }
@@ -162,6 +164,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       llmModel:           _llmModel.text.trim().isEmpty           ? null : _llmModel.text.trim(),
       autoName:           _autoName,
       batchAssign:        _batchAssign,
+      lpcmFlac:           _lpcmFlac,
       audioLangs:         _audioLangs.text.trim().isEmpty         ? null : _audioLangs.text.trim(),
       subtitleTrackLangs: _subtitleTrackLangs.text.trim().isEmpty ? null : _subtitleTrackLangs.text.trim(),
     );
@@ -296,6 +299,12 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             subtitle: const Text('Match all episodes in one LLM call (better with large models)'),
             value: _batchAssign,
             onChanged: _autoName ? (v) => setState(() => _batchAssign = v) : null,
+          ),
+          SwitchListTile(
+            title: const Text('Re-encode Blu-ray LPCM to FLAC'),
+            subtitle: const Text('Smaller files but much slower. Off keeps raw PCM (faster).'),
+            value: _lpcmFlac,
+            onChanged: (v) => setState(() => _lpcmFlac = v),
           ),
         ]),
         const SizedBox(height: 24),

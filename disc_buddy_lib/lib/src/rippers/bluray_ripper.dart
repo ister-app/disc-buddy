@@ -494,6 +494,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         audioLangs:   langs.audioLangs,
         subLangs:     langs.subLangs,
         lpcmIdx:      lpcmIdx,
+        lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
         audioTitles:  audioTitles,
         chapterFile:  chapterFile,
         outPath:      outFile.path,
@@ -515,6 +516,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         audioLangs:  langs.audioLangs,
         subLangs:    langs.subLangs,
         lpcmIdx:     lpcmIdx,
+        lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
         audioTitles: audioTitles,
         chapterFile: chapterFile,
         outPath:     outFile.path,
@@ -553,6 +555,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
             audioLangs:  langs.audioLangs,
             subLangs:    langs.subLangs,
             lpcmIdx:     lpcmIdx,
+            lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
             audioTitles: audioTitles,
             chapterFile: chapterFile,
             outPath:     outFile.path,
@@ -593,6 +596,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     required List<String> audioLangs,
     required List<String> subLangs,
     required Set<int> lpcmIdx,
+    required String lpcmCodec,
     required List<String> audioTitles,
     required File? chapterFile,
     required String outPath,
@@ -618,7 +622,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     ];
 
     for (var out = 0; out < selAudio.length; out++) {
-      args.addAll(['-c:a:$out', lpcmIdx.contains(selAudio[out]) ? 'flac' : 'copy']);
+      args.addAll(['-c:a:$out', lpcmIdx.contains(selAudio[out]) ? lpcmCodec : 'copy']);
     }
     if (selAudio.isEmpty) args.addAll(['-c:a', 'copy']);
 
@@ -634,6 +638,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     required List<String> audioLangs,
     required List<String> subLangs,
     required Set<int> lpcmIdx,
+    required String lpcmCodec,
     required List<String> audioTitles,
     required File? chapterFile,
     required String outPath,
@@ -662,7 +667,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     ];
 
     for (var out = 0; out < selAudio.length; out++) {
-      args.addAll(['-c:a:$out', lpcmIdx.contains(selAudio[out]) ? 'flac' : 'copy']);
+      args.addAll(['-c:a:$out', lpcmIdx.contains(selAudio[out]) ? lpcmCodec : 'copy']);
     }
     if (selAudio.isEmpty) args.addAll(['-c:a', 'copy']);
 

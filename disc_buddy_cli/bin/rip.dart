@@ -44,6 +44,9 @@ Future<void> main(List<String> arguments) async {
     ..addOption('subtitle-langs',
         help: 'Comma-separated subtitle languages to extract (e.g. en,nl). '
               'Omit to be asked interactively; use "all" or empty to extract everything.')
+    ..addFlag('lpcm-flac', negatable: false,
+        help: 'Re-encode Blu-ray LPCM audio to FLAC (smaller files, slower). '
+              'Default keeps LPCM as raw PCM, which is much faster.')
     ..addFlag('loop',         abbr: 'l', negatable: false,
         help: 'After each rip, eject and wait for the next disc automatically')
     ..addFlag('help',      abbr: 'h', negatable: false, help: 'Show help');
@@ -179,6 +182,9 @@ Future<void> main(List<String> arguments) async {
     seasonHint:  _parseSeasons(cfgOpt('season')),
     batchAssign:    args['batch-assign'] as bool?,
     subtitleLangs:  _parseSubtitleLangs(cfgOpt('subtitle-langs')),
+    lpcmFlac:       args.wasParsed('lpcm-flac')
+        ? args['lpcm-flac'] as bool
+        : (config['lpcm-flac'] as bool?) ?? false,
   );
 
   if (isMkv) {

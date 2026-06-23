@@ -14,6 +14,9 @@ class Settings {
   final String? llmModel;
   final bool autoName;
   final bool batchAssign;
+  /// Re-encode Blu-ray LPCM audio to FLAC (smaller, but CPU-heavy). When false
+  /// (default) LPCM is stored as raw PCM — much faster.
+  final bool lpcmFlac;
   /// Comma-separated ISO 639 language codes for audio tracks to keep in the MKV.
   /// Null / empty = keep all.
   final String? audioLangs;
@@ -35,6 +38,7 @@ class Settings {
     this.llmModel,
     this.autoName = false,
     this.batchAssign = false,
+    this.lpcmFlac = false,
     this.audioLangs,
     this.subtitleTrackLangs,
   });
@@ -62,6 +66,7 @@ class Settings {
     llmModel: json['llm-model'] as String?,
     autoName: json['auto-name'] as bool? ?? false,
     batchAssign: json['batch-assign'] as bool? ?? false,
+    lpcmFlac: json['lpcm-flac'] as bool? ?? false,
     audioLangs: json['audio-langs'] as String?,
     subtitleTrackLangs: json['subtitle-track-langs'] as String?,
   );
@@ -79,6 +84,7 @@ class Settings {
     if (llmModel != null) 'llm-model': llmModel,
     'auto-name': autoName,
     'batch-assign': batchAssign,
+    'lpcm-flac': lpcmFlac,
     if (audioLangs != null) 'audio-langs': audioLangs,
     if (subtitleTrackLangs != null) 'subtitle-track-langs': subtitleTrackLangs,
   };
@@ -103,6 +109,7 @@ class Settings {
     force: true,
     autoName: autoName,
     batchAssign: batchAssign,
+    lpcmFlac: lpcmFlac,
     audioMkvLangs: _parseLangs(audioLangs),
     subtitleMkvLangs: _parseLangs(subtitleTrackLangs),
   );
@@ -121,6 +128,7 @@ class Settings {
     Object? llmModel = _sentinel,
     bool? autoName,
     bool? batchAssign,
+    bool? lpcmFlac,
     Object? audioLangs = _sentinel,
     Object? subtitleTrackLangs = _sentinel,
   }) => Settings(
@@ -137,6 +145,7 @@ class Settings {
     llmModel: llmModel == _sentinel ? this.llmModel : llmModel as String?,
     autoName: autoName ?? this.autoName,
     batchAssign: batchAssign ?? this.batchAssign,
+    lpcmFlac: lpcmFlac ?? this.lpcmFlac,
     audioLangs: audioLangs == _sentinel ? this.audioLangs : audioLangs as String?,
     subtitleTrackLangs: subtitleTrackLangs == _sentinel ? this.subtitleTrackLangs : subtitleTrackLangs as String?,
   );

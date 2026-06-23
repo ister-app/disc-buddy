@@ -32,6 +32,10 @@ class RipOptions {
   /// null = keep all subtitle tracks; non-empty = only keep tracks in these languages.
   /// Ignored when subtitleTrackIndices is set.
   final Set<String>? subtitleMkvLangs;
+  /// Blu-ray LPCM audio handling: false (default) stores it as raw PCM
+  /// (`pcm_s24le`) — cheap, like MakeMKV; true re-encodes to FLAC (smaller
+  /// files, but CPU-heavy for multichannel 24-bit audio).
+  final bool lpcmFlac;
 
   const RipOptions({
     this.device,
@@ -55,6 +59,7 @@ class RipOptions {
     this.subtitleTrackIndices,
     this.audioMkvLangs,
     this.subtitleMkvLangs,
+    this.lpcmFlac = false,
   });
 
   /// True when all tools and credentials needed for LLM-based auto-naming
@@ -91,6 +96,7 @@ class RipOptions {
     subtitleTrackIndices: subtitleTrackIndices,
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
+    lpcmFlac: lpcmFlac,
   );
 
   RipOptions copyWithOutputDir(String newOutputDir) => RipOptions(
@@ -115,6 +121,7 @@ class RipOptions {
     subtitleTrackIndices: subtitleTrackIndices,
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
+    lpcmFlac: lpcmFlac,
   );
 
   RipOptions copyWithHints({String? titleHint, List<int>? seasonHint, bool? autoName, bool? batchAssign}) => RipOptions(
@@ -139,6 +146,7 @@ class RipOptions {
     subtitleTrackIndices: subtitleTrackIndices,
     audioMkvLangs: audioMkvLangs,
     subtitleMkvLangs: subtitleMkvLangs,
+    lpcmFlac: lpcmFlac,
   );
 }
 
