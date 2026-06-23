@@ -39,7 +39,13 @@ class Menu {
     // Single stdin subscription, buffering characters in a queue
     final queue = <String>[];
     final stdinSub = stdin.listen(
-      (bytes) => queue.add(String.fromCharCode(bytes.first)),
+      // Enqueue every byte in the chunk; `bytes.first` would throw on an empty
+      // chunk and silently drop all but the first byte of multi-byte input.
+      (bytes) {
+        for (final b in bytes) {
+          queue.add(String.fromCharCode(b));
+        }
+      },
     );
 
     // udevadm monitor for immediate disc-status updates (no polling)

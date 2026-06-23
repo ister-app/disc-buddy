@@ -723,7 +723,9 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     if (await File(p.join(mountPath, 'AACS', 'Unit_Key_RO.inf')).exists()) return true;
     if (await Directory(p.join(mountPath, 'AACS')).exists()) return true;
     if (await Directory(p.join(mountPath, 'BDSVM')).exists()) return true;
-    if (await Directory(p.join(mountPath, 'CERTIFICATE')).exists()) return true;
+    // NOTE: a CERTIFICATE/ directory is NOT an encryption signal — virtually
+    // every commercial Blu-ray (including unencrypted BD-J discs) ships one,
+    // so checking for it produced spurious AACS warnings on discs that rip fine.
     return false;
   }
 

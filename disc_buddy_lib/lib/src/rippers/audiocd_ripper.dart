@@ -233,22 +233,39 @@ class AudioCDRipper {
         outFile.path,
       ];
 
+      final expectedDur = Duration(milliseconds: (dur * 1000).round());
+
+      // Track the furthest progress ffmpeg reported. The runner SIGTERMs ffmpeg
+      // on purpose once all audio is written (to stop libcdio hanging), so a
+      // successful rip normally exits non-zero. We therefore can't trust the
+      // exit code alone; instead we confirm ffmpeg actually reached the end of
+      // the track. A real read error exits early, well short of expectedDur.
+      var lastElapsed = Duration.zero;
+      final progressCb = onProgress ?? logProgress;
       final exitCode = await _ffmpeg.run(
         args,
         timeout: timeoutDur,
-        expectedDuration: Duration(milliseconds: (dur * 1000).round()),
-        onProgress: onProgress ?? logProgress,
+        expectedDuration: expectedDur,
+        onProgress: (p) {
+          lastElapsed = p.elapsed;
+          progressCb(p);
+        },
       );
       _log('');
 
-      if (exitCode == 0 || await outFile.exists()) {
+      // 98% tolerance covers the ~last-frame the completion-kill trims.
+      final reachedEnd = lastElapsed.inMilliseconds >= expectedDur.inMilliseconds * 0.98;
+      if (exitCode == 0 || (await outFile.exists() && reachedEnd)) {
         _log('   Done: ${outFile.path}');
       } else {
-        _log('   Error ripping track $nr (exit code $exitCode).', isError: true);
-        await outFile.delete().catchError((e) {
-          _log('   Cannot delete file: $e', isError: true);
-          return File('');
-        });
+        _log('   Error ripping track $nr (exit code $exitCode, '
+            'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
+        if (await outFile.exists()) {
+          await outFile.delete().catchError((e) {
+            _log('   Cannot delete file: $e', isError: true);
+            return File('');
+          });
+        }
       }
     }
   }

@@ -12,8 +12,13 @@ class SettingsNotifier extends Notifier<Settings> {
   }
 
   Future<void> _load() async {
-    final json = await ConfigLoader.load();
-    state = Settings.fromJson(json);
+    try {
+      final json = await ConfigLoader.load();
+      state = Settings.fromJson(json);
+    } catch (e) {
+      // Keep the default settings if the config can't be read/parsed.
+      stderr.writeln('Settings load failed, using defaults: $e');
+    }
   }
 
   Future<void> save(Settings settings) async {
@@ -23,9 +28,9 @@ class SettingsNotifier extends Notifier<Settings> {
     await file.writeAsString(jsonEncode(settings.toJson()));
   }
 
-  void update(Settings Function(Settings) updater) {
-    save(updater(state));
-  }
+  /// Applies [updater] and persists. Returns the save future so callers can
+  /// await it / observe failures instead of silently dropping them.
+  Future<void> update(Settings Function(Settings) updater) => save(updater(state));
 }
 
 final settingsProvider = NotifierProvider<SettingsNotifier, Settings>(
@@ -40,8 +45,17 @@ final subtitleToolsAvailableProvider = Provider<bool>((ref) {
       _commandAvailable(s.subtileOcr, 'subtile-ocr');
 });
 
+// `which <name>` result cache. A binary's presence on PATH doesn't change
+// during a session, so memoizing avoids spawning a subprocess on every settings
+// change (which ran synchronously on the UI thread and caused jank).
+final _whichCache = <String, bool>{};
+
 bool _commandAvailable(String? configured, String defaultName) {
+  // An explicitly configured path can be edited at runtime, so re-check it
+  // (existsSync is cheap). Only the PATH lookup is cached.
   if (configured != null) return File(configured).existsSync();
-  final result = Process.runSync('which', [defaultName]);
-  return result.exitCode == 0;
+  return _whichCache.putIfAbsent(
+    defaultName,
+    () => Process.runSync('which', [defaultName]).exitCode == 0,
+  );
 }

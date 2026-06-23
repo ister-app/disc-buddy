@@ -862,11 +862,22 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     // packet headers that straddle chunk boundaries. A PES header is at most
     // 3 (fixed) + 255 (extension) + 1 (sub-stream ID) = 259 bytes from the
     // start of the start-code, so 512 bytes of carry is more than sufficient.
+    //
     // Safety cap: stop scanning after 600 MB even if not all SIDs are found.
-    // Die Hard 4.0 SE has an audio SID (0x85) at 281.9 MB and First Blood 3
-    // has its only subtitle SID at 518.8 MB — both must be within the cap so
-    // ffmpeg sees them during probing and doesn't discover them mid-encode.
-    const kScanCap  = 60000 * 1024 * 1024;
+    // The scan normally returns early the moment all IFO-declared SIDs have
+    // been seen (see the early return below). The cap only matters when a
+    // declared SID never actually materialises in the VOB — e.g. a stream the
+    // IFO lists but that only exists on another angle. Without a cap such a
+    // disc would force a read of the entire (multi-GB) title on every rip,
+    // because the "found them all" condition can never be satisfied.
+    //
+    // The cap must sit ABOVE the latest-appearing real stream we've observed,
+    // or a legitimately-late stream would be missed: Die Hard 4.0 SE has an
+    // audio SID (0x85) first appearing at 281.9 MB and First Blood 3 has its
+    // only subtitle SID at 518.8 MB. 600 MB clears both with headroom while
+    // staying far below a full title. (Was mistakenly 60000*1024*1024 ≈ 58 GB,
+    // which disabled the cap entirely.)
+    const kScanCap  = 600 * 1024 * 1024;
     const carrySize = 512;
     final order   = <int>[];
     final seen    = <int>{};
@@ -994,8 +1005,9 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
     for (var i = 0; i < title.audioTracks.length; i++) {
       final a = title.audioTracks[i];
-      if (audioLangs[i].isNotEmpty) {
-        args.addAll(['-metadata:s:a:$i', 'language=${audioLangs[i]}']);
+      final lang = i < audioLangs.length ? audioLangs[i] : '';
+      if (lang.isNotEmpty) {
+        args.addAll(['-metadata:s:a:$i', 'language=$lang']);
       }
       args.addAll(['-metadata:s:a:$i', 'title=${a.codec} ${channelLabel(a.channels)}']);
     }

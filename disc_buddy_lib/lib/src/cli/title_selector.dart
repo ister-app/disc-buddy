@@ -1,6 +1,17 @@
 import '../models/bluray_title.dart';
 import '../models/dvd_title.dart';
 
+/// Median of an already-ascending-sorted, non-empty list of seconds.
+/// For an even count, returns the average of the two central values rather than
+/// the lower-middle element, so an outlier (e.g. a long "play-all" track mixed
+/// in with episodes) doesn't skew the value low.
+int _median(List<int> sortedSecs) {
+  final n = sortedSecs.length;
+  if (n == 0) return 0;
+  if (n.isOdd) return sortedSecs[n ~/ 2];
+  return (sortedSecs[n ~/ 2 - 1] + sortedSecs[n ~/ 2]) ~/ 2;
+}
+
 /// Selects likely episodes or the main feature from a Blu-ray title list.
 ///
 /// - Filters out tracks shorter than 5 minutes (menus, trailers).
@@ -102,7 +113,7 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
     if (primaryIsStub && others.length < 3) continue;
 
     final otherSecs = others.map((t) => t.duration.inSeconds).toList()..sort();
-    final median    = otherSecs[(otherSecs.length - 1) ~/ 2];
+    final median    = _median(otherSecs);
     if (median == 0) continue;
 
     // Non-primary angles must be coherent amongst themselves.
@@ -149,7 +160,7 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
     // track (e.g. a commentary) that breaks the strict stream-count filter
     // used in the fallback path.
     final epSecs     = compilationEps.map((t) => t.duration.inSeconds).toList()..sort();
-    final epMedian   = epSecs[(epSecs.length - 1) ~/ 2];
+    final epMedian   = _median(epSecs);
     final epMinAudio = compilationEps.map((t) => t.audioTracks.length).reduce((a, b) => a < b ? a : b);
     final epMinSub   = compilationEps.map((t) => t.subtitleTracks.length).reduce((a, b) => a < b ? a : b);
     final compVts    = compilationEps.first.vtsNumber;
@@ -249,7 +260,7 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
     // 3a. Series detection across coherent groups.
     if (coherent.length >= 2) {
       final secs   = coherent.map((g) => groupDur(g).inSeconds).toList()..sort();
-      final median = secs[(secs.length - 1) ~/ 2];
+      final median = _median(secs);
       final episodeGroups = coherent
           .where((g) => (groupDur(g).inSeconds - median).abs() <= median * 0.3)
           .toList();
@@ -527,7 +538,7 @@ List<T> _autoSelect<T>({
   // also present (effective = 2+2 = 4).
   if (unique.length >= 3) {
     final secs   = unique.map((t) => duration(t).inSeconds).toList()..sort();
-    final median = secs[(secs.length - 1) ~/ 2];
+    final median = _median(secs);
     final episodes = unique
         .where((t) => (duration(t).inSeconds - median).abs() <= median * 0.3)
         .toList();

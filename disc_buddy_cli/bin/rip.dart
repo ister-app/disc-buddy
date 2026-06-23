@@ -5,6 +5,15 @@ import 'package:path/path.dart' as p;
 import 'package:disc_buddy/disc_buddy.dart';
 import 'package:disc_buddy_cli/src/cli/menu.dart';
 
+/// Thrown to abort the current rip from inside a `withMountedDisc` callback.
+/// Unlike `exit()` — which terminates the VM immediately and skips `finally`
+/// blocks, leaking the temporary ISO mount and loop device — throwing lets the
+/// mount cleanup run before `main` turns it into a non-zero exit.
+class _RipAborted implements Exception {
+  final String? message;
+  const _RipAborted([this.message]);
+}
+
 Future<void> main(List<String> arguments) async {
   final parser = ArgParser()
     ..addOption('config',  abbr: 'c', help: 'Path to config file (default: ${ConfigLoader.defaultPath})')
@@ -182,6 +191,9 @@ Future<void> main(List<String> arguments) async {
   }
 
   // --- Detect disc type and rip ---
+  // try/catch so a _RipAborted thrown from inside withMountedDisc unwinds
+  // through the mount cleanup (finally) before we exit.
+  try {
   if (isIso) {
     // ISO: one mount cycle covers type detection + scan + rip.
     await withMountedDisc<void>(device, (mountPath) async {
@@ -217,8 +229,7 @@ Future<void> main(List<String> arguments) async {
             errorContext: 'Blu-ray',
           );
         case DiscType.unknown:
-          stderr.writeln('Unknown disc type — cannot rip.');
-          exit(1);
+          throw const _RipAborted('Unknown disc type — cannot rip.');
       }
     }, errorContext: 'disc');
     return;
@@ -274,6 +285,10 @@ Future<void> main(List<String> arguments) async {
     if (!continueLoop) break;
     looping = true;
   }
+  } on _RipAborted catch (e) {
+    if (e.message != null) stderr.writeln('Error: ${e.message}');
+    exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +318,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 
   Future<bool> doWork(String? mp) async {
     final result = await ripper.loadTitles(mountPath: mp);
-    if (result == null) exit(1);
+    if (result == null) throw const _RipAborted();
 
     final discTitle = result.discTitle;
     final titles    = prepareTitles != null
@@ -436,7 +451,7 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
   final ripper = AudioCDRipper(opts);
 
   final meta = await ripper.loadMetadata();
-  if (meta == null) exit(1);
+  if (meta == null) throw const _RipAborted();
 
   stdout.writeln('Album:   ${meta.album}');
   if (meta.artist.isNotEmpty) stdout.writeln('Artist:  ${meta.artist}');
@@ -634,16 +649,9 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
       final newFile = File(p.join(outDir.path, '$newStem$ext'));
       if (await newFile.exists()) {
         stderr.writeln('Rename skipped: "${p.basename(newFile.path)}" already exists.');
-      } else {
-        await file.rename(newFile.path);
+      } else if (await _renameFile(file, newFile.path)) {
         stdout.writeln('Renamed: ${file.path}\n      → ${newFile.path}');
-        await for (final entry in outDir.list()) {
-          if (entry is! File) continue;
-          final base = p.basename(entry.path);
-          if (!base.startsWith('$discName.') || !base.endsWith('.srt')) continue;
-          final suffix = base.substring(discName.length);
-          await entry.rename(p.join(outDir.path, '$newStem$suffix'));
-        }
+        await _renameAssociatedSrts(outDir, discName, newStem);
       }
     }
   }
@@ -734,16 +742,9 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
     final newMkv = File(p.join(outDir.path, '$newStem.mkv'));
     if (await newMkv.exists()) {
       stderr.writeln('Rename skipped: "$newStem.mkv" already exists.');
-    } else {
-      await mkvFile.rename(newMkv.path);
+    } else if (await _renameFile(mkvFile, newMkv.path)) {
       stdout.writeln('Renamed: $mkvPath\n      → ${newMkv.path}');
-      await for (final entry in outDir.list()) {
-        if (entry is! File) continue;
-        final base = p.basename(entry.path);
-        if (!base.startsWith('$discName.') || !base.endsWith('.srt')) continue;
-        final suffix = base.substring(discName.length);
-        await entry.rename(p.join(outDir.path, '$newStem$suffix'));
-      }
+      await _renameAssociatedSrts(outDir, discName, newStem);
     }
   }
 }
@@ -1018,16 +1019,48 @@ Future<void> _applyRenames(
       continue;
     }
 
-    await oldMkv.rename(newMkv.path);
-    stdout.writeln('Renamed: ${oldMkv.path}\n      → ${newMkv.path}');
-
-    await for (final entry in outDir.list()) {
-      if (entry is! File) continue;
-      final base = p.basename(entry.path);
-      if (!base.startsWith('$defaultStem.') || !base.endsWith('.srt')) continue;
-      final suffix = base.substring(defaultStem.length);
-      await entry.rename(p.join(outDir.path, '$newStem$suffix'));
+    if (await _renameFile(oldMkv, newMkv.path)) {
+      stdout.writeln('Renamed: ${oldMkv.path}\n      → ${newMkv.path}');
+      await _renameAssociatedSrts(outDir, defaultStem, newStem);
     }
+  }
+}
+
+/// Renames [src] to [destPath], returning whether it succeeded.
+///
+/// Falls back to copy+delete when the rename crosses a filesystem boundary
+/// (EXDEV — `rename(2)` cannot move between mounts), and logs + returns false
+/// on any other failure rather than throwing, so one bad file doesn't abort
+/// the whole batch.
+Future<bool> _renameFile(File src, String destPath) async {
+  try {
+    await src.rename(destPath);
+    return true;
+  } on FileSystemException catch (e) {
+    if (e.osError?.errorCode == 18) { // EXDEV: cross-device link
+      try {
+        await src.copy(destPath);
+        await src.delete();
+        return true;
+      } catch (e2) {
+        stderr.writeln('   Rename (copy fallback) failed for ${src.path}: $e2');
+        return false;
+      }
+    }
+    stderr.writeln('   Rename failed for ${src.path}: $e');
+    return false;
+  }
+}
+
+/// Renames every `<oldStem>.*.srt` sidecar in [outDir] to use [newStem].
+Future<void> _renameAssociatedSrts(
+    Directory outDir, String oldStem, String newStem) async {
+  await for (final entry in outDir.list()) {
+    if (entry is! File) continue;
+    final base = p.basename(entry.path);
+    if (!base.startsWith('$oldStem.') || !base.endsWith('.srt')) continue;
+    final suffix = base.substring(oldStem.length);
+    await _renameFile(entry, p.join(outDir.path, '$newStem$suffix'));
   }
 }
 

@@ -49,10 +49,50 @@ class TmdbClient {
     }
   }
 
-  // Bearer header for v4 read access tokens; api_key param for v3 API keys.
-  Map<String, String> get _headers => {'Authorization': 'Bearer $token'};
+  // TMDB accepts two credential types: v4 read access tokens (long JWTs, which
+  // contain '.') sent as a Bearer header, and v3 API keys (32-char hex) sent
+  // as an `api_key` query param. Send ONLY the matching mechanism — passing a
+  // v4 JWT as `api_key=` (or vice-versa) is malformed and also leaks the token
+  // into request URLs/logs.
+  bool get _isV4Token => token.contains('.');
+
+  Map<String, String> get _headers =>
+      _isV4Token ? {'Authorization': 'Bearer $token'} : const {};
+
   Map<String, String> _params(Map<String, String> extra) =>
-      {'api_key': token, ...extra};
+      _isV4Token ? extra : {'api_key': token, ...extra};
+
+  /// GETs [path] (relative to [_base]) with [params], retrying once on HTTP 429
+  /// (honouring `Retry-After`). Returns the decoded JSON object, or null on
+  /// error / non-200 — non-200s are logged with their status code instead of
+  /// being silently treated as "no results".
+  Future<Map<String, dynamic>?> _get(
+    String path,
+    Map<String, String> params,
+  ) async {
+    final uri =
+        Uri.parse('$_base$path').replace(queryParameters: _params(params));
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final response =
+          await _http.get(uri, headers: _headers).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        return decoded is Map<String, dynamic> ? decoded : null;
+      }
+      if (response.statusCode == 429 && attempt == 0) {
+        final retryAfter =
+            (int.tryParse(response.headers['retry-after'] ?? '') ?? 1).clamp(1, 10);
+        _log('   TMDB rate-limited (429); retrying in ${retryAfter}s…',
+            isError: true);
+        await Future<void>.delayed(Duration(seconds: retryAfter));
+        continue;
+      }
+      _log('   TMDB request failed (${response.statusCode}) for $path',
+          isError: true);
+      return null;
+    }
+    return null;
+  }
 
   static String get _cacheDir => '${xdgCacheHome()}/disc-buddy';
 
@@ -92,23 +132,21 @@ class TmdbClient {
     int limit = 5,
   }) async {
     try {
-      final uri =
-          Uri.parse('$_base/search/movie').replace(queryParameters: _params({
+      final body = await _get('/search/movie', {
         'query': query,
         if (year != null) 'year': '$year',
-      }));
-      final response = await _http
-          .get(uri, headers: _headers)
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return [];
-      final results =
-          (jsonDecode(response.body)['results'] as List?) ?? [];
-      return results.take(limit).map<MovieCandidate>((r) {
-        final m = r as Map<String, dynamic>;
+      });
+      if (body == null) return [];
+      final results = (body['results'] as List?) ?? [];
+      return results
+          .map((r) => r as Map<String, dynamic>)
+          .where((m) => m['id'] is num)
+          .take(limit)
+          .map<MovieCandidate>((m) {
         final y = int.tryParse(
             (m['release_date'] as String? ?? '').split('-').first);
         return (
-          id:       m['id']       as int,
+          id:       (m['id'] as num).toInt(),
           title:    m['title']    as String? ?? '',
           year:     y,
           overview: m['overview'] as String? ?? '',
@@ -126,20 +164,18 @@ class TmdbClient {
     int limit = 5,
   }) async {
     try {
-      final uri = Uri.parse('$_base/search/tv')
-          .replace(queryParameters: _params({'query': query}));
-      final response = await _http
-          .get(uri, headers: _headers)
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return [];
-      final results =
-          (jsonDecode(response.body)['results'] as List?) ?? [];
-      return results.take(limit).map<TvCandidate>((r) {
-        final m = r as Map<String, dynamic>;
+      final body = await _get('/search/tv', {'query': query});
+      if (body == null) return [];
+      final results = (body['results'] as List?) ?? [];
+      return results
+          .map((r) => r as Map<String, dynamic>)
+          .where((m) => m['id'] is num)
+          .take(limit)
+          .map<TvCandidate>((m) {
         final y = int.tryParse(
             (m['first_air_date'] as String? ?? '').split('-').first);
         return (
-          id:           m['id']       as int,
+          id:           (m['id'] as num).toInt(),
           name:         m['name']     as String? ?? '',
           firstAirYear: y,
           overview:     m['overview'] as String? ?? '',
@@ -178,14 +214,9 @@ class TmdbClient {
     }
 
     try {
-      final uri = Uri.parse('$_base/tv/$seriesId')
-          .replace(queryParameters: _params({}));
-      final response = await _http
-          .get(uri, headers: _headers)
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return null;
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final n = body['number_of_seasons'] as int?;
+      final body = await _get('/tv/$seriesId', {});
+      if (body == null) return null;
+      final n = (body['number_of_seasons'] as num?)?.toInt();
       if (n != null) await _writeCache(cacheFile, {'numberOfSeasons': n});
       return n;
     } catch (e) {
@@ -235,8 +266,9 @@ class TmdbClient {
     if (cached != null) {
       final eps = (cached['episodes'] as List?) ?? [];
       return eps
+          .where((e) => e['number'] is num)
           .map((e) => (
-                number:     e['number']     as int,
+                number:     (e['number']    as num).toInt(),
                 title:      e['title']      as String? ?? '',
                 overview:   e['overview']   as String? ?? '',
                 guestStars: e['guestStars'] as String? ?? '',
@@ -246,22 +278,19 @@ class TmdbClient {
     }
 
     try {
-      final uri = Uri.parse('$_base/tv/$seriesId/season/$season')
-          .replace(queryParameters: _params({'language': language}));
-      final response = await _http
-          .get(uri, headers: _headers)
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) return [];
-      final rawEps =
-          (jsonDecode(response.body)['episodes'] as List?) ?? [];
-      final episodes = rawEps.map<EpisodeInfo>((e) {
+      final body = await _get('/tv/$seriesId/season/$season', {'language': language});
+      if (body == null) return [];
+      final rawEps = (body['episodes'] as List?) ?? [];
+      final episodes = rawEps
+          .where((e) => e['episode_number'] is num)
+          .map<EpisodeInfo>((e) {
         final guests = (e['guest_stars'] as List? ?? [])
             .take(6)
             .map((g) => (g['character'] as String? ?? '').trim())
             .where((s) => s.isNotEmpty)
             .join(', ');
         return (
-          number:     e['episode_number'] as int,
+          number:     (e['episode_number'] as num).toInt(),
           title:      e['name']           as String? ?? '',
           overview:   e['overview']       as String? ?? '',
           guestStars: guests,

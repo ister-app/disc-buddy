@@ -22,9 +22,14 @@ final _close = _libc.lookupFunction<_CloseC, _CloseDart>('close');
 
 // ---------------------------------------------------------------------------
 // sg_io_hdr_t — identical to Linux <scsi/sg.h>
+//
+// NOT @Packed: the kernel struct uses natural alignment. With @Packed(1) the
+// 4 bytes of padding the C compiler inserts before `usrPtr` (to 8-byte-align
+// the pointer after the 4-byte `packId`) would be dropped, shifting `status`
+// and every trailing field 4 bytes earlier than the kernel writes them — so
+// the status/sense fields would be read from the wrong offsets.
 // ---------------------------------------------------------------------------
 
-@Packed(1)
 final class _SgIoHdr extends Struct {
   @Int32()   external int interfaceId;
   @Int32()   external int dxferDirection;
@@ -108,7 +113,16 @@ Future<({int firstTrack, int lastTrack, List<int> offsets, int leadOut})?> readT
 
     try {
       final ret = _ioctl(fd, _sgIo, hdr.cast());
-      if (ret != 0 || hdr.ref.status != 0) return null;
+      // Fail on any error: ioctl error, non-zero SCSI status, a transport-level
+      // host/driver failure (which can leave `status == 0` but the buffer
+      // stale), or returned sense data.
+      if (ret != 0 ||
+          hdr.ref.status != 0 ||
+          hdr.ref.hostStatus != 0 ||
+          hdr.ref.driverStatus != 0 ||
+          hdr.ref.sbLenWr != 0) {
+        return null;
+      }
 
       final bytes = Uint8List(bufSize);
       for (var i = 0; i < bufSize; i++) { bytes[i] = dataBuf[i]; }

@@ -212,6 +212,7 @@ class AutoNamer {
             episodes: episodes,
             items: items,
             subs: subs,
+            fps: fps,
           );
 
     final results = <File, String?>{};
@@ -556,13 +557,15 @@ class AutoNamer {
     required List<({int season, EpisodeInfo ep})> episodes,
     required List<({File file, String discName, List<File> srts})> items,
     required Map<int, ({String text, String language})> subs,
+    required Map<int, Fingerprint> fps,
   }) async {
     final picks = <int, _EpisodePick?>{};
     final usedStems = <String, int>{};
 
     for (var i = 0; i < items.length; i++) {
       final sub = subs[i];
-      final fp = Fingerprint.empty;
+      // Reuse the per-file summary computed earlier; it's the strongest signal.
+      final fp = fps[i] ?? Fingerprint.empty;
       if (sub == null) continue;
       _log(
         '   [${i + 1}/${items.length}] Naming: ${items[i].file.path}',
@@ -1034,6 +1037,15 @@ class AutoNamer {
       epBuf.writeln();
     }
 
+    // A pre-computed plot summary (when available) is a far stronger signal
+    // than raw subtitle text, so surface it to the model as the primary cue.
+    final hasSummary = fp.summary.isNotEmpty;
+    final userContent = hasSummary
+        ? 'Plot summary (primary signal):\n${fp.summary}\n\n'
+            'Subtitle excerpt (supporting evidence):\n$subtitleText\n\n'
+            'Episodes:\n${epBuf}JSON:'
+        : 'Subtitle:\n$subtitleText\n\nEpisodes:\n${epBuf}JSON:';
+
     final response = await llm.chat(
       timeout: const Duration(minutes: 5),
       maxTokens: 4000,
@@ -1043,15 +1055,16 @@ class AutoNamer {
           'role': 'system',
           'content':
               'You identify which TV episode a subtitle belongs to.\n'
-              'Read the subtitle excerpt and match it to the episode description.\n'
+              '${hasSummary ? 'Use the plot summary as the primary signal and '
+                  'the subtitle excerpt as supporting evidence.\n' : 'Read the '
+                  'subtitle excerpt and match it to the episode description.\n'}'
               'Output STRICT JSON only: {"pick":N} (1-based).\n'
               'Always pick the closest match. '
               'Use {"pick":0} only if completely unrecognisable.',
         },
         {
           'role': 'user',
-          'content':
-              'Subtitle:\n$subtitleText\n\nEpisodes:\n${epBuf}JSON:',
+          'content': userContent,
         },
       ],
     );

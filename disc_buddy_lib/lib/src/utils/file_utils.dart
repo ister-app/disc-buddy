@@ -2,6 +2,10 @@ import 'dart:io';
 import 'tty.dart';
 import '../rippers/video_disc_ripper.dart' show LogCallback;
 
+// Monotonic counter so two chapter files created in the same millisecond (and
+// process) don't collide on their temp-file names.
+int _chapterFileSeq = 0;
+
 /// Writes a temporary ffmetadata file containing chapter marks.
 /// Returns null if [chapters] has fewer than 2 entries.
 /// The caller is responsible for deleting the returned file after use.
@@ -20,7 +24,8 @@ Future<File?> writeChapterMetadata(
     buf.write('[CHAPTER]\nTIMEBASE=1/1000\nSTART=$start\nEND=$end\ntitle=Chapter $label\n\n');
   }
   final ts      = DateTime.now().millisecondsSinceEpoch;
-  final tmpFile = File('${Directory.systemTemp.path}/disc_buddy_chapters_$ts.txt');
+  final tmpFile = File('${Directory.systemTemp.path}'
+      '/disc_buddy_chapters_${pid}_${ts}_${_chapterFileSeq++}.txt');
   await tmpFile.writeAsString(buf.toString());
   return tmpFile;
 }
@@ -34,15 +39,16 @@ Future<bool> confirmOverwrite(File file, {required bool force, LogCallback? onLo
   final shouldDelete = force ||
       (onLog == null && ttyConfirm('   File already exists — delete? [y/N] '));
   if (shouldDelete) {
-    await file.delete().catchError((e) {
-      if (onLog != null) {
-        onLog('   Cannot delete file: $e', isError: true);
-      } else {
-        stderr.writeln('   Cannot delete file: $e');
-      }
-      return File('');
-    });
-    return true;
+    try {
+      await file.delete();
+      return true;
+    } catch (e) {
+      // The delete failed (e.g. permissions). Returning true here would let the
+      // caller write over a file we couldn't remove, so report failure instead.
+      final msg = '   Cannot delete file: $e';
+      if (onLog != null) { onLog(msg, isError: true); } else { stderr.writeln(msg); }
+      return false;
+    }
   }
   if (onLog != null) { onLog('   Skipped.'); } else { stdout.writeln('   Skipped.'); }
   return false;

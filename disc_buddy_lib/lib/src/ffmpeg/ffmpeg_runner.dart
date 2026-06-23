@@ -56,7 +56,7 @@ class FfmpegRunner {
     Timer? completionTimer;
     Timer? completionSigkillTimer;
 
-    process.stderr
+    final stderrDone = process.stderr
         .transform(const SystemEncoding().decoder)
         .listen((chunk) {
       for (final line in chunk.split('\r')) {
@@ -78,11 +78,16 @@ class FfmpegRunner {
           stderrCollect?.add(line);
         }
       }
-    });
+    }).asFuture<void>();
 
-    process.stdout.drain<void>();
+    final stdoutDone = process.stdout.drain<void>();
 
     final exitCode = await process.exitCode;
+    // Wait for both pipes to be fully consumed before returning, otherwise
+    // trailing stderr lines (and [stderrCollect] entries) can be dropped and a
+    // full stdout pipe could stall the child. Errors here (e.g. broken pipe on
+    // an early kill) are not fatal to the exit code.
+    await Future.wait([stderrDone, stdoutDone]).catchError((_) => <void>[]);
     killTimer?.cancel();
     killSigkillTimer?.cancel();
     completionTimer?.cancel();

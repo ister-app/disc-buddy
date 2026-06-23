@@ -4,7 +4,14 @@ import 'dart:io';
 /// Restores echo + canonical mode via stty so characters are visible.
 String ttyReadLine() {
   try { Process.runSync('stty', ['-F', '/dev/tty', 'echo', 'icanon']); } catch (_) {}
-  final tty = File('/dev/tty').openSync();
+  RandomAccessFile tty;
+  try {
+    tty = File('/dev/tty').openSync();
+  } on FileSystemException {
+    // No controlling terminal (e.g. running under CI or as a daemon) — fall
+    // back to stdin so callers don't crash on the missing /dev/tty.
+    return stdin.readLineSync() ?? '';
+  }
   final bytes = <int>[];
   while (true) {
     final b = tty.readByteSync();

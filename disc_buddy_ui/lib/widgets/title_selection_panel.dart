@@ -39,6 +39,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
     _autoName = settings.autoName;
     _batchAssign = settings.batchAssign;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final notifier = ref.read(ripStateProvider(widget.entry.id).notifier);
       final state = ref.read(ripStateProvider(widget.entry.id));
       if (state is RipIdle) {

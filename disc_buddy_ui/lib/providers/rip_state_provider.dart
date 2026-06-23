@@ -229,11 +229,34 @@ class RipStateNotifier extends Notifier<RipState> {
   SendPort? _cancelPort;
   Isolate? _spawnedIsolate;
   ReceivePort? _activeReceivePort;
+  bool _disposed = false;
 
   RipStateNotifier(this.devicePath);
 
   @override
-  RipState build() => RipIdle();
+  RipState build() {
+    // The provider can be disposed mid-rip (e.g. the drive is removed and its
+    // entry disappears). Writing `state` on a disposed Notifier throws, so any
+    // write after an async gap or from an isolate callback must go through
+    // [_emit], which drops the write once disposed.
+    ref.onDispose(() => _disposed = true);
+    return RipIdle();
+  }
+
+  /// Guarded state write — a no-op after the notifier has been disposed.
+  void _emit(RipState s) {
+    if (_disposed) return;
+    state = s;
+  }
+
+  // Cap retained log lines so a multi-hour rip doesn't grow the buffer (and the
+  // O(n) per-append copy into state) without bound.
+  static const _maxLogLines = 2000;
+  static void _capLog(List<String> logs) {
+    if (logs.length > _maxLogLines) {
+      logs.removeRange(0, logs.length - _maxLogLines);
+    }
+  }
 
   Settings get _settings => ref.read(settingsProvider);
 
@@ -366,6 +389,7 @@ class RipStateNotifier extends Notifier<RipState> {
       onLog: (msg, {isError = false}) {
         if (msg.isEmpty) return;
         logs.add(msg);
+        _capLog(logs);
         final s = state;
         if (s is RipAudioCdProgress) {
           // "── Ripping: track N → …" signals a new track starting.
@@ -373,21 +397,21 @@ class RipStateNotifier extends Notifier<RipState> {
           if (m != null) {
             final nr  = int.tryParse(m.group(1)!) ?? -1;
             final idx = tracks.indexOf(nr);
-            state = s.copyWith(
+            _emit(s.copyWith(
               currentTrack: idx >= 0 ? idx : s.currentTrack,
               elapsed: Duration.zero,
               speed: 0,
               log: List.from(logs),
-            );
+            ));
           } else {
-            state = s.copyWith(log: List.from(logs));
+            _emit(s.copyWith(log: List.from(logs)));
           }
         }
       },
       onProgress: (prog) {
         final s = state;
         if (s is RipAudioCdProgress) {
-          state = s.copyWith(elapsed: prog.elapsed, speed: prog.speed);
+          _emit(s.copyWith(elapsed: prog.elapsed, speed: prog.speed));
         }
       },
     );
@@ -397,12 +421,12 @@ class RipStateNotifier extends Notifier<RipState> {
       if (ref.read(loopEnabledProvider(devicePath)) &&
           devicePath.startsWith('/dev/')) {
         await Process.run('eject', [devicePath]);
-        state = LoopWaiting(lastOutputFiles: []);
+        _emit(LoopWaiting(lastOutputFiles: []));
       } else {
-        state = RipCompleted([]);
+        _emit(RipCompleted([]));
       }
     } catch (e) {
-      state = RipError(e.toString());
+      _emit(RipError(e.toString()));
     }
   }
 
@@ -417,9 +441,10 @@ class RipStateNotifier extends Notifier<RipState> {
     void appendLog(String msg, {bool isError = false}) {
       if (msg.isEmpty) return;
       logs.add(isError ? '[ERR] $msg' : msg);
+      _capLog(logs);
       final s = state;
       if (s is MkvProcessing) {
-        state = s.copyWith(log: List.from(logs));
+        _emit(s.copyWith(log: List.from(logs)));
       }
     }
 
@@ -458,9 +483,9 @@ class RipStateNotifier extends Notifier<RipState> {
         appendLog('Subtitle extraction complete.');
       }
 
-      state = RipCompleted([destPath]);
+      _emit(RipCompleted([destPath]));
     } catch (e) {
-      state = RipError(e.toString());
+      _emit(RipError(e.toString()));
     }
   }
 
@@ -480,8 +505,9 @@ class RipStateNotifier extends Notifier<RipState> {
     void appendLog(String msg, {bool isError = false}) {
       if (msg.isEmpty) return;
       logs.add(isError ? '[ERR] $msg' : msg);
+      _capLog(logs);
       final s = state;
-      if (s is MkvProcessing) state = s.copyWith(log: List.from(logs));
+      if (s is MkvProcessing) _emit(s.copyWith(log: List.from(logs)));
     }
 
     state = MkvProcessing(path: filePaths.first);
@@ -594,9 +620,9 @@ class RipStateNotifier extends Notifier<RipState> {
       }
 
       namer?.close();
-      state = RipCompleted(outputFiles);
+      _emit(RipCompleted(outputFiles));
     } catch (e) {
-      state = RipError(e.toString());
+      _emit(RipError(e.toString()));
     }
   }
 
@@ -641,8 +667,9 @@ class RipStateNotifier extends Notifier<RipState> {
     void appendLog(String msg, {bool isError = false}) {
       if (msg.isEmpty) return;
       logs.add(isError ? '[ERR] $msg' : msg);
+      _capLog(logs);
       final s = state;
-      if (s is RipInProgress) state = s.copyWith(log: List.from(logs));
+      if (s is RipInProgress) _emit(s.copyWith(log: List.from(logs)));
     }
 
     final options = _settings.toRipOptions(device: devicePath).copyWithHints(
@@ -676,26 +703,26 @@ class RipStateNotifier extends Notifier<RipState> {
           case _RipCancelled():
             // Isolate confirmed cancellation: close port and return to idle.
             receivePort.close();
-            if (state is RipInProgress) state = RipIdle();
+            if (state is RipInProgress) _emit(RipIdle());
             return;
           case _RipLog(:final text, :final isError):
             appendLog(text, isError: isError);
           case _RipProgress(:final elapsed, :final speed):
             final s = state;
-            if (s is RipInProgress) state = s.copyWith(elapsed: elapsed, speed: speed);
+            if (s is RipInProgress) _emit(s.copyWith(elapsed: elapsed, speed: speed));
           case _RipTitleIndex(:final index):
             final s = state;
             if (s is RipInProgress) {
-              state = s.copyWith(currentIndex: index, elapsed: Duration.zero, speed: 0);
+              _emit(s.copyWith(currentIndex: index, elapsed: Duration.zero, speed: 0));
             }
           case _RipDone(:final files):
             receivePort.close();
             if (ref.read(loopEnabledProvider(devicePath)) &&
                 devicePath.startsWith('/dev/')) {
               await Process.run('eject', [devicePath]);
-              state = LoopWaiting(lastOutputFiles: files);
+              _emit(LoopWaiting(lastOutputFiles: files));
             } else {
-              state = RipCompleted(files);
+              _emit(RipCompleted(files));
             }
             return;
           case _RipFail(:final error):
@@ -717,7 +744,7 @@ class RipStateNotifier extends Notifier<RipState> {
       }
     } catch (e) {
       receivePort.close();
-      state = RipError(e.toString());
+      _emit(RipError(e.toString()));
     }
   }
 
@@ -731,10 +758,15 @@ class RipStateNotifier extends Notifier<RipState> {
       final capturedPort = _activeReceivePort;
       final capturedIsolate = _spawnedIsolate;
       Future.delayed(const Duration(seconds: 3), () {
+        if (_disposed) return;
+        // Only force-kill if this is still the same job we captured. A new rip
+        // started within the 3 s window replaces these fields, and killing it
+        // (or resetting to idle) would clobber the new rip.
+        if (!identical(_spawnedIsolate, capturedIsolate)) return;
         if (state is! RipInProgress) return;
         capturedIsolate?.kill(priority: Isolate.immediate);
         capturedPort?.close();
-        if (state is RipInProgress) state = RipIdle();
+        _emit(RipIdle());
       });
     }
   }

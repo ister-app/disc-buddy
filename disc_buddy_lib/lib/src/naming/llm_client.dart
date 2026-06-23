@@ -86,6 +86,11 @@ class LlmClient {
       if (content == null || content.trim().isEmpty) {
         _log('   LLM: empty/null content (finish_reason=$finish). '
             'Response: ${response.body}', isError: true);
+      } else if (finish == 'length') {
+        // Hit max_tokens: the content is truncated and likely unparseable JSON.
+        // Warn so a silently-cut response isn't mistaken for a clean reply.
+        _log('   LLM: response truncated (finish_reason=length) — '
+            'raise maxTokens or shrink the request.', isError: true);
       }
       return content;
     } catch (e) {

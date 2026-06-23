@@ -51,7 +51,12 @@ class CcExtractor {
     await for (final chunk in process.stdout) {
       scanner.addChunk(chunk);
     }
-    await Future.wait([process.exitCode, stderrFuture]);
+    final results = await Future.wait([process.exitCode, stderrFuture]);
+    final exitCode = results[0] as int;
+    if (exitCode != 0) {
+      _log('   CC scan: ffmpeg exited with code $exitCode — '
+          'CC results may be incomplete.', isError: true);
+    }
 
     final srt = scanner.decoder.buildSrt();
     if (srt.isEmpty) {
@@ -106,7 +111,14 @@ class CcExtractor {
     await for (final chunk in process.stdout) {
       scanner.addChunk(chunk);
     }
-    await Future.wait([process.exitCode, stderrFuture]);
+    final results = await Future.wait([process.exitCode, stderrFuture]);
+    final exitCode = results[0] as int;
+    // A non-zero exit can be benign here (ffmpeg may close the input pipe early
+    // once it has the video stream), so only surface it when nothing decoded.
+    if (exitCode != 0 && scanner.userDataPackets == 0) {
+      _log('   CC scan: ffmpeg exited with code $exitCode and no user_data '
+          'was seen — the source stream may not have been demuxed.', isError: true);
+    }
 
     final srt = scanner.decoder.buildSrt();
     if (srt.isEmpty) {

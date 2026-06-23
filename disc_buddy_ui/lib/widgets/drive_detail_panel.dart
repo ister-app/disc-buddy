@@ -237,8 +237,13 @@ class _CompletedPanel extends ConsumerWidget {
                   icon: const Icon(Icons.eject_outlined),
                   label: const Text('Eject'),
                   onPressed: () async {
+                    // Capture the notifier before the await — the panel may be
+                    // rebuilt/replaced while `eject` runs (the drive removal it
+                    // triggers swaps the panel), making `ref` unsafe afterwards.
+                    final notifier =
+                        ref.read(ripStateProvider(devicePath).notifier);
                     await Process.run('eject', [info.device]);
-                    ref.read(ripStateProvider(devicePath).notifier).reset();
+                    notifier.reset();
                   },
                 ),
               ],
