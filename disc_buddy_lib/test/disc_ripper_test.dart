@@ -80,4 +80,43 @@ void main() {
       expect(meta.albumArtist, equals('Various Artists'));
     });
   });
+
+  group('audioTrackOutputPath', () {
+    const track = TrackInfo(
+      number: 2,
+      title: 'all-american bitch?',
+      artist: '',
+      artistMbid: '',
+      recordingMbid: '',
+      startTime: 0,
+      endTime: 60,
+    );
+
+    test('pad met gesanitizede onderdelen, rauwe titel blijft in tags', () {
+      final meta = DiscMetadata(
+        album: 'GUTS',
+        artist: 'Olivia Rodrigo',
+        date: '2023',
+        tracks: [track],
+      );
+      expect(
+        audioTrackOutputPath('/music', meta, track),
+        equals('/music/Olivia Rodrigo/GUTS (2023)/02-all-american bitch_.flac'),
+      );
+    });
+
+    test('multi-disc krijgt discnummer-prefix', () {
+      final meta = DiscMetadata(
+        album: 'Box',
+        artist: 'Artist',
+        discNumber: 2,
+        totalDiscs: 3,
+        tracks: [track],
+      );
+      expect(
+        audioTrackOutputPath('/music', meta, track),
+        equals('/music/Artist/Box/02-02-all-american bitch_.flac'),
+      );
+    });
+  });
 }

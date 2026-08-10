@@ -375,7 +375,11 @@ class RipStateNotifier extends Notifier<RipState> {
     );
   }
 
-  Future<void> startAudioCdRip(DiscMetadata metadata, List<int> tracks) async {
+  Future<void> startAudioCdRip(
+    DiscMetadata metadata,
+    List<int> tracks, {
+    Set<String>? overwrite,
+  }) async {
     final logs = <String>[];
     state = RipAudioCdProgress(metadata: metadata, selectedTracks: tracks);
 
@@ -417,7 +421,7 @@ class RipStateNotifier extends Notifier<RipState> {
     );
 
     try {
-      await ripper.rip(metadata, tracks);
+      await ripper.rip(metadata, tracks, overwrite: overwrite);
       if (ref.read(loopEnabledProvider(devicePath)) &&
           devicePath.startsWith('/dev/')) {
         await Process.run('eject', [devicePath]);

@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'package:disc_buddy/disc_buddy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import '../providers/drive_list_provider.dart';
 import '../providers/rip_state_provider.dart';
+import '../providers/settings_provider.dart';
 import 'rip_option_widgets.dart';
 
 const _compactTextButton = ButtonStyle(
@@ -121,6 +124,35 @@ class _AudioCdPanelState extends ConsumerState<AudioCdPanel> {
     });
   }
 
+  /// Starts the rip; if some output files already exist, first shows a
+  /// dialog listing them with checkboxes to pick which to overwrite
+  /// (unchecked files are skipped).
+  Future<void> _startRip() async {
+    final meta   = _effectiveMeta;
+    final tracks = _selectedTracks.toList()..sort();
+    final musicDir = ref.read(settingsProvider).effectiveMusicDir;
+
+    final existing = [
+      for (final nr in tracks)
+        if (nr >= 1 && nr <= meta.tracks.length)
+          audioTrackOutputPath(musicDir, meta, meta.tracks[nr - 1]),
+    ].where((path) => File(path).existsSync()).toList();
+
+    Set<String>? overwrite;
+    if (existing.isNotEmpty) {
+      overwrite = await showDialog<Set<String>>(
+        context: context,
+        builder: (_) => _OverwriteDialog(paths: existing),
+      );
+      if (overwrite == null) return; // cancelled
+    }
+
+    if (!mounted) return;
+    ref
+        .read(ripStateProvider(widget.entry.id).notifier)
+        .startAudioCdRip(meta, tracks, overwrite: overwrite);
+  }
+
   @override
   Widget build(BuildContext context) {
     final orig = widget.metadata;
@@ -235,17 +267,95 @@ class _AudioCdPanelState extends ConsumerState<AudioCdPanel> {
               FilledButton.icon(
                 icon: const Icon(Icons.music_note),
                 label: Text('Rip ${_selectedTracks.length}'),
-                onPressed: _selectedTracks.isEmpty
-                    ? null
-                    : () => ref
-                        .read(ripStateProvider(widget.entry.id).notifier)
-                        .startAudioCdRip(
-                          _effectiveMeta,
-                          _selectedTracks.toList()..sort(),
-                        ),
+                onPressed: _selectedTracks.isEmpty ? null : _startRip,
               ),
             ],
           ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Overwrite dialog
+// ---------------------------------------------------------------------------
+
+/// Lists existing output files with checkboxes. Pops with the set of paths
+/// to overwrite (empty set = skip all), or null when cancelled.
+class _OverwriteDialog extends StatefulWidget {
+  final List<String> paths;
+  const _OverwriteDialog({required this.paths});
+
+  @override
+  State<_OverwriteDialog> createState() => _OverwriteDialogState();
+}
+
+class _OverwriteDialogState extends State<_OverwriteDialog> {
+  late final Set<String> _overwrite = Set.of(widget.paths);
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Files already exist'),
+      contentPadding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Check the files you want to overwrite; '
+                'unchecked files will be skipped.'),
+            const SizedBox(height: 8),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: widget.paths.length,
+                itemBuilder: (context, i) {
+                  final path = widget.paths[i];
+                  return CheckboxListTile(
+                    value: _overwrite.contains(path),
+                    onChanged: (_) => setState(() {
+                      if (!_overwrite.remove(path)) _overwrite.add(path);
+                    }),
+                    title: Text(p.basename(path),
+                        overflow: TextOverflow.ellipsis),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                  );
+                },
+              ),
+            ),
+            Row(
+              children: [
+                TextButton(
+                  style: _compactTextButton,
+                  onPressed: () =>
+                      setState(() => _overwrite.addAll(widget.paths)),
+                  child: const Text('All'),
+                ),
+                TextButton(
+                  style: _compactTextButton,
+                  onPressed: () => setState(_overwrite.clear),
+                  child: const Text('None'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, Set.of(_overwrite)),
+          child: Text(_overwrite.isEmpty
+              ? 'Skip all'
+              : 'Overwrite ${_overwrite.length}'),
         ),
       ],
     );

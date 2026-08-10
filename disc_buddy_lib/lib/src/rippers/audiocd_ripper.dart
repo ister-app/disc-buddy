@@ -17,6 +17,18 @@ import '../utils/progress.dart';
 import '../utils/sanitize.dart';
 import '../utils/udev.dart';
 
+/// Output path of [track] exactly as [AudioCDRipper.rip] will create it.
+/// Lets a UI check for existing files before starting a rip.
+String audioTrackOutputPath(String outputDir, DiscMetadata meta, TrackInfo track) {
+  final albumDir = p.join(outputDir,
+      sanitizeFilename(meta.artistDir), sanitizeFilename(meta.albumDir));
+  final nr = track.number.toString().padLeft(2, '0');
+  final stem = meta.totalDiscs > 1 && meta.discNumber > 0
+      ? '${meta.discNumber.toString().padLeft(2, '0')}-$nr-${track.title}'
+      : '$nr-${track.title}';
+  return p.join(albumDir, '${sanitizeFilename(stem)}.flac');
+}
+
 class AudioCDRipper {
   final RipOptions options;
   final FfmpegRunner _ffmpeg;
@@ -176,7 +188,16 @@ class AudioCDRipper {
   }
 
   /// Rips the given tracks to FLAC files.
-  Future<void> rip(DiscMetadata meta, List<int> trackNumbers) async {
+  ///
+  /// [overwrite] — when non-null, existing output files whose path is in the
+  /// set are deleted and re-ripped; other existing files are skipped without
+  /// prompting. When null, existing behavior applies ([confirmOverwrite]:
+  /// force deletes, interactive TTY asks per file, UI skips).
+  Future<void> rip(
+    DiscMetadata meta,
+    List<int> trackNumbers, {
+    Set<String>? overwrite,
+  }) async {
     final albumDir = p.join(options.outputDir,
         sanitizeFilename(meta.artistDir), sanitizeFilename(meta.albumDir));
     await Directory(albumDir).create(recursive: true);
@@ -248,12 +269,24 @@ class AudioCDRipper {
         }
 
         final track = meta.tracks[idx];
-        final filename = _trackFilename(meta, track);
-        final outFile  = File(p.join(albumDir, '$filename.flac'));
+        final outFile = File(audioTrackOutputPath(options.outputDir, meta, track));
 
         _log('── Ripping: track $nr → ${outFile.path}');
 
-        if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
+        if (overwrite != null && !options.force && await outFile.exists()) {
+          if (!overwrite.contains(outFile.path)) {
+            _log('   Skipped.');
+            continue;
+          }
+          try {
+            await outFile.delete();
+          } catch (e) {
+            _log('   Cannot delete file: $e', isError: true);
+            continue;
+          }
+        } else if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) {
+          continue;
+        }
 
         final trackArtist = track.artist.isNotEmpty ? track.artist : meta.albumArtist;
 
@@ -424,15 +457,6 @@ class AudioCDRipper {
           'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
       await _deletePartial(outFile);
     }
-  }
-
-  String _trackFilename(DiscMetadata meta, TrackInfo track) {
-    final nr = track.number.toString().padLeft(2, '0');
-    if (meta.totalDiscs > 1 && meta.discNumber > 0) {
-      final dn = meta.discNumber.toString().padLeft(2, '0');
-      return sanitizeFilename('$dn-$nr-${track.title}');
-    }
-    return sanitizeFilename('$nr-${track.title}');
   }
 
   /// Fetches disc ID and corrected lead-out as a (discId, leadOut) record.
