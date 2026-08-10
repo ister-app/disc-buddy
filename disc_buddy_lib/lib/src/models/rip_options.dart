@@ -12,6 +12,11 @@ class RipOptions {
   final bool loop;
   final String? mkvextract;
   final String? subtileOcr;
+  /// Path to the whisper-cli binary (whisper.cpp), used as an audio-
+  /// transcription fallback for auto-naming titles without subtitles.
+  final String? whisper;
+  /// Path to the whisper.cpp ggml model file (e.g. ggml-base.en.bin).
+  final String? whisperModel;
   final String? tmdbToken;
   final String? llmUrl;
   final String? llmKey;
@@ -53,6 +58,8 @@ class RipOptions {
     this.loop = false,
     this.mkvextract,
     this.subtileOcr,
+    this.whisper,
+    this.whisperModel,
     this.tmdbToken,
     this.llmUrl,
     this.llmKey,
@@ -69,14 +76,20 @@ class RipOptions {
     this.dvdSinglePass = false,
   });
 
+  /// True when the tools for subtitle extraction + OCR are available.
+  bool get canOcrSubtitles => mkvextract != null && subtileOcr != null;
+
+  /// True when the whisper.cpp transcription fallback is available.
+  bool get canTranscribe => whisper != null && whisperModel != null;
+
   /// True when all tools and credentials needed for LLM-based auto-naming
-  /// are available.
+  /// are available. Text can come from subtitle OCR or, as a fallback,
+  /// whisper audio transcription — either source suffices.
   bool get canAutoName =>
       tmdbToken != null &&
       llmUrl != null &&
       llmModel != null &&
-      mkvextract != null &&
-      subtileOcr != null;
+      (canOcrSubtitles || canTranscribe);
 
   RipOptions copyWithTrackFilter({
     Set<int>? audioTrackIndices,
@@ -91,6 +104,8 @@ class RipOptions {
     loop: loop,
     mkvextract: mkvextract,
     subtileOcr: subtileOcr,
+    whisper: whisper,
+    whisperModel: whisperModel,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -117,6 +132,8 @@ class RipOptions {
     loop: loop,
     mkvextract: mkvextract,
     subtileOcr: subtileOcr,
+    whisper: whisper,
+    whisperModel: whisperModel,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -143,6 +160,8 @@ class RipOptions {
     loop: loop,
     mkvextract: mkvextract,
     subtileOcr: subtileOcr,
+    whisper: whisper,
+    whisperModel: whisperModel,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../utils/tty.dart';
+import '../audio/transcriber.dart';
 import '../subtitles/subtitle_extractor.dart';
 import '../utils/sanitize.dart';
 import 'llm_client.dart';
@@ -34,6 +35,8 @@ class AutoNamer {
   static const int _summaryMaxChars = 20000;
 
   final SubtitleExtractor extractor;
+  /// Optional whisper.cpp fallback for titles without any subtitle track.
+  final Transcriber? transcriber;
   final TmdbClient tmdb;
   final LlmClient llm;
   final bool force;
@@ -43,6 +46,7 @@ class AutoNamer {
 
   AutoNamer({
     required this.extractor,
+    this.transcriber,
     required this.tmdb,
     required this.llm,
     this.force = false,
@@ -254,7 +258,16 @@ class AutoNamer {
       maxChars: 500000,
     );
     if (result == null || result.text.trim().isEmpty) {
-      _log('   AutoNamer[step 1]: no subtitle track — skipping.', isError: true);
+      if (transcriber != null) {
+        _log('   No subtitle track — transcribing audio with whisper...');
+        final t = await transcriber!.transcribe(mkvFile);
+        if (t != null && t.text.trim().isNotEmpty) {
+          return (text: t.text, language: t.language);
+        }
+      }
+      _log('   AutoNamer[step 1]: no subtitle track'
+          '${transcriber != null ? ' and no usable transcript' : ''}'
+          ' — skipping.', isError: true);
       return null;
     }
     return (

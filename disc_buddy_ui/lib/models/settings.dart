@@ -8,6 +8,10 @@ class Settings {
   final String? ffprobe;
   final String? mkvextract;
   final String? subtileOcr;
+  /// Path to whisper-cli (whisper.cpp) — transcription fallback for auto-naming.
+  final String? whisper;
+  /// Path to the whisper.cpp ggml model file.
+  final String? whisperModel;
   final String? tmdbToken;
   final String? llmUrl;
   final String? llmKey;
@@ -35,6 +39,8 @@ class Settings {
     this.ffprobe,
     this.mkvextract,
     this.subtileOcr,
+    this.whisper,
+    this.whisperModel,
     this.tmdbToken,
     this.llmUrl,
     this.llmKey,
@@ -64,6 +70,8 @@ class Settings {
     ffprobe: json['ffprobe'] as String?,
     mkvextract: json['mkvextract'] as String?,
     subtileOcr: json['subtile-ocr'] as String?,
+    whisper: json['whisper'] as String?,
+    whisperModel: json['whisper-model'] as String?,
     tmdbToken: json['tmdb-token'] as String?,
     llmUrl: json['llm-url'] as String?,
     llmKey: json['llm-key'] as String?,
@@ -83,6 +91,8 @@ class Settings {
     if (ffprobe != null) 'ffprobe': ffprobe,
     if (mkvextract != null) 'mkvextract': mkvextract,
     if (subtileOcr != null) 'subtile-ocr': subtileOcr,
+    if (whisper != null) 'whisper': whisper,
+    if (whisperModel != null) 'whisper-model': whisperModel,
     if (tmdbToken != null) 'tmdb-token': tmdbToken,
     if (llmUrl != null) 'llm-url': llmUrl,
     if (llmKey != null) 'llm-key': llmKey,
@@ -108,6 +118,8 @@ class Settings {
     ffprobe: ffprobe ?? 'ffprobe',
     mkvextract: mkvextract,
     subtileOcr: subtileOcr,
+    whisper: whisper,
+    whisperModel: whisperModel,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -129,6 +141,8 @@ class Settings {
     Object? ffprobe = _sentinel,
     Object? mkvextract = _sentinel,
     Object? subtileOcr = _sentinel,
+    Object? whisper = _sentinel,
+    Object? whisperModel = _sentinel,
     Object? tmdbToken = _sentinel,
     Object? llmUrl = _sentinel,
     Object? llmKey = _sentinel,
@@ -147,6 +161,8 @@ class Settings {
     ffprobe: ffprobe == _sentinel ? this.ffprobe : ffprobe as String?,
     mkvextract: mkvextract == _sentinel ? this.mkvextract : mkvextract as String?,
     subtileOcr: subtileOcr == _sentinel ? this.subtileOcr : subtileOcr as String?,
+    whisper: whisper == _sentinel ? this.whisper : whisper as String?,
+    whisperModel: whisperModel == _sentinel ? this.whisperModel : whisperModel as String?,
     tmdbToken: tmdbToken == _sentinel ? this.tmdbToken : tmdbToken as String?,
     llmUrl: llmUrl == _sentinel ? this.llmUrl : llmUrl as String?,
     llmKey: llmKey == _sentinel ? this.llmKey : llmKey as String?,

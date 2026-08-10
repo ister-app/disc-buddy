@@ -31,6 +31,8 @@ Drive detection updates in real time using `udevadm monitor` and the `CDROM_DRIV
 | `libdvdread` (optional) | CSS decryption on encrypted DVDs |
 | `libbluray` + `KEYDB.cfg` (optional) | AACS decryption on encrypted Blu-rays |
 | `discid` (optional) | accurate MusicBrainz disc ID lookup |
+| `mkvextract` + `subtile-ocr` (optional) | subtitle extraction / OCR — feeds LLM auto-naming |
+| `whisper-cli` + ggml model (optional) | whisper.cpp audio-transcription fallback for auto-naming titles **without** subtitles (config keys `whisper` / `whisper-model`, CLI `--whisper` / `--whisper-model`; use a multilingual model such as `ggml-small.bin` for non-English discs) |
 
 **Build (CLI):** Dart SDK ≥ 3.11
 

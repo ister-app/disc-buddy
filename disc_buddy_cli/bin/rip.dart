@@ -29,6 +29,8 @@ Future<void> main(List<String> arguments) async {
     ..addOption('mkvextract',   help: 'Path to mkvextract')
     ..addOption('subtile-ocr',  help: 'Path to subtile-ocr')
     ..addOption('tmdb-token',   help: 'The Movie Database API read access token')
+    ..addOption('whisper',      help: 'Path to whisper-cli (whisper.cpp) — audio-transcription fallback for auto-naming titles without subtitles')
+    ..addOption('whisper-model', help: 'Path to the whisper.cpp ggml model file (e.g. ggml-base.en.bin)')
     ..addOption('llm-url',      help: 'OpenAI-compatible LLM base URL (e.g. http://localhost:11434/v1)')
     ..addOption('llm-key',      help: 'LLM API key (default: "ollama" for local)')
     ..addOption('llm-model',    help: 'LLM model name (e.g. gpt-4o, llama3)')
@@ -108,6 +110,23 @@ Future<void> main(List<String> arguments) async {
     subtileOcrBin = '/usr/bin/subtile-ocr';
   }
 
+  String? whisperBin = cfgOpt('whisper');
+  if (whisperBin != null) {
+    if (!File(whisperBin).existsSync()) {
+      stderr.writeln('Error: whisper-cli not found at "$whisperBin".');
+      exit(1);
+    }
+  } else if (File('/usr/bin/whisper-cli').existsSync()) {
+    whisperBin = '/usr/bin/whisper-cli';
+  }
+
+  // The ggml model has no conventional install location — explicit path only.
+  final whisperModelPath = cfgOpt('whisper-model');
+  if (whisperModelPath != null && !File(whisperModelPath).existsSync()) {
+    stderr.writeln('Error: whisper model not found at "$whisperModelPath".');
+    exit(1);
+  }
+
   final rawInput = args['input'] as String? ?? '';
 
   // Validate -i target before late-final declarations.
@@ -177,6 +196,8 @@ Future<void> main(List<String> arguments) async {
     loop:       args['loop']      as bool,
     mkvextract: mkvextractBin,
     subtileOcr: subtileOcrBin,
+    whisper:      whisperBin,
+    whisperModel: whisperModelPath,
     tmdbToken:  cfgOpt('tmdb-token'),
     llmUrl:     cfgOpt('llm-url'),
     llmKey:     cfgOpt('llm-key'),
@@ -411,7 +432,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     final autoNameCount = namePrefs.values.where((v) => v == '?').length;
     final resolvedBatchAssign = _promptBatchAssign(opts, autoNameCount);
 
-    final extractResult = opts.mkvextract != null && opts.subtileOcr != null && !opts.force
+    final extractResult = opts.canOcrSubtitles && !opts.force
         ? _promptExtractSubtitles(opts)
         : (doExtract: false, langs: null as Set<String>?);
     final doExtract = extractResult.doExtract;
@@ -583,7 +604,7 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
   final resolvedBatchAssign = _promptBatchAssign(opts, autoNameCount);
 
   // --- Subtitle extraction (once for all files) ---
-  final canExtract = opts.mkvextract != null && opts.subtileOcr != null;
+  final canExtract = opts.canOcrSubtitles;
   final extractResult = canExtract && !opts.force
       ? _promptExtractSubtitles(opts)
       : (doExtract: false, langs: null as Set<String>?);
@@ -591,12 +612,13 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
   final extractLangs = extractResult.langs;
 
   SubtitleExtractor? extractor;
-  if (canExtract && (doExtract || namePrefs.containsValue('?'))) {
+  if ((canExtract && doExtract) ||
+      (namePrefs.containsValue('?') && opts.canAutoName)) {
     extractor = _buildExtractor(opts);
   }
 
   AutoNamer? autoNamer;
-  if (namePrefs.containsValue('?') && extractor != null) {
+  if (namePrefs.containsValue('?') && opts.canAutoName && extractor != null) {
     autoNamer = _buildAutoNamer(opts, extractor, batchAssign: resolvedBatchAssign);
   }
 
@@ -663,7 +685,7 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
         stderr.writeln('Rename skipped: "${p.basename(newFile.path)}" already exists.');
       } else if (await _renameFile(file, newFile.path)) {
         stdout.writeln('Renamed: ${file.path}\n      → ${newFile.path}');
-        await _renameAssociatedSrts(outDir, discName, newStem);
+        await _renameAssociatedSidecars(outDir, discName, newStem);
       }
     }
   }
@@ -705,7 +727,7 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
   }
 
   // --- Subtitle extraction prompt ---
-  final canExtract = opts.mkvextract != null && opts.subtileOcr != null;
+  final canExtract = opts.canOcrSubtitles;
   final extractResult = canExtract && !opts.force
       ? _promptExtractSubtitles(opts)
       : (doExtract: false, langs: null as Set<String>?);
@@ -718,7 +740,7 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
       : null;
 
   SubtitleExtractor? extractor;
-  if (canExtract && (doExtract || newStem == '?')) {
+  if ((canExtract && doExtract) || (newStem == '?' && opts.canAutoName)) {
     extractor = _buildExtractor(opts);
   }
 
@@ -756,7 +778,7 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
       stderr.writeln('Rename skipped: "$newStem.mkv" already exists.');
     } else if (await _renameFile(mkvFile, newMkv.path)) {
       stdout.writeln('Renamed: $mkvPath\n      → ${newMkv.path}');
-      await _renameAssociatedSrts(outDir, discName, newStem);
+      await _renameAssociatedSidecars(outDir, discName, newStem);
     }
   }
 }
@@ -850,12 +872,13 @@ Future<void> _resolveSubtitlesAndNames(
   ({String? title, List<int>? season})? namingHints,
   bool? batchAssign,
 }) async {
-  if (!doExtract && !namePrefs.containsValue('?')) return;
-  if (opts.mkvextract == null || opts.subtileOcr == null) return;
+  final wantExtract = doExtract && opts.canOcrSubtitles;
+  final wantNaming = namePrefs.containsValue('?') && opts.canAutoName;
+  if (!wantExtract && !wantNaming) return;
 
   final extractor = _buildExtractor(opts);
 
-  if (doExtract) {
+  if (wantExtract) {
     for (final t in titles) {
       final f = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${t.filename}'));
       if (await f.exists()) {
@@ -865,7 +888,7 @@ Future<void> _resolveSubtitlesAndNames(
     }
   }
 
-  if (namePrefs.containsValue('?')) {
+  if (wantNaming) {
     final autoNamer = _buildAutoNamer(opts, extractor, batchAssign: batchAssign);
     // Hints were collected before ripping started; non-null is an invariant here.
     final hints = namingHints!;
@@ -911,8 +934,10 @@ Future<void> _resolveSubtitlesAndNames(
 SubtitleExtractor _buildExtractor(RipOptions opts) => SubtitleExtractor(
       ffmpeg:     opts.ffmpeg,
       ffprobe:    opts.ffprobe,
-      mkvextract: opts.mkvextract!,
-      subtileOcr: opts.subtileOcr!,
+      // May be built without OCR tools (whisper-only auto-naming); extraction
+      // of image subtitles then fails gracefully via the ProcessException path.
+      mkvextract: opts.mkvextract ?? 'mkvextract',
+      subtileOcr: opts.subtileOcr ?? 'subtile-ocr',
     );
 
 AutoNamer _buildAutoNamer(
@@ -922,6 +947,14 @@ AutoNamer _buildAutoNamer(
 }) =>
     AutoNamer(
       extractor: extractor,
+      transcriber: opts.canTranscribe
+          ? Transcriber(
+              ffmpeg:       opts.ffmpeg,
+              ffprobe:      opts.ffprobe,
+              whisperCli:   opts.whisper!,
+              whisperModel: opts.whisperModel!,
+            )
+          : null,
       tmdb: TmdbClient(token: opts.tmdbToken!),
       llm: LlmClient(
         baseUrl: opts.llmUrl!,
@@ -968,12 +1001,16 @@ Map<String, String> _collectNamingPrefs(
   final prefs = <String, String>{};
   if (opts.force || titles.isEmpty) return prefs;
 
-  final anyHasSubtitles = titles.any((t) => t.hasSubtitles);
-  final canAuto = opts.canAutoName && anyHasSubtitles;
+  // With the whisper fallback available, titles without subtitles are also
+  // auto-nameable (transcription kicks in when subtitle extraction fails).
+  bool nameable(({String filename, String displayKey, bool hasSubtitles}) t) =>
+      t.hasSubtitles || opts.canTranscribe;
+  final anyNameable = titles.any(nameable);
+  final canAuto = opts.canAutoName && anyNameable;
 
   if (opts.autoName && canAuto) {
     for (final t in titles) {
-      prefs[t.filename] = t.hasSubtitles ? '?' : _defaultStem(discTitle, t.filename);
+      prefs[t.filename] = nameable(t) ? '?' : _defaultStem(discTitle, t.filename);
     }
     return prefs;
   }
@@ -987,12 +1024,12 @@ Map<String, String> _collectNamingPrefs(
     for (final t in titles) {
       final defaultStem = _defaultStem(discTitle, t.filename);
       final autoHint    =
-          (opts.canAutoName && t.hasSubtitles) ? ', ? for auto' : '';
+          (opts.canAutoName && nameable(t)) ? ', ? for auto' : '';
       stdout.write('  "${t.displayKey}" [$defaultStem]$autoHint: ');
       final input = Menu.readLine().trim();
       if (input.isEmpty) {
         // keep default — no entry needed
-      } else if (input == '?' && opts.canAutoName && t.hasSubtitles) {
+      } else if (input == '?' && opts.canAutoName && nameable(t)) {
         prefs[t.filename] = '?';
       } else {
         prefs[t.filename] = sanitizeFilename(input);
@@ -1000,7 +1037,7 @@ Map<String, String> _collectNamingPrefs(
     }
   } else if (answer == '?' && canAuto) {
     for (final t in titles) {
-      prefs[t.filename] = t.hasSubtitles ? '?' : _defaultStem(discTitle, t.filename);
+      prefs[t.filename] = nameable(t) ? '?' : _defaultStem(discTitle, t.filename);
     }
   }
 
@@ -1033,7 +1070,7 @@ Future<void> _applyRenames(
 
     if (await _renameFile(oldMkv, newMkv.path)) {
       stdout.writeln('Renamed: ${oldMkv.path}\n      → ${newMkv.path}');
-      await _renameAssociatedSrts(outDir, defaultStem, newStem);
+      await _renameAssociatedSidecars(outDir, defaultStem, newStem);
     }
   }
 }
@@ -1064,13 +1101,15 @@ Future<bool> _renameFile(File src, String destPath) async {
   }
 }
 
-/// Renames every `<oldStem>.*.srt` sidecar in [outDir] to use [newStem].
-Future<void> _renameAssociatedSrts(
+/// Renames every `<oldStem>.*.srt` and `<oldStem>.whisper.json` sidecar in
+/// [outDir] to use [newStem], so cached transcripts follow the renamed file.
+Future<void> _renameAssociatedSidecars(
     Directory outDir, String oldStem, String newStem) async {
   await for (final entry in outDir.list()) {
     if (entry is! File) continue;
     final base = p.basename(entry.path);
-    if (!base.startsWith('$oldStem.') || !base.endsWith('.srt')) continue;
+    if (!base.startsWith('$oldStem.')) continue;
+    if (!base.endsWith('.srt') && !base.endsWith('.whisper.json')) continue;
     final suffix = base.substring(oldStem.length);
     await _renameFile(entry, p.join(outDir.path, '$newStem$suffix'));
   }

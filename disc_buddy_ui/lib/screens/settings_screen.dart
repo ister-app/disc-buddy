@@ -78,6 +78,8 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
   late TextEditingController _ffprobe;
   late TextEditingController _mkvextract;
   late TextEditingController _subtileOcr;
+  late TextEditingController _whisper;
+  late TextEditingController _whisperModel;
   late TextEditingController _tmdbToken;
   late TextEditingController _llmUrl;
   late TextEditingController _llmKey;
@@ -102,6 +104,8 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     _ffprobe     = TextEditingController(text: s.ffprobe);
     _mkvextract  = TextEditingController(text: s.mkvextract ?? '');
     _subtileOcr  = TextEditingController(text: s.subtileOcr ?? '');
+    _whisper      = TextEditingController(text: s.whisper ?? '');
+    _whisperModel = TextEditingController(text: s.whisperModel ?? '');
     _tmdbToken          = TextEditingController(text: s.tmdbToken ?? '');
     _llmUrl             = TextEditingController(text: s.llmUrl ?? '');
     _llmKey             = TextEditingController(text: s.llmKey ?? '');
@@ -112,7 +116,8 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     _batchAssign        = s.batchAssign;
     _lpcmFlac           = s.lpcmFlac;
     _dvdSinglePass      = s.dvdSinglePass;
-    for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr]) {
+    for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr,
+                     _whisper, _whisperModel]) {
       c.addListener(_onFieldChanged);
     }
     _checkBinaries();
@@ -126,10 +131,17 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       'ffprobe':     _ffprobe.text.trim().isEmpty     ? 'ffprobe'     : _ffprobe.text.trim(),
       'mkvextract':  _mkvextract.text.trim().isEmpty  ? 'mkvextract'  : _mkvextract.text.trim(),
       'subtile-ocr': _subtileOcr.text.trim().isEmpty  ? 'subtile-ocr' : _subtileOcr.text.trim(),
+      'whisper':     _whisper.text.trim().isEmpty     ? 'whisper-cli' : _whisper.text.trim(),
     };
     for (final e in checks.entries) {
       final found = await _binaryExists(e.value);
       if (mounted) setState(() => _binaryFound[e.key] = found);
+    }
+    // The whisper model is a data file, not a binary — plain existence check.
+    final modelPath = _whisperModel.text.trim();
+    if (mounted) {
+      setState(() =>
+          _binaryFound['whisper-model'] = modelPath.isNotEmpty && File(modelPath).existsSync());
     }
   }
 
@@ -141,10 +153,12 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
 
   @override
   void dispose() {
-    for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr]) {
+    for (final c in [_tmdbToken, _llmUrl, _llmKey, _llmModel, _mkvextract, _subtileOcr,
+                     _whisper, _whisperModel]) {
       c.removeListener(_onFieldChanged);
     }
     for (final c in [_videoDir, _musicDir, _ffmpeg, _ffprobe, _mkvextract, _subtileOcr,
+                     _whisper, _whisperModel,
                      _tmdbToken, _llmUrl, _llmKey, _llmModel,
                      _audioLangs, _subtitleTrackLangs]) {
       c.dispose();
@@ -160,6 +174,8 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       ffprobe:            _ffprobe.text.trim().isEmpty            ? null : _ffprobe.text.trim(),
       mkvextract:         _mkvextract.text.trim().isEmpty         ? null : _mkvextract.text.trim(),
       subtileOcr:         _subtileOcr.text.trim().isEmpty         ? null : _subtileOcr.text.trim(),
+      whisper:            _whisper.text.trim().isEmpty            ? null : _whisper.text.trim(),
+      whisperModel:       _whisperModel.text.trim().isEmpty       ? null : _whisperModel.text.trim(),
       tmdbToken:          _tmdbToken.text.trim().isEmpty          ? null : _tmdbToken.text.trim(),
       llmUrl:             _llmUrl.text.trim().isEmpty             ? null : _llmUrl.text.trim(),
       llmKey:             _llmKey.text.trim().isEmpty             ? null : _llmKey.text.trim(),
@@ -218,12 +234,31 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       ));
     }
 
-    // Auto-naming
+    // Whisper transcription fallback
+    final whisperConfigured =
+        _whisper.text.trim().isNotEmpty || _whisperModel.text.trim().isNotEmpty;
+    final whisperOk = _binaryFound['whisper'] != false &&
+        _binaryFound['whisper-model'] == true;
+    if (whisperConfigured && !whisperOk) {
+      final detail = _binaryFound['whisper'] == false
+          ? 'whisper-cli not found'
+          : 'whisper model file missing';
+      warnings.add(_WarningItem(
+        icon: Icons.mic_off_outlined,
+        title: 'Transcription fallback unavailable',
+        detail: detail,
+      ));
+    }
+
+    // Auto-naming: text can come from subtitle OCR or whisper — only warn
+    // when neither source is usable.
     final autoMissing = <String>[];
     if (_tmdbToken.text.trim().isEmpty) autoMissing.add('TMDB token');
     if (_llmUrl.text.trim().isEmpty) autoMissing.add('LLM URL');
     if (_llmModel.text.trim().isEmpty) autoMissing.add('LLM model');
-    if (subMissing.isNotEmpty) autoMissing.add('subtitle tools (see above)');
+    if (subMissing.isNotEmpty && !whisperOk) {
+      autoMissing.add('subtitle tools or whisper');
+    }
     if (autoMissing.isNotEmpty) {
       warnings.add(_WarningItem(
         icon: Icons.auto_awesome_outlined,
@@ -269,6 +304,10 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
           _TextField(label: 'ffprobe', controller: _ffprobe, hint: 'optional (default: ffprobe)'),
           _TextField(label: 'mkvextract', controller: _mkvextract, hint: 'optional (default: mkvextract)'),
           _TextField(label: 'subtile-ocr', controller: _subtileOcr, hint: 'optional (default: subtile-ocr)'),
+          _TextField(label: 'whisper-cli', controller: _whisper,
+            hint: 'optional (default: whisper-cli) — transcription fallback'),
+          _TextField(label: 'whisper model', controller: _whisperModel,
+            hint: 'path to ggml model, e.g. ggml-base.en.bin'),
         ]),
         _Section(title: 'Tracks', children: [
           _TextField(
@@ -293,7 +332,8 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: 'e.g. gpt-4o or llama3'),
           SwitchListTile(
             title: const Text('Auto-name all titles with LLM'),
-            subtitle: const Text('Requires TMDB token, LLM, mkvextract and subtile-ocr'),
+            subtitle: const Text('Requires TMDB token and LLM, plus subtitle tools '
+                '(mkvextract + subtile-ocr) or whisper as text source'),
             value: _autoName,
             onChanged: (v) => setState(() => _autoName = v),
           ),

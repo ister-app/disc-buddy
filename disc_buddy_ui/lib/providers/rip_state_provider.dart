@@ -548,6 +548,15 @@ class RipStateNotifier extends Notifier<RipState> {
       if (canAutoName) {
         namer = AutoNamer(
           extractor: extractor!,
+          transcriber: (settings.whisper != null && settings.whisperModel != null)
+              ? Transcriber(
+                  ffmpeg: settings.ffmpeg ?? 'ffmpeg',
+                  ffprobe: settings.ffprobe ?? 'ffprobe',
+                  whisperCli: settings.whisper!,
+                  whisperModel: settings.whisperModel!,
+                  onLog: appendLog,
+                )
+              : null,
           tmdb: TmdbClient(token: settings.tmdbToken!, onLog: appendLog),
           llm: LlmClient(
             baseUrl: settings.llmUrl!,

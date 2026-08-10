@@ -45,6 +45,15 @@ final subtitleToolsAvailableProvider = Provider<bool>((ref) {
       _commandAvailable(s.subtileOcr, 'subtile-ocr');
 });
 
+/// Returns true when the whisper transcription fallback is usable:
+/// whisper-cli resolves and the configured ggml model file exists.
+final whisperAvailableProvider = Provider<bool>((ref) {
+  final s = ref.watch(settingsProvider);
+  return _commandAvailable(s.whisper, 'whisper-cli') &&
+      s.whisperModel != null &&
+      File(s.whisperModel!).existsSync();
+});
+
 // `which <name>` result cache. A binary's presence on PATH doesn't change
 // during a session, so memoizing avoids spawning a subprocess on every settings
 // change (which ran synchronously on the UI thread and caused jank).
