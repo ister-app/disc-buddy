@@ -350,15 +350,83 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
   });
 }
 
+/// Minimum fraction of BOTH titles' merged cell unions that must be shared
+/// before two PGCs are considered the same physical content.  Requiring the
+/// overlap on both sides prevents a play-all PGC (which fully contains each
+/// episode's sectors but shares only ~1/N of its own) from being merged with
+/// an individual episode.
+const _cellOverlapThreshold = 0.8;
+
+/// Sorts and merges possibly-overlapping cell ranges into disjoint intervals.
+/// Adjacent ranges are treated as contiguous; degenerate entries
+/// (last < first) are dropped.
+List<({int first, int last})> _mergeCells(List<({int first, int last})> cells) {
+  final valid = cells.where((c) => c.last >= c.first).toList()
+    ..sort((a, b) => a.first.compareTo(b.first));
+  final merged = <({int first, int last})>[];
+  for (final c in valid) {
+    if (merged.isNotEmpty && c.first <= merged.last.last + 1) {
+      final prev = merged.removeLast();
+      merged.add((first: prev.first, last: c.last > prev.last ? c.last : prev.last));
+    } else {
+      merged.add(c);
+    }
+  }
+  return merged;
+}
+
+/// Total sector count of a merged (disjoint, sorted) interval list.
+int _intervalSize(List<({int first, int last})> merged) =>
+    merged.fold(0, (sum, c) => sum + (c.last - c.first + 1));
+
+/// Sectors common to two merged (disjoint, sorted) interval lists.
+int _intervalIntersection(
+    List<({int first, int last})> a, List<({int first, int last})> b) {
+  var overlap = 0;
+  var i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    final lo = a[i].first > b[j].first ? a[i].first : b[j].first;
+    final hi = a[i].last < b[j].last ? a[i].last : b[j].last;
+    if (hi >= lo) overlap += hi - lo + 1;
+    if (a[i].last < b[j].last) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return overlap;
+}
+
+/// Tri-state verdict from cell sector data: true = same physical content
+/// (overlap ≥ [_cellOverlapThreshold] of BOTH merged unions), false =
+/// different content, null = unusable cell data on either side (no cells or
+/// zero-size union) — the caller must fall back to chapter/duration logic.
+///
+/// Only valid within a single VTS: cell sectors are VTS-VOB-relative and not
+/// comparable across VTS boundaries.
+bool? _cellsShareContent(DvdTitle a, DvdTitle b) {
+  final ma = _mergeCells(a.cells);
+  final mb = _mergeCells(b.cells);
+  final sa = _intervalSize(ma);
+  final sb = _intervalSize(mb);
+  if (sa == 0 || sb == 0) return null;
+  final inter = _intervalIntersection(ma, mb);
+  return inter >= sa * _cellOverlapThreshold &&
+         inter >= sb * _cellOverlapThreshold;
+}
+
 /// Returns a deduplicated list of [titles] where:
 ///
 /// 1. Cross-VTS groups that represent the same episode (DVD navigation
 ///    artifact) are collapsed to their first occurrence.
-/// 2. Within each surviving VTS group, angles whose chapter timestamps match
-///    the primary angle (pgcIndex 0) are removed — they are true camera-angle
-///    duplicates (same content, different camera position).  Angles with
-///    different chapter positions are kept because they store different episode
-///    content in the angle slots (e.g. a play-all PGC plus individual episodes).
+/// 2. Within each surviving VTS group, angles that reference the same physical
+///    sectors as the primary angle (pgcIndex 0) are removed — they are true
+///    camera-angle or navigation duplicates.  Cell sector overlap is the
+///    authoritative signal: PGCs with disjoint cells store different episode
+///    content in the angle slots and are always kept, even when their chapter
+///    layout happens to match (discs authored with fixed-interval chapters).
+///    Chapter timestamps (±2 s) and duration (±1 s) are only consulted when
+///    cell data is unavailable.
 List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
   const chapTol = Duration(seconds: 2);
 
@@ -398,10 +466,13 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
   }
 
   // Returns true if [other] is a true camera-angle duplicate of [primary]:
-  // same content recorded from a different angle.  Chapter timestamps are the
-  // authoritative signal; duration (within 1 s) is the fallback when no
-  // chapter data is available.
+  // same content recorded from a different angle.  Cell sector overlap is the
+  // authoritative signal (both PGCs live in the same VTS, so their sectors are
+  // directly comparable); chapter timestamps and duration (within 1 s) are
+  // fallbacks when no cell data is available.
   bool isCameraAngleDuplicate(DvdTitle primary, DvdTitle other) {
+    final byCells = _cellsShareContent(primary, other);
+    if (byCells != null) return byCells;
     final pc = primary.chapters;
     final oc = other.chapters;
     if (pc.length >= 2 && pc.length == oc.length) {
