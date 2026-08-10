@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/disc_metadata.dart';
-import '../utils/sanitize.dart';
 
 class MusicBrainz {
   static const _userAgent = 'DiscBuddy/1.0 (disc-buddy)';
@@ -84,7 +83,7 @@ class MusicBrainz {
     }
 
     final mbid  = rel['id'] as String? ?? '';
-    final album = sanitizeFilename(rel['title'] as String? ?? '');
+    final album = (rel['title'] as String? ?? '').trim();
     final date  = ((rel['date'] ?? rel['first-release-date']) as String? ?? '').take(4);
 
     final credits    = rel['artist-credit'] as List? ?? [];
@@ -97,8 +96,8 @@ class MusicBrainz {
 
     final labelInfo  = rel['label-info'] as List? ?? [];
     final firstLabel = labelInfo.isNotEmpty ? labelInfo.first as Map<String, dynamic> : null;
-    final label      = sanitizeFilename((firstLabel?['label'] as Map?)?['name'] as String? ?? '');
-    final catalogNr  = sanitizeFilename(firstLabel?['catalog-number'] as String? ?? '');
+    final label      = ((firstLabel?['label'] as Map?)?['name'] as String? ?? '').trim();
+    final catalogNr  = (firstLabel?['catalog-number'] as String? ?? '').trim();
 
     final media      = rel['media'] as List? ?? [];
     final totalDiscs = media.length;
@@ -113,7 +112,7 @@ class MusicBrainz {
       final medTracks = med['tracks'] as List? ?? [];
       for (final (i, tr) in medTracks.cast<Map<String, dynamic>>().indexed) {
         final rec          = tr['recording'] as Map<String, dynamic>? ?? {};
-        final title        = sanitizeFilename((tr['title'] ?? rec['title'] as String? ?? '') as String);
+        final title        = ((tr['title'] ?? rec['title'] as String? ?? '') as String).trim();
         final trCredits    = (tr['artist-credit'] ?? rec['artist-credit'] as List? ?? []) as List;
         final trArtist     = _creditsToString(trCredits);
         final trArtistMbid = trCredits
@@ -151,11 +150,11 @@ class MusicBrainz {
   }
 
   static String _creditsToString(List credits) {
-    return sanitizeFilename(credits.whereType<Map>().map((c) {
+    return credits.whereType<Map>().map((c) {
       final name = (c['name'] ?? (c['artist'] as Map?)?['name'] ?? '') as String;
       final join = (c['joinphrase'] ?? '') as String;
       return name + join;
-    }).join());
+    }).join().trim();
   }
 }
 

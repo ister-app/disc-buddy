@@ -74,13 +74,13 @@ class AudioCDRipper {
 
     final fmtTags = (probe['format'] as Map?)?['tags'] as Map? ?? {};
 
-    final albumCdText  = sanitizeFilename(fmtTags['album']  ?? fmtTags['ALBUM']  ?? '');
-    final artistCdText = sanitizeFilename(fmtTags['artist'] ?? fmtTags['ARTIST'] ?? '');
+    final albumCdText  = ((fmtTags['album']  ?? fmtTags['ALBUM']  ?? '') as String).trim();
+    final artistCdText = ((fmtTags['artist'] ?? fmtTags['ARTIST'] ?? '') as String).trim();
     final dateCdText   = ((fmtTags['date'] ?? fmtTags['DATE'] ?? '') as String).take(4);
 
     final titlesCdText = chapters.map((ch) {
       final tags = ch['tags'] as Map? ?? {};
-      return sanitizeFilename(tags['title'] ?? tags['TITLE'] ?? '');
+      return ((tags['title'] ?? tags['TITLE'] ?? '') as String).trim();
     }).toList();
 
     final startTimes = chapters
@@ -171,7 +171,8 @@ class AudioCDRipper {
 
   /// Rips the given tracks to FLAC files.
   Future<void> rip(DiscMetadata meta, List<int> trackNumbers) async {
-    final albumDir = p.join(options.outputDir, meta.artistDir, meta.albumDir);
+    final albumDir = p.join(options.outputDir,
+        sanitizeFilename(meta.artistDir), sanitizeFilename(meta.albumDir));
     await Directory(albumDir).create(recursive: true);
 
     // Fetch cover art
@@ -274,9 +275,9 @@ class AudioCDRipper {
     final nr = track.number.toString().padLeft(2, '0');
     if (meta.totalDiscs > 1 && meta.discNumber > 0) {
       final dn = meta.discNumber.toString().padLeft(2, '0');
-      return '$dn-$nr-${track.title}';
+      return sanitizeFilename('$dn-$nr-${track.title}');
     }
-    return '$nr-${track.title}';
+    return sanitizeFilename('$nr-${track.title}');
   }
 
   /// Fetches disc ID and corrected lead-out as a (discId, leadOut) record.
