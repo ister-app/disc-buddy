@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:path/path.dart' as p;
+import '../device/cdda_reader.dart';
 import '../device/cdrom_toc.dart';
 import '../ffmpeg/ffmpeg_runner.dart';
 import '../metadata/cddb.dart';
@@ -20,6 +22,10 @@ class AudioCDRipper {
   final FfmpegRunner _ffmpeg;
   final LogCallback? onLog;
   final ProgressCallback? onProgress;
+
+  /// Per-track LBAs + lead-out from the FFI TOC read, when available.
+  /// Enables the direct SG_IO rip path in [rip].
+  ({List<int> offsets, int leadOut})? _fullToc;
 
   AudioCDRipper(this.options, {this.onLog, this.onProgress})
       : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onLog: onLog);
@@ -190,84 +196,233 @@ class AudioCDRipper {
       }
     }
 
-    for (final nr in trackNumbers) {
-      final idx = nr - 1;
-      if (idx < 0 || idx >= meta.tracks.length) {
-        _log('Invalid track: $nr', isError: true);
-        continue;
-      }
+    // The UI loads metadata and rips with separate AudioCDRipper instances,
+    // so the TOC from loadMetadata may not be present here — read it now.
+    if (_fullToc == null) {
+      try {
+        final t = await readToc(options.device!);
+        if (t != null && t.offsets.length == meta.tracks.length) {
+          _fullToc = (offsets: t.offsets, leadOut: t.leadOut);
+        }
+      } catch (_) {}
+    }
 
-      final track = meta.tracks[idx];
-      final filename = _trackFilename(meta, track);
-      final outFile  = File(p.join(albumDir, '$filename.flac'));
-
-      _log('── Ripping: track $nr → ${outFile.path}');
-
-      if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
-
-      final trackArtist = track.artist.isNotEmpty ? track.artist : meta.albumArtist;
-      final dur = track.duration;
-      final timeoutDur = Duration(seconds: dur.truncate().toInt() + 30);
-
-      final args = [
-        '-loglevel', 'warning', '-stats',
-        '-f', 'libcdio',
-        '-ss', track.startTime.toString(),
-        '-i', options.device!,
-        '-t', dur.toString(),
-        '-c:a', 'flac',
-        '-metadata', 'title=${track.title}',
-        '-metadata', 'album=${meta.album}',
-        '-metadata', 'artist=$trackArtist',
-        '-metadata', 'album_artist=${meta.albumArtist}',
-        '-metadata', 'tracknumber=${track.number}',
-        '-metadata', 'tracktotal=${meta.tracks.length}',
-        if (meta.discNumber > 0) ...[ '-metadata', 'discnumber=${meta.discNumber}' ],
-        if (meta.totalDiscs > 1) ...[ '-metadata', 'disctotal=${meta.totalDiscs}' ],
-        if (meta.date.isNotEmpty)          ...[ '-metadata', 'date=${meta.date}' ],
-        if (meta.label.isNotEmpty)         ...[ '-metadata', 'label=${meta.label}' ],
-        if (meta.catalogNumber.isNotEmpty) ...[ '-metadata', 'catalognumber=${meta.catalogNumber}' ],
-        if (meta.releaseMbid.isNotEmpty)   ...[ '-metadata', 'MUSICBRAINZ_ALBUMID=${meta.releaseMbid}' ],
-        if (track.recordingMbid.isNotEmpty)...[ '-metadata', 'MUSICBRAINZ_TRACKID=${track.recordingMbid}' ],
-        if (meta.artistMbid.isNotEmpty)    ...[ '-metadata', 'MUSICBRAINZ_ALBUMARTISTID=${meta.artistMbid}' ],
-        if (track.artistMbid.isNotEmpty)   ...[ '-metadata', 'MUSICBRAINZ_ARTISTID=${track.artistMbid}' ],
-        outFile.path,
-      ];
-
-      final expectedDur = Duration(milliseconds: (dur * 1000).round());
-
-      // Track the furthest progress ffmpeg reported. The runner SIGTERMs ffmpeg
-      // on purpose once all audio is written (to stop libcdio hanging), so a
-      // successful rip normally exits non-zero. We therefore can't trust the
-      // exit code alone; instead we confirm ffmpeg actually reached the end of
-      // the track. A real read error exits early, well short of expectedDur.
-      var lastElapsed = Duration.zero;
-      final progressCb = onProgress ?? logProgress;
-      final exitCode = await _ffmpeg.run(
-        args,
-        timeout: timeoutDur,
-        expectedDuration: expectedDur,
-        onProgress: (p) {
-          lastElapsed = p.elapsed;
-          progressCb(p);
-        },
-      );
-      _log('');
-
-      // 98% tolerance covers the ~last-frame the completion-kill trims.
-      final reachedEnd = lastElapsed.inMilliseconds >= expectedDur.inMilliseconds * 0.98;
-      if (exitCode == 0 || (await outFile.exists() && reachedEnd)) {
-        _log('   Done: ${outFile.path}');
-      } else {
-        _log('   Error ripping track $nr (exit code $exitCode, '
-            'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
-        if (await outFile.exists()) {
-          await outFile.delete().catchError((e) {
-            _log('   Cannot delete file: $e', isError: true);
-            return File('');
-          });
+    // Prefer direct SG_IO sector reads piped into ffmpeg: the stream ends
+    // exactly at the track boundary, so ffmpeg exits on its own (no libcdio
+    // hang after the last track, no kill timers). The reads run in their own
+    // isolate — SG_IO is a blocking ioctl that would freeze a Flutter UI.
+    // Falls back to libcdio when the TOC or the drive won't cooperate.
+    final toc = _fullToc;
+    IsolateCddaReader? reader;
+    if (toc != null && trackNumbers.isNotEmpty) {
+      reader = await IsolateCddaReader.open(options.device!);
+      if (reader != null) {
+        final probeIdx = trackNumbers.first - 1;
+        if (probeIdx < 0 ||
+            probeIdx >= toc.offsets.length ||
+            await reader.readSectors(
+                  trackSectorRange(
+                    offsets: toc.offsets,
+                    leadOut: toc.leadOut,
+                    trackIndex: probeIdx,
+                  ).startLba,
+                  1,
+                ) ==
+                null) {
+          reader.close();
+          reader = null;
         }
       }
+      if (reader == null) {
+        _log('Warning: direct CDDA read unavailable — falling back to libcdio.',
+            isError: true);
+      }
+    }
+
+    try {
+      for (final nr in trackNumbers) {
+        final idx = nr - 1;
+        if (idx < 0 || idx >= meta.tracks.length) {
+          _log('Invalid track: $nr', isError: true);
+          continue;
+        }
+
+        final track = meta.tracks[idx];
+        final filename = _trackFilename(meta, track);
+        final outFile  = File(p.join(albumDir, '$filename.flac'));
+
+        _log('── Ripping: track $nr → ${outFile.path}');
+
+        if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
+
+        final trackArtist = track.artist.isNotEmpty ? track.artist : meta.albumArtist;
+
+        if (reader != null && toc != null) {
+          await _ripTrackCdda(reader, toc, meta, track, outFile, trackArtist);
+        } else {
+          await _ripTrackLibcdio(meta, track, outFile, trackArtist);
+        }
+      }
+    } finally {
+      reader?.close();
+    }
+  }
+
+  List<String> _metadataArgs(DiscMetadata meta, TrackInfo track, String trackArtist) => [
+    '-metadata', 'title=${track.title}',
+    '-metadata', 'album=${meta.album}',
+    '-metadata', 'artist=$trackArtist',
+    '-metadata', 'album_artist=${meta.albumArtist}',
+    '-metadata', 'tracknumber=${track.number}',
+    '-metadata', 'tracktotal=${meta.tracks.length}',
+    if (meta.discNumber > 0) ...[ '-metadata', 'discnumber=${meta.discNumber}' ],
+    if (meta.totalDiscs > 1) ...[ '-metadata', 'disctotal=${meta.totalDiscs}' ],
+    if (meta.date.isNotEmpty)          ...[ '-metadata', 'date=${meta.date}' ],
+    if (meta.label.isNotEmpty)         ...[ '-metadata', 'label=${meta.label}' ],
+    if (meta.catalogNumber.isNotEmpty) ...[ '-metadata', 'catalognumber=${meta.catalogNumber}' ],
+    if (meta.releaseMbid.isNotEmpty)   ...[ '-metadata', 'MUSICBRAINZ_ALBUMID=${meta.releaseMbid}' ],
+    if (track.recordingMbid.isNotEmpty)...[ '-metadata', 'MUSICBRAINZ_TRACKID=${track.recordingMbid}' ],
+    if (meta.artistMbid.isNotEmpty)    ...[ '-metadata', 'MUSICBRAINZ_ALBUMARTISTID=${meta.artistMbid}' ],
+    if (track.artistMbid.isNotEmpty)   ...[ '-metadata', 'MUSICBRAINZ_ARTISTID=${track.artistMbid}' ],
+  ];
+
+  Future<void> _deletePartial(File outFile) async {
+    if (await outFile.exists()) {
+      await outFile.delete().catchError((e) {
+        _log('   Cannot delete file: $e', isError: true);
+        return File('');
+      });
+    }
+  }
+
+  /// Rips one track by reading its exact sector range via SG_IO and piping
+  /// raw PCM into ffmpeg stdin. ffmpeg exits normally when the stream closes;
+  /// success requires exit 0 and the full expected byte count.
+  Future<void> _ripTrackCdda(
+    IsolateCddaReader reader,
+    ({List<int> offsets, int leadOut}) toc,
+    DiscMetadata meta,
+    TrackInfo track,
+    File outFile,
+    String trackArtist,
+  ) async {
+    final range = trackSectorRange(
+      offsets: toc.offsets,
+      leadOut: toc.leadOut,
+      trackIndex: track.number - 1,
+    );
+    final expectedBytes = range.sectorCount * kCddaSectorSize;
+
+    CddaReadException? producerError;
+    var bytesPiped = 0;
+    final progressCb = onProgress ?? logProgress;
+    final wallClock  = Stopwatch()..start();
+    var lastEmit = Duration.zero;
+
+    void emitProgress(int bytes, {bool force = false}) {
+      if (!force && wallClock.elapsed - lastEmit < const Duration(milliseconds: 250)) {
+        return;
+      }
+      lastEmit = wallClock.elapsed;
+      final audioMs = bytes * 1000 ~/ (kCddaSectorSize * kCddaSectorsPerSecond);
+      final wallMs  = wallClock.elapsedMilliseconds;
+      progressCb(FfmpegProgress(
+        Duration(milliseconds: audioMs),
+        wallMs > 0 ? audioMs / wallMs : 0.0,
+      ));
+    }
+
+    Stream<Uint8List> producer() async* {
+      try {
+        yield* cddaSectorStream(
+          startLba: range.startLba,
+          sectorCount: range.sectorCount,
+          read: reader.readSectors,
+          onBytes: (b) {
+            bytesPiped = b;
+            emitProgress(b);
+          },
+        );
+      } on CddaReadException catch (e) {
+        // Close the stream cleanly so ffmpeg finishes; the byte-count check
+        // below fails the track.
+        producerError = e;
+      }
+    }
+
+    final args = [
+      '-loglevel', 'warning',
+      '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:0',
+      '-c:a', 'flac',
+      ..._metadataArgs(meta, track, trackArtist),
+      outFile.path,
+    ];
+
+    final exitCode = await _ffmpeg.run(args, stdinData: producer());
+    emitProgress(bytesPiped, force: true);
+    _log('');
+
+    if (exitCode == 0 && producerError == null && bytesPiped == expectedBytes) {
+      _log('   Done: ${outFile.path}');
+    } else {
+      final detail = producerError?.toString() ??
+          'exit code $exitCode, piped $bytesPiped of $expectedBytes bytes';
+      _log('   Error ripping track ${track.number} ($detail).', isError: true);
+      await _deletePartial(outFile);
+    }
+  }
+
+  /// Fallback rip via ffmpeg's libcdio input. libcdio hangs after the last
+  /// track, so the runner kills ffmpeg once progress reaches the expected
+  /// duration and success is judged by a progress heuristic.
+  Future<void> _ripTrackLibcdio(
+    DiscMetadata meta,
+    TrackInfo track,
+    File outFile,
+    String trackArtist,
+  ) async {
+    final dur = track.duration;
+    final timeoutDur = Duration(seconds: dur.truncate().toInt() + 30);
+
+    final args = [
+      '-loglevel', 'warning', '-stats',
+      '-f', 'libcdio',
+      '-ss', track.startTime.toString(),
+      '-i', options.device!,
+      '-t', dur.toString(),
+      '-c:a', 'flac',
+      ..._metadataArgs(meta, track, trackArtist),
+      outFile.path,
+    ];
+
+    final expectedDur = Duration(milliseconds: (dur * 1000).round());
+
+    // Track the furthest progress ffmpeg reported. The runner SIGTERMs ffmpeg
+    // on purpose once all audio is written (to stop libcdio hanging), so a
+    // successful rip normally exits non-zero. We therefore can't trust the
+    // exit code alone; instead we confirm ffmpeg actually reached the end of
+    // the track. A real read error exits early, well short of expectedDur.
+    var lastElapsed = Duration.zero;
+    final progressCb = onProgress ?? logProgress;
+    final exitCode = await _ffmpeg.run(
+      args,
+      timeout: timeoutDur,
+      expectedDuration: expectedDur,
+      onProgress: (p) {
+        lastElapsed = p.elapsed;
+        progressCb(p);
+      },
+    );
+    _log('');
+
+    // 98% tolerance covers the ~last-frame the completion-kill trims.
+    final reachedEnd = lastElapsed.inMilliseconds >= expectedDur.inMilliseconds * 0.98;
+    if (exitCode == 0 || (await outFile.exists() && reachedEnd)) {
+      _log('   Done: ${outFile.path}');
+    } else {
+      _log('   Error ripping track ${track.number} (exit code $exitCode, '
+          'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
+      await _deletePartial(outFile);
     }
   }
 
@@ -288,12 +443,21 @@ class AudioCDRipper {
   /// (including inter-session gap ≈ 152s).
   ///
   /// Order: discid tool → Dart FFI SG_IO → computed fallback.
-  static Future<(String, double)> _getToc(
+  Future<(String, double)> _getToc(
     String device,
     List<double> startTimes,
     double ffprobeLeadOut,
   ) async {
     double sectorsToSeconds(int sectors) => (sectors - 150) / 75.0;
+
+    // Always read the full TOC via FFI first: its per-track LBAs enable the
+    // direct SG_IO rip path, regardless of which method supplies the disc ID.
+    try {
+      final toc = await readToc(device);
+      if (toc != null && toc.offsets.length == startTimes.length) {
+        _fullToc = (offsets: toc.offsets, leadOut: toc.leadOut);
+      }
+    } catch (_) {}
 
     // Method 1: discid tool (libdiscid-utils), if installed
     try {
@@ -308,15 +472,13 @@ class AudioCDRipper {
       }
     } catch (_) {}
 
-    // Method 2: Dart FFI — full TOC with exact track sector addresses
-    try {
-      final toc = await readToc(device);
-      if (toc != null && toc.offsets.length == startTimes.length) {
-        final discId      = computeDiscIdFromOffsets(toc.offsets, toc.leadOut);
-        final leadOutSecs = sectorsToSeconds(toc.leadOut);
-        return (discId, leadOutSecs);
-      }
-    } catch (_) {}
+    // Method 2: the FFI TOC read above — exact track sector addresses
+    final full = _fullToc;
+    if (full != null) {
+      final discId      = computeDiscIdFromOffsets(full.offsets, full.leadOut);
+      final leadOutSecs = sectorsToSeconds(full.leadOut);
+      return (discId, leadOutSecs);
+    }
 
     // Method 3: computed from ffprobe times (less accurate for CD Extra)
     return (computeDiscId(startTimes, ffprobeLeadOut), ffprobeLeadOut);

@@ -37,9 +37,13 @@ class FfmpegRunner {
     final process = await Process.start(executable, args);
     onProcessStarted?.call(process);
 
+    Future<void>? stdinDone;
     if (stdinData != null) {
-      // Ignore broken-pipe errors when ffmpeg finishes early.
-      stdinData.pipe(process.stdin).catchError((_) {});
+      // Ignore broken-pipe errors when ffmpeg finishes early. The cast keeps
+      // pipe() happy when the caller passes a Stream<Uint8List>: its pipe()
+      // demands a StreamConsumer<Uint8List>, which process.stdin is not.
+      stdinDone =
+          stdinData.cast<List<int>>().pipe(process.stdin).catchError((_) {});
     }
 
     Timer? killTimer;
@@ -87,7 +91,11 @@ class FfmpegRunner {
     // trailing stderr lines (and [stderrCollect] entries) can be dropped and a
     // full stdout pipe could stall the child. Errors here (e.g. broken pipe on
     // an early kill) are not fatal to the exit code.
-    await Future.wait([stderrDone, stdoutDone]).catchError((_) => <void>[]);
+    await Future.wait([
+      stderrDone,
+      stdoutDone,
+      ?stdinDone,
+    ]).catchError((_) => <void>[]);
     killTimer?.cancel();
     killSigkillTimer?.cancel();
     completionTimer?.cancel();

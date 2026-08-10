@@ -52,7 +52,7 @@ dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
 
 ### Disc type handling
 
-- **Audio CD**: TOC read via `discid` binary or `SG_IO` FFI ioctl → MusicBrainz disc ID → metadata lookup (MusicBrainz → CDDB → CD-TEXT) → FLAC via ffmpeg.
+- **Audio CD**: TOC read via `discid` binary or `SG_IO` FFI ioctl → MusicBrainz disc ID → metadata lookup (MusicBrainz → CDDB → CD-TEXT) → FLAC via ffmpeg. Ripping reads raw CDDA sectors via `SG_IO` READ CD (`cdda_reader.dart`, run in a dedicated isolate — the ioctl blocks and would freeze a Flutter UI) and pipes PCM to ffmpeg stdin (deterministic end-of-track, exact byte-count verification); falls back to ffmpeg's libcdio input (with kill-timer heuristics) when the FFI TOC or SG_IO reads are unavailable.
 - **DVD**: Parses `VIDEO_TS.IFO` and `VTS_XX_0.IFO` files directly in Dart (no external tool). Two-pass VOB scan: first pass finds MPEG-PS private stream sub-IDs (`_scanVobSids`) to determine correct ffmpeg `-map` ordering; second pass rips. Prefers `libdvdread` FFI for CSS; falls back to VOB concat.
 - **Blu-ray**: Parses MPLS playlist and CLPI stream info files. Rips via libbluray (through ffmpeg's `bluray:` protocol) or M2TS concat fallback. LPCM audio is transcoded to FLAC; everything else is stream-copied.
 
