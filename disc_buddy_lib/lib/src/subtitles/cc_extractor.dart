@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import '../rippers/video_disc_ripper.dart' show LogCallback;
+import 'cc_format.dart';
 
 /// Extracts EIA-608 Closed Caption subtitles embedded in an MPEG-2 video
 /// stream and writes them as SRT.
@@ -46,7 +47,7 @@ class CcExtractor {
       'pipe:1',
     ]);
 
-    final scanner = _Mpeg2Scanner();
+    final scanner = Mpeg2CcScanner();
     final stderrFuture = process.stderr.drain<void>();
     await for (final chunk in process.stdout) {
       scanner.addChunk(chunk);
@@ -60,11 +61,7 @@ class CcExtractor {
 
     final srt = scanner.decoder.buildSrt();
     if (srt.isEmpty) {
-      if (scanner.userDataPackets == 0) {
-        _log('   No CC captions found (no MPEG-2 user_data packets in stream).');
-      } else {
-        _log('   No CC captions found (${scanner.userDataPackets} user_data packet(s) scanned, no EIA-608 data decoded).');
-      }
+      _logNoCaptions(scanner);
       return null;
     }
 
@@ -106,7 +103,7 @@ class CcExtractor {
     // Ignore broken pipe in case ffmpeg exits before consuming all input.
     unawaited(mpegPsStream.pipe(process.stdin).catchError((_) {}));
 
-    final scanner = _Mpeg2Scanner();
+    final scanner = Mpeg2CcScanner();
     final stderrFuture = process.stderr.drain<void>();
     await for (final chunk in process.stdout) {
       scanner.addChunk(chunk);
@@ -122,11 +119,7 @@ class CcExtractor {
 
     final srt = scanner.decoder.buildSrt();
     if (srt.isEmpty) {
-      if (scanner.userDataPackets == 0) {
-        _log('   No CC captions found (no MPEG-2 user_data packets in stream).');
-      } else {
-        _log('   No CC captions found (${scanner.userDataPackets} user_data packet(s) scanned, no EIA-608 data decoded).');
-      }
+      _logNoCaptions(scanner);
       return null;
     }
 
@@ -134,13 +127,35 @@ class CcExtractor {
     _log('   CC subtitle written → ${srtFile.path}');
     return srtFile;
   }
+
+  /// Explains an empty scan result: no user_data at all, user_data without CC
+  /// structure, a CC track that carries only null padding, or CC pairs that
+  /// decoded to no caption text.
+  void _logNoCaptions(Mpeg2CcScanner scanner) {
+    if (scanner.userDataPackets == 0) {
+      _log('   No CC captions found (no MPEG-2 user_data packets in stream).');
+    } else if (scanner.ccPacketsDetected == 0) {
+      _log('   No CC captions found (${scanner.userDataPackets} user_data '
+          'packet(s) scanned, none contained EIA-608 data).');
+    } else if (scanner.nonNullCcPairs == 0) {
+      _log('   CC channel empty: ${scanner.ccPacketsDetected} CC packet(s) '
+          'found but all contained only null padding — the disc has a CC track '
+          'with no captions; no SRT produced.');
+    } else {
+      _log('   No CC captions found (${scanner.nonNullCcPairs} CC byte pair(s) '
+          'decoded but produced no caption text).');
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // MPEG-2 bitstream scanner
 // ---------------------------------------------------------------------------
 
-class _Mpeg2Scanner {
+/// Internal MPEG-2 elementary-stream scanner. Public only so tests can drive
+/// it with synthetic byte streams; not part of the package API (kept out of
+/// the `disc_buddy.dart` barrel).
+class Mpeg2CcScanner {
   // Sliding buffer; kept small by trimming after each _process() call.
   final _buf = <int>[];
 
@@ -155,10 +170,17 @@ class _Mpeg2Scanner {
   // Frame counter within current GOP (for sub-second timing).
   int _frameInGop = 0;
 
-  final _Eia608Decoder decoder = _Eia608Decoder();
+  final Eia608Decoder decoder = Eia608Decoder();
 
   // Count of user_data packets encountered (useful for diagnosing missing CC).
   int userDataPackets = 0;
+
+  // Count of user_data packets in which a CC payload structure was detected.
+  int ccPacketsDetected = 0;
+
+  // Count of non-null EIA-608 byte pairs handed to the decoder. Zero while
+  // [ccPacketsDetected] > 0 means the disc has a CC track with no captions.
+  int nonNullCcPairs = 0;
 
   void addChunk(List<int> chunk) {
     _buf.addAll(chunk);
@@ -265,64 +287,18 @@ class _Mpeg2Scanner {
   }
 
   void _parseUserData(int start, int end) {
-    // user_data bytes after start code (00 00 01 B2).
-    //
-    // Supported CC formats:
-    //
-    // A) DVS 053 / SCTE-20 "CC" prefix  (0x4343xx…):
-    //    [43][43]  CC marker
-    //    [type]    0x01 (DVS053): flags byte + cc_count follow
-    //              0x03 (SCTE-20): packed byte [process|zero|cc_count:5|marker]
-    //              other: treated like 0x03 (packed, no extra flags byte)
-    //    type 0x01: [flags][cc_count & 0x7F][triples…]
-    //    type 0x03+: [packed_byte → cc_count=(byte>>1)&0x1F][triples…]
-    //
-    // B) ATSC A/53 "GA94" format  (0x47413934 03 …):
-    //    [47][41][39][34]  "GA94"
-    //    [03]              user_data_type_code
-    //    [packed_byte]     process_cc_data_flag(1)|zero(1)|cc_count(5)|marker(1)
-    //    [triples…]
-    //
-    // Triple type bytes:
-    //   0xFC = NTSC field 1, valid
-    //   0xFD = NTSC field 2, valid
-    //   0xFE = DTVCC packet data (skip)
-    //   0xFF = DTVCC packet start / non-standard F1 (common on SD-DVDs)
-    if (end - start < 4) return;
-
-    int ccCountOff;   // index of cc_count byte relative to [start]
-    bool scteStyle;   // true → cc_count = (byte >> 1) & 0x1F; false → byte & 0x7F
-
-    if (_buf[start] == 0x43 && _buf[start + 1] == 0x43) {
-      // "CC" prefix variants
-      final type = _buf[start + 2];
-      if (type == 0x01) {
-        ccCountOff = 4; scteStyle = false;  // flags byte at +3, cc_count at +4
-      } else {
-        ccCountOff = 3; scteStyle = true;   // packed byte at +3
-      }
-    } else if (end - start >= 7 &&
-        _buf[start] == 0x47 && _buf[start + 1] == 0x41 &&
-        _buf[start + 2] == 0x39 && _buf[start + 3] == 0x34 &&
-        _buf[start + 4] == 0x03) {
-      // ATSC A/53 "GA94" format
-      ccCountOff = 5; scteStyle = true;
-    } else {
-      return; // not a recognised CC user_data packet
-    }
-
-    if (start + ccCountOff >= end) return;
-    final countByte = _buf[start + ccCountOff];
-    final ccCount   = scteStyle ? (countByte >> 1) & 0x1F : countByte & 0x7F;
-    if (ccCount == 0) return;
-
-    final tripleStart = start + ccCountOff + 1;
-    if (tripleStart + ccCount * 3 > end) return; // truncated packet
+    // user_data bytes after start code (00 00 01 B2). Format recognition —
+    // known signatures plus a structural fallback for signature-less variants —
+    // lives in detectCcPayload (cc_format.dart).
+    final layout = detectCcPayload(_buf, start, end);
+    if (layout == null) return;
+    ccPacketsDetected++;
 
     // Continuous output position = ticks at this GOP's start + frames since it.
     final ms = ((_outputTicks + _frameInGop) * 1001) ~/ 30;
 
-    for (int i = 0; i < ccCount; i++) {
+    final tripleStart = start + layout.tripleStart;
+    for (int i = 0; i < layout.ccCount; i++) {
       final off = tripleStart + i * 3;
       final t0 = _buf[off];
       final b1 = _buf[off + 1] & 0x7F;
@@ -330,6 +306,7 @@ class _Mpeg2Scanner {
       // NTSC field 1 (0xFC), field 2 (0xFD), or non-standard 0xFF EIA-608 triple.
       if (t0 == 0xFC || t0 == 0xFD || t0 == 0xFF) {
         if (b1 != 0 || b2 != 0) {
+          nonNullCcPairs++;
           decoder.processPair(ms, b1, b2);
         }
       }
@@ -341,7 +318,7 @@ class _Mpeg2Scanner {
 // EIA-608 decoder
 // ---------------------------------------------------------------------------
 
-class _Eia608Decoder {
+class Eia608Decoder {
   // Non-displayed memory (loaded during pop-on mode).
   final _ndm = <String>[];
 

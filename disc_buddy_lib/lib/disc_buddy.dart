@@ -22,7 +22,7 @@ export 'src/utils/mount.dart' show withMountedDisc;
 export 'src/utils/sanitize.dart' show sanitizeFilename;
 export 'src/utils/languages.dart' show langMatchesFilter;
 export 'src/subtitles/subtitle_extractor.dart';
-export 'src/subtitles/cc_extractor.dart';
+export 'src/subtitles/cc_extractor.dart' show CcExtractor;
 export 'src/cli/title_selector.dart';
 export 'src/naming/auto_namer.dart' show AutoNamer;
 export 'src/naming/tmdb_client.dart' show TmdbClient;
