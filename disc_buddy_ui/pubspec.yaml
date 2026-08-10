@@ -19,6 +19,13 @@ dependencies:
   path_provider: ^2.1.5
   path: ^1.9.0
 
+# jni (transitive via path_provider_android) is compiled for the host by its
+# build hook even on Linux. Versions after 1.0.0 dropped the __ENVP_CAST macro
+# around AttachCurrentThread, so dartjni.h/.c no longer compile against the
+# non-Android jni.h (JNIEnv** vs void**) — an error, not a warning, on GCC 14+.
+dependency_overrides:
+  jni: 1.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
