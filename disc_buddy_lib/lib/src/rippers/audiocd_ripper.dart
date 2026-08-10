@@ -273,18 +273,8 @@ class AudioCDRipper {
 
         _log('── Ripping: track $nr → ${outFile.path}');
 
-        if (overwrite != null && !options.force && await outFile.exists()) {
-          if (!overwrite.contains(outFile.path)) {
-            _log('   Skipped.');
-            continue;
-          }
-          try {
-            await outFile.delete();
-          } catch (e) {
-            _log('   Cannot delete file: $e', isError: true);
-            continue;
-          }
-        } else if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) {
+        if (!await confirmOverwrite(outFile,
+            force: options.force, onLog: onLog, overwrite: overwrite)) {
           continue;
         }
 

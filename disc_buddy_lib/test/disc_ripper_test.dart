@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:disc_buddy/disc_buddy.dart';
+import 'package:disc_buddy/src/utils/file_utils.dart' show confirmOverwrite;
 import 'package:test/test.dart';
 
 void main() {
@@ -117,6 +120,71 @@ void main() {
         audioTrackOutputPath('/music', meta, track),
         equals('/music/Artist/Box/02-02-all-american bitch_.flac'),
       );
+    });
+  });
+
+  group('videoTitleOutputPath', () {
+    const title = BlurayTitle(
+      index: 0,
+      playlist: '00001',
+      duration: Duration(minutes: 90),
+      audioCount: 1,
+      subtitleCount: 0,
+      audioLangs: [],
+      subtitleLangs: [],
+    );
+
+    test('outputDir/disc/disc-filename met gesanitizede disctitel', () {
+      expect(
+        videoTitleOutputPath('/videos', 'DISC: TITLE?', title),
+        equals('/videos/DISC_ TITLE_/DISC_ TITLE_-title_00001.mkv'),
+      );
+    });
+  });
+
+  group('confirmOverwrite met overwrite-set', () {
+    late Directory tmp;
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('overwrite_test');
+    });
+    tearDown(() async => tmp.delete(recursive: true));
+
+    void log(String msg, {bool isError = false}) {}
+
+    test('bestand niet aanwezig → true, set irrelevant', () async {
+      final f = File('${tmp.path}/nieuw.mkv');
+      expect(
+        await confirmOverwrite(f, force: false, onLog: log, overwrite: {}),
+        isTrue,
+      );
+    });
+
+    test('bestaand bestand in set → verwijderd en true', () async {
+      final f = File('${tmp.path}/a.mkv')..writeAsStringSync('x');
+      expect(
+        await confirmOverwrite(f,
+            force: false, onLog: log, overwrite: {f.path}),
+        isTrue,
+      );
+      expect(f.existsSync(), isFalse);
+    });
+
+    test('bestaand bestand niet in set → false, bestand blijft', () async {
+      final f = File('${tmp.path}/b.mkv')..writeAsStringSync('x');
+      expect(
+        await confirmOverwrite(f, force: false, onLog: log, overwrite: {}),
+        isFalse,
+      );
+      expect(f.existsSync(), isTrue);
+    });
+
+    test('force verwijdert ook buiten de set', () async {
+      final f = File('${tmp.path}/c.mkv')..writeAsStringSync('x');
+      expect(
+        await confirmOverwrite(f, force: true, onLog: log, overwrite: {}),
+        isTrue,
+      );
+      expect(f.existsSync(), isFalse);
     });
   });
 }

@@ -8,6 +8,7 @@ import '../models/rip_state.dart';
 import '../providers/drive_list_provider.dart';
 import '../providers/rip_state_provider.dart';
 import '../providers/settings_provider.dart';
+import 'overwrite_dialog.dart';
 import 'rip_option_widgets.dart';
 
 class TitleSelectionPanel extends ConsumerStatefulWidget {
@@ -617,32 +618,44 @@ class _FooterState extends ConsumerState<_Footer> {
         .where((t) => selState.selectedKeys.contains(t.displayKey))
         .toList();
 
-    final conflicts = <VideoTitle>[];
+    // Predict output paths (rip output, or the post-rip rename target when a
+    // custom name is set) and list the ones that already exist in a per-file
+    // overwrite dialog, mirroring the Audio CD flow.
+    final conflictTitles = <String, VideoTitle>{}; // existing path → title
+    final ripPhasePaths  = <String, String>{};     // displayKey → rip output
     for (final title in selectedTitles) {
       final cfg = selState.configs[title.displayKey];
-      final fileName = cfg?.customName?.isNotEmpty == true
-          ? '${sanitizeFilename(cfg!.customName!)}.mkv'
-          : '${sanitizeFilename(selState.discTitle)}-${title.filename}';
-      if (await File(p.join(outDirPath, fileName)).exists()) {
-        conflicts.add(title);
-      }
+      final ripPath = videoTitleOutputPath(
+          settings.effectiveOutputDir, selState.discTitle, title);
+      ripPhasePaths[title.displayKey] = ripPath;
+      final finalPath = cfg?.customName?.isNotEmpty == true
+          ? p.join(outDirPath, '${sanitizeFilename(cfg!.customName!)}.mkv')
+          : ripPath;
+      if (await File(finalPath).exists()) conflictTitles[finalPath] = title;
     }
 
-    if (conflicts.isNotEmpty) {
+    Set<String>? overwrite;
+    if (conflictTitles.isNotEmpty) {
       if (!context.mounted) return;
-      final choice = await showDialog<_OverwriteChoice>(
+      final chosen = await showDialog<Set<String>>(
         context: context,
-        builder: (_) => _OverwriteDialog(conflicts: conflicts, outDir: outDirPath),
+        builder: (_) => OverwriteDialog(paths: conflictTitles.keys.toList()),
       );
-      if (choice == null || choice == _OverwriteChoice.cancel) return;
-      if (choice == _OverwriteChoice.skip) {
-        final conflictKeys = conflicts.map((t) => t.displayKey).toSet();
-        final notifier = ref.read(ripStateProvider(widget.entry.id).notifier);
-        for (final t in conflicts) {
-          notifier.toggleTitle(t.displayKey);
+      if (chosen == null) return; // cancelled
+      // Unchecked files are skipped: deselect their titles. Checked ones feed
+      // the ripper's overwrite set (keyed on the rip-phase output path).
+      final notifier = ref.read(ripStateProvider(widget.entry.id).notifier);
+      overwrite = {};
+      var remaining = selState.selectedKeys.length;
+      for (final entry in conflictTitles.entries) {
+        if (chosen.contains(entry.key)) {
+          overwrite.add(ripPhasePaths[entry.value.displayKey]!);
+        } else {
+          notifier.toggleTitle(entry.value.displayKey);
+          remaining--;
         }
-        if (selState.selectedKeys.difference(conflictKeys).isEmpty) return;
       }
+      if (remaining <= 0) return;
     }
 
     final name = widget.autoName && widget.nameController.text.trim().isNotEmpty
@@ -660,9 +673,10 @@ class _FooterState extends ConsumerState<_Footer> {
     notifier.proceedToNaming();
     notifier.proceedToSubtitles(nameHint: name, seasons: seasons, autoName: widget.autoName, batchAssign: widget.batchAssign);
     if (extractSubtitles) {
-      notifier.startRipFromSubtitleStep(extract: true, langs: subtitleLangs);
+      notifier.startRipFromSubtitleStep(
+          extract: true, langs: subtitleLangs, overwrite: overwrite);
     } else {
-      notifier.skipSubtitles();
+      notifier.skipSubtitles(overwrite: overwrite);
     }
   }
 }
@@ -712,47 +726,6 @@ class _SubtitleLangsDialogState extends State<_SubtitleLangsDialog> {
   }
 
   void _confirm() => Navigator.pop(context, _controller.text.trim());
-}
-
-enum _OverwriteChoice { overwrite, skip, cancel }
-
-class _OverwriteDialog extends StatelessWidget {
-  final List<VideoTitle> conflicts;
-  final String outDir;
-
-  const _OverwriteDialog({required this.conflicts, required this.outDir});
-
-  @override
-  Widget build(BuildContext context) {
-    final count = conflicts.length;
-    return AlertDialog(
-      title: Text('$count file${count == 1 ? '' : 's'} already exist${count == 1 ? 's' : ''}'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('In $outDir:', style: Theme.of(context).textTheme.bodySmall),
-          const SizedBox(height: 8),
-          ...conflicts.map((t) => Text('• ${t.displayKey}',
-              style: Theme.of(context).textTheme.bodySmall)),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.cancel),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.skip),
-          child: const Text('Skip existing'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, _OverwriteChoice.overwrite),
-          child: const Text('Overwrite'),
-        ),
-      ],
-    );
-  }
 }
 
 class _LangChip extends StatelessWidget {

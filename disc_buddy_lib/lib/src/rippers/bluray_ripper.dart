@@ -65,17 +65,19 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   /// and no additional mount/unmount cycle is performed.
   @override
   Future<void> rip(String discTitle, List<BlurayTitle> selected,
-      {String? mountPath}) async {
+      {String? mountPath, Set<String>? overwrite}) async {
     final outDir = Directory(p.join(options.outputDir, sanitizeFilename(discTitle)));
     await outDir.create(recursive: true);
 
     final hasLibbluray = await _checkLibbluray();
 
     if (mountPath != null) {
-      await _ripMounted(mountPath, discTitle, selected, outDir, hasLibbluray);
+      await _ripMounted(mountPath, discTitle, selected, outDir, hasLibbluray,
+          overwrite: overwrite);
     } else {
       await withMountedDisc<Object?>(options.device!, (mp) =>
-          _ripMounted(mp, discTitle, selected, outDir, hasLibbluray));
+          _ripMounted(mp, discTitle, selected, outDir, hasLibbluray,
+              overwrite: overwrite));
     }
   }
 
@@ -84,8 +86,9 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     String discTitle,
     List<BlurayTitle> selected,
     Directory outDir,
-    bool hasLibbluray,
-  ) async {
+    bool hasLibbluray, {
+    Set<String>? overwrite,
+  }) async {
     // AACS/BD+ detection
     final isEncrypted = await _detectEncryption(mountPath);
     if (isEncrypted) {
@@ -136,7 +139,8 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
 
     // Phase 2: rip
     for (final title in selected) {
-      await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!, discTitle);
+      await _ripTitle(title, outDir, mountPath, hasLibbluray, langsMap[title]!,
+          discTitle, overwrite: overwrite);
     }
   }
 
@@ -462,12 +466,16 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     String mountPath,
     bool useLibbluray,
     ({List<String> audioLangs, List<String> subLangs}) langs,
-    String discTitle,
-  ) async {
-    final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
+    String discTitle, {
+    Set<String>? overwrite,
+  }) async {
+    final outFile = File(videoTitleOutputPath(options.outputDir, discTitle, title));
     _log('── Ripping: playlist ${title.playlist} → ${outFile.path}');
 
-    if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) return;
+    if (!await confirmOverwrite(outFile,
+        force: options.force, onLog: onLog, overwrite: overwrite)) {
+      return;
+    }
 
     final bdmvPath   = p.join(mountPath, 'BDMV');
     final playlistNr = int.tryParse(title.playlist) ?? 1;

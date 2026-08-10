@@ -34,9 +34,19 @@ Future<File?> writeChapterMetadata(
 ///
 /// Returns `true` if ripping may proceed (file did not exist, or was deleted
 /// after confirmation). Returns `false` if the file should be skipped.
-Future<bool> confirmOverwrite(File file, {required bool force, LogCallback? onLog}) async {
+///
+/// [overwrite] — when non-null (and not [force]), the decision is made from
+/// the set instead of prompting: paths in the set are deleted and re-ripped,
+/// other existing files are skipped. Used by UIs that ask up front which
+/// files to overwrite.
+Future<bool> confirmOverwrite(File file,
+    {required bool force, LogCallback? onLog, Set<String>? overwrite}) async {
   if (!await file.exists()) return true;
-  final shouldDelete = force ||
+  if (overwrite != null && !force && !overwrite.contains(file.path)) {
+    if (onLog != null) { onLog('   Skipped.'); } else { stdout.writeln('   Skipped.'); }
+    return false;
+  }
+  final shouldDelete = force || (overwrite != null) ||
       (onLog == null && ttyConfirm('   File already exists — delete? [y/N] '));
   if (shouldDelete) {
     try {

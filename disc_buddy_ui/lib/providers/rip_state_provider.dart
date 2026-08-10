@@ -55,6 +55,7 @@ class _RipJob {
   final Map<String, TitleConfig> configs;
   final RipOptions options;
   final String? mountPath;
+  final Set<String>? overwrite;
 
   const _RipJob({
     required this.port,
@@ -64,6 +65,7 @@ class _RipJob {
     required this.configs,
     required this.options,
     required this.mountPath,
+    this.overwrite,
   });
 }
 
@@ -188,12 +190,14 @@ void _ripIsolateMain(_RipJob job) async {
         if (title is! DvdTitle) throw StateError('Expected DvdTitle but got ${title.runtimeType}');
         final ripper = DVDRipper(titleOptions, onLog: log, onProgress: onProgress, onFfmpegProcess: trackProcess);
         final dvd = _applyDvdLangOverrides(title, aOver, sOver);
-        await ripper.rip(job.discTitle, [dvd], mountPath: job.mountPath);
+        await ripper.rip(job.discTitle, [dvd],
+            mountPath: job.mountPath, overwrite: job.overwrite);
       } else if (job.discType == DiscType.bluray) {
         if (title is! BlurayTitle) throw StateError('Expected BlurayTitle but got ${title.runtimeType}');
         final ripper = BlurayRipper(titleOptions, onLog: log, onProgress: onProgress, onFfmpegProcess: trackProcess);
         final blu = _applyBlurayLangOverrides(title, aOver, sOver);
-        await ripper.rip(job.discTitle, [blu], mountPath: job.mountPath);
+        await ripper.rip(job.discTitle, [blu],
+            mountPath: job.mountPath, overwrite: job.overwrite);
       }
 
       if (config?.customName?.isNotEmpty == true) {
@@ -332,7 +336,7 @@ class RipStateNotifier extends Notifier<RipState> {
     );
   }
 
-  void skipSubtitles() {
+  void skipSubtitles({Set<String>? overwrite}) {
     final s = state;
     if (s is! RipSubtitleStep) return;
     _startRip(
@@ -345,10 +349,12 @@ class RipStateNotifier extends Notifier<RipState> {
       subtitleLangs: '',
       autoName: s.autoName,
       batchAssign: s.batchAssign,
+      overwrite: overwrite,
     );
   }
 
-  void startRipFromSubtitleStep({required bool extract, required String langs}) {
+  void startRipFromSubtitleStep(
+      {required bool extract, required String langs, Set<String>? overwrite}) {
     final s = state;
     if (s is! RipSubtitleStep) return;
     _startRip(
@@ -360,6 +366,7 @@ class RipStateNotifier extends Notifier<RipState> {
       extractSubtitles: extract,
       subtitleLangs: langs,
       batchAssign: s.batchAssign,
+      overwrite: overwrite,
     );
   }
 
@@ -640,6 +647,7 @@ class RipStateNotifier extends Notifier<RipState> {
     required String subtitleLangs,
     bool? autoName,
     bool? batchAssign,
+    Set<String>? overwrite,
   }) {
     state = RipInProgress(discTitle: discTitle, selectedTitles: selectedTitles);
     _runRip(
@@ -652,6 +660,7 @@ class RipStateNotifier extends Notifier<RipState> {
       subtitleLangs: subtitleLangs,
       autoName: autoName,
       batchAssign: batchAssign,
+      overwrite: overwrite,
     );
   }
 
@@ -665,6 +674,7 @@ class RipStateNotifier extends Notifier<RipState> {
     required String subtitleLangs,
     bool? autoName,
     bool? batchAssign,
+    Set<String>? overwrite,
   }) async {
     final logs = <String>[];
 
@@ -697,6 +707,7 @@ class RipStateNotifier extends Notifier<RipState> {
           configs: configs,
           options: options,
           mountPath: mountPath,
+          overwrite: overwrite,
         ),
       );
 

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:path/path.dart' as p;
 import '../device/dvdread.dart' show DVDSession, dvdreadAvailable;
@@ -13,6 +12,7 @@ import '../utils/languages.dart';
 import '../utils/mount.dart';
 import '../utils/progress.dart';
 import '../subtitles/cc_extractor.dart';
+import '../subtitles/cc_format.dart' show stripMkvCcUserData;
 import '../utils/sanitize.dart';
 
 class DVDRipper implements VideoDiscRipper<DvdTitle> {
@@ -72,7 +72,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// (used by the VOB concat path only; dvdread uses the device directly).
   @override
   Future<void> rip(String discTitle, List<DvdTitle> selected,
-      {String? mountPath}) async {
+      {String? mountPath, Set<String>? overwrite}) async {
     final device = options.device!;
 
     // Apply per-title track filtering (by index, then by language as fallback).
@@ -120,11 +120,12 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     // Phase 2: rip
     if (dvdreadAvailable) {
       _log('   (libdvdread available — CSS decryption active if applicable)');
-      await _ripWithDvdread(device, discTitle, selected, outDir, langsMap);
+      await _ripWithDvdread(device, discTitle, selected, outDir, langsMap,
+          overwrite: overwrite);
     } else {
       _log('   (libdvdread not found — VOB concat mode; encrypted discs will fail)');
       await _ripWithVobConcat(device, discTitle, selected, outDir, langsMap,
-          mountPath: mountPath);
+          mountPath: mountPath, overwrite: overwrite);
     }
   }
 
@@ -133,8 +134,9 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     String discTitle,
     List<DvdTitle> selected,
     Directory outDir,
-    Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap,
-  ) async {
+    Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap, {
+    Set<String>? overwrite,
+  }) async {
     // Open the disc once for all titles so libdvdcss only retrieves CSS keys once.
     final session = DVDSession.open(device);
     if (session == null) {
@@ -149,10 +151,13 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
     try {
     for (final title in selected) {
-      final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
+      final outFile = File(videoTitleOutputPath(options.outputDir, discTitle, title));
       _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
-      if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
+      if (!await confirmOverwrite(outFile,
+          force: options.force, onLog: onLog, overwrite: overwrite)) {
+        continue;
+      }
 
       final langs = langsMap[title]!;
       final cells = title.cells.isNotEmpty ? title.cells : null;
@@ -333,13 +338,17 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     Directory outDir,
     Map<DvdTitle, ({List<String> audioLangs, List<String> subLangs})> langsMap, {
     String? mountPath,
+    Set<String>? overwrite,
   }) async {
     Future<Object?> doRip(String mp) async {
       for (final title in selected) {
-        final outFile = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${title.filename}'));
+        final outFile = File(videoTitleOutputPath(options.outputDir, discTitle, title));
         _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
-        if (!await confirmOverwrite(outFile, force: options.force, onLog: onLog)) continue;
+        if (!await confirmOverwrite(outFile,
+            force: options.force, onLog: onLog, overwrite: overwrite)) {
+          continue;
+        }
 
         final vobFiles = _collectVobs(mp, title.vtsNumber);
         if (vobFiles.isEmpty) {
@@ -1210,7 +1219,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// identifiers so players don't show empty "Closed Captions 1-4" tracks.
   Future<void> _finalizeCc(File outFile, File? srtFile) async {
     if (srtFile == null) {
-      await _stripMkvCcUserData(outFile);
+      await stripMkvCcUserData(outFile);
       return;
     }
     await _embedSrtInMkv(outFile, srtFile, 'eng');
@@ -1278,7 +1287,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     if (ok) {
       await File(fixedPath).rename(mkvFile.path);
       await srtFile.delete();
-      await _stripMkvCcUserData(mkvFile);
+      await stripMkvCcUserData(mkvFile);
       _log('   CC subtitle embedded in MKV.');
     } else {
       final fixed = File(fixedPath);
@@ -1286,49 +1295,6 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     }
   }
 
-  /// Patches EIA-608 CC user_data identifiers in the MPEG-2 video stream stored
-  /// within [mkvFile] in-place. Zeroing the 4-byte identifier (GA94 / DVS-053)
-  /// causes players to skip the user_data, preventing "Closed Captions 1-4"
-  /// from appearing alongside the extracted subtitle track.
-  static Future<void> _stripMkvCcUserData(File mkvFile) async {
-    const chunkSize = 4 * 1024 * 1024; // 4 MB read window
-    const overlap   = 7;               // must be ≥ pattern length (8) - 1
-
-    final raf      = await mkvFile.open(mode: FileMode.append);
-    final fileSize = await raf.length();
-    try {
-      var scanPos = 0;
-      while (scanPos < fileSize) {
-        final readStart = scanPos == 0 ? 0 : scanPos - overlap;
-        final readEnd   = math.min(readStart + chunkSize + overlap, fileSize);
-        final toRead    = (readEnd - readStart).toInt();
-
-        await raf.setPosition(readStart);
-        final buf = await raf.read(toRead);
-
-        final limit = buf.length - 7;
-        for (var i = 0; i < limit; i++) {
-          if (buf[i]   == 0x00 && buf[i+1] == 0x00 &&
-              buf[i+2] == 0x01 && buf[i+3] == 0xB2) {
-            final b4 = buf[i + 4];
-            final b5 = buf[i + 5];
-            // ATSC A/53: "GA" prefix (0x4741xxxx).
-            // DVS 053 / SCTE-20: "CC" prefix (0x4343xxxx) — covers all variants
-            // including 0x434300FF, 0x43430300, 0x434301f8, etc.
-            if ((b4 == 0x47 && b5 == 0x41) ||
-                (b4 == 0x43 && b5 == 0x43)) {
-              await raf.setPosition(readStart + i + 4);
-              await raf.writeFrom(Uint8List(4)); // zero the identifier
-            }
-          }
-        }
-
-        scanPos = readStart + chunkSize;
-      }
-    } finally {
-      await raf.close();
-    }
-  }
 
   static List<String> _collectVobs(String mountPath, int vtsNum) {
     final pad     = vtsNum.toString().padLeft(2, '0');
