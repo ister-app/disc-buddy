@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:disc_buddy/disc_buddy.dart';
 import 'package:disc_buddy/src/utils/file_utils.dart' show confirmOverwrite;
@@ -55,6 +56,72 @@ void main() {
 
     test('geen byte actief → null', () {
       expect(DVDRipper.pgcSubIdForTest(0x00000000), isNull);
+    });
+  });
+
+  group('DVDRipper._scanPgcCells stinger-cell filter', () {
+    // Bouwt een synthetisch PGC-blok: header + PGMAP + C_PBIT.
+    // [cells] is een lijst (secs, first, last); elk programma wijst naar
+    // de gelijknamige cell (pgmap = [1, 2, ...]).
+    (Uint8List, ByteData) pgcWith(List<(int, int, int)> cells) {
+      const pgmapRel = 0x100;
+      final cpbitRel = pgmapRel + cells.length;
+      final data = Uint8List(cpbitRel + cells.length * 24);
+      final bd = ByteData.sublistView(data);
+      data[2] = cells.length; // nrPrograms
+      data[3] = cells.length; // nrCells
+      bd.setUint16(0xE6, pgmapRel);
+      bd.setUint16(0xE8, cpbitRel);
+      int bcd(int v) => ((v ~/ 10) << 4) | (v % 10);
+      for (var i = 0; i < cells.length; i++) {
+        data[pgmapRel + i] = i + 1;
+        final (secs, first, last) = cells[i];
+        final o = cpbitRel + i * 24;
+        data[o + 4] = bcd(secs ~/ 3600);
+        data[o + 5] = bcd((secs % 3600) ~/ 60);
+        data[o + 6] = bcd(secs % 60);
+        data[o + 7] = bcd(15); // frames (sub-seconde), fps-bits genegeerd
+        bd.setUint32(o + 8, first);
+        bd.setUint32(o + 20, last);
+      }
+      return (data, bd);
+    }
+
+    test('niet-aansluitende 0s-eindcell wordt gedropt (iCarly-stinger)', () {
+      final (data, bd) = pgcWith([(1415, 0, 432874), (0, 2597592, 2597595)]);
+      final r = DVDRipper.scanPgcCellsForTest(data, bd, 0, 1415);
+      expect(r.cells, [(first: 0, last: 432874)]);
+      expect(r.chapters, [Duration.zero]); // hoofdstuk 2 vervalt mee
+    });
+
+    test('meerdere trailing stingers worden allemaal gedropt', () {
+      final (data, bd) = pgcWith([
+        (1415, 0, 432874),
+        (0, 2597592, 2597595),
+        (0, 2600000, 2600003),
+      ]);
+      final r = DVDRipper.scanPgcCellsForTest(data, bd, 0, 1415);
+      expect(r.cells, [(first: 0, last: 432874)]);
+    });
+
+    test('aansluitende 0s-eindcell blijft behouden', () {
+      final (data, bd) = pgcWith([(1415, 0, 432874), (0, 432875, 432878)]);
+      final r = DVDRipper.scanPgcCellsForTest(data, bd, 0, 1415);
+      expect(r.cells,
+          [(first: 0, last: 432874), (first: 432875, last: 432878)]);
+    });
+
+    test('niet-aansluitende eindcell met echte speelduur blijft behouden', () {
+      final (data, bd) = pgcWith([(1400, 0, 432874), (15, 2597592, 2601000)]);
+      final r = DVDRipper.scanPgcCellsForTest(data, bd, 0, 1415);
+      expect(r.cells,
+          [(first: 0, last: 432874), (first: 2597592, last: 2601000)]);
+    });
+
+    test('enkele cell wordt nooit gedropt', () {
+      final (data, bd) = pgcWith([(0, 100, 103)]);
+      final r = DVDRipper.scanPgcCellsForTest(data, bd, 0, 0);
+      expect(r.cells, [(first: 100, last: 103)]);
     });
   });
 

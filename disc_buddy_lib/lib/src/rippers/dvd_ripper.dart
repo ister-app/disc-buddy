@@ -597,7 +597,8 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       final streams      = _scanPgcStreams(data, bd, pgc, is16x9, vtsAudio);
       final audioTracks  = _buildAudioTracks(vtsAudio, streams);
       final subtitleTracks = _buildSubtitleTracks(vtsSub, streams);
-      final cellsAndChapters = _scanPgcCells(data, bd, pgc, durSeconds);
+      final cellsAndChapters = _scanPgcCells(data, bd, pgc, durSeconds,
+          onDiag: (msg) => _log('   [cell-diag] VTS $vtsNum PGC ${pgcIdx + 1}: $msg'));
       final clut         = _readPgcClut(data, pgc);
 
       results.add(DvdTitle(
@@ -784,7 +785,8 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
   /// Extracts the cell sector ranges and chapter timestamps for one PGC.
   static ({List<({int first, int last})> cells, List<Duration> chapters})
-      _scanPgcCells(Uint8List data, ByteData bd, int pgc, int durSeconds) {
+      _scanPgcCells(Uint8List data, ByteData bd, int pgc, int durSeconds,
+          {void Function(String)? onDiag}) {
     final cells    = <({int first, int last})>[];
     final chapters = <Duration>[];
     try {
@@ -797,11 +799,19 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       final allFirstSectors = <int>[];
       final allLastSectors  = <int>[];
       final allCellSecs     = <int>[];
+      // Diagnostics for the trailing-frame investigation (cell category byte:
+      // bits 7–6 block mode, 5–4 block type, bit 3 seamless, bit 2 interleaved).
+      final allCategories     = <int>[];
+      final allFirstIlvuEnds  = <int>[]; // C_PBIT +12: first ILVU end sector
+      final allLastVobuStarts = <int>[]; // C_PBIT +16: last VOBU start sector
       for (var c = 0; c < nrCells; c++) {
         final coff = cpbitOff + c * 24;
         if (coff + 24 > data.length) break;
         allFirstSectors.add(bd.getUint32(coff + 8,  Endian.big));
         allLastSectors.add(bd.getUint32(coff + 20, Endian.big));
+        allCategories.add(data[coff]);
+        allFirstIlvuEnds.add(bd.getUint32(coff + 12, Endian.big));
+        allLastVobuStarts.add(bd.getUint32(coff + 16, Endian.big));
         final h = bcdV(data[coff + 4]);
         final m = bcdV(data[coff + 5]);
         final s = bcdV(data[coff + 6]);
@@ -862,6 +872,20 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         }
       }
 
+      // Shared trailing "stinger" cells: some discs (e.g. iCarly S1) end every
+      // PGC with the same sub-second cell far past the main content — a single
+      // GOP that shows up as one extra video frame plus an ffmpeg timestamp
+      // discontinuity in the rip. Drop trailing cells with a zero-second BCD
+      // playtime that do not adjoin the previous cell; genuine multi-cell
+      // endings are contiguous and keep their cells.
+      while (lastReal > firstReal &&
+          allCellSecs[lastReal] == 0 &&
+          allFirstSectors[lastReal] != allLastSectors[lastReal - 1] + 1) {
+        onDiag?.call('dropping trailing stinger cell ${lastReal + 1}: '
+            'sectors ${allFirstSectors[lastReal]}..${allLastSectors[lastReal]}');
+        lastReal--;
+      }
+
       final originalToFiltered = List.filled(allCellSecs.length, -1);
       var filteredCount = 0;
       final cellSecs = <int>[];
@@ -869,6 +893,15 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         final first = allFirstSectors[i];
         final last  = allLastSectors[i];
         if (last >= first) cells.add((first: first, last: last));
+        // Interleaved / angle-block cells: report the unused C_PBIT sector
+        // fields so a future VOBU-boundary trim can be validated against
+        // real discs before changing read behavior.
+        final cat = allCategories[i];
+        if (onDiag != null && (cat & 0x34) != 0) {
+          onDiag('cell ${i + 1}: category=0x${cat.toRadixString(16).padLeft(2, '0')} '
+              'first=$first firstIlvuEnd=${allFirstIlvuEnds[i]} '
+              'lastVobuStart=${allLastVobuStarts[i]} last=$last');
+        }
         originalToFiltered[i] = filteredCount++;
         cellSecs.add(allCellSecs[i]);
       }
@@ -892,6 +925,12 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     } catch (_) {}
     return (cells: cells, chapters: chapters);
   }
+
+  /// Test-only wrapper for the private [_scanPgcCells].
+  static ({List<({int first, int last})> cells, List<Duration> chapters})
+      scanPgcCellsForTest(Uint8List data, ByteData bd, int pgc, int durSeconds,
+              {void Function(String)? onDiag}) =>
+          _scanPgcCells(data, bd, pgc, durSeconds, onDiag: onDiag);
 
   /// Reads the PGC Color Lookup Table at pgc + 0xA4 (16 × 4 bytes, YCbCr BT.601).
   static List<int> _readPgcClut(Uint8List data, int pgc) {
