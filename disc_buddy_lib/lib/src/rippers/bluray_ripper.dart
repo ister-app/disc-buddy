@@ -615,7 +615,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     final selSubs  = _resolveIndices(subIndices,   subLangs.length);
 
     final args = [
-      '-loglevel', 'warning', '-stats',
+      '-loglevel', 'repeat+level+warning', '-stats',
       '-analyzeduration', '500M',
       '-probesize', '500M',
       '-playlist', playlistNr.toString(),
@@ -661,7 +661,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         : 'concat:${m2tsFiles.join('|')}';
 
     final args = [
-      '-loglevel', 'warning', '-stats',
+      '-loglevel', 'repeat+level+warning', '-stats',
       '-analyzeduration', '500M',
       '-probesize', '500M',
       '-i', inputArg,

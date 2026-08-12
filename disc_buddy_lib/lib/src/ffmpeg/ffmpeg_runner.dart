@@ -63,7 +63,7 @@ class FfmpegRunner {
     final stderrDone = process.stderr
         .transform(const SystemEncoding().decoder)
         .listen((chunk) {
-      for (final line in chunk.split('\r')) {
+      for (final line in chunk.split(_lineBreak)) {
         final progress = _parseProgress(line);
         if (progress != null) {
           onProgress?.call(progress);
@@ -78,8 +78,9 @@ class FfmpegRunner {
             });
           }
         } else if (line.trim().isNotEmpty) {
-          if (onLog != null) { onLog!(line, isError: true); } else { stderr.writeln(line); }
-          stderrCollect?.add(line);
+          final (line: stripped, :isError) = classifyStderrLine(line);
+          if (onLog != null) { onLog!(stripped, isError: isError); } else { stderr.writeln(stripped); }
+          stderrCollect?.add(stripped);
         }
       }
     }).asFuture<void>();
@@ -101,6 +102,28 @@ class FfmpegRunner {
     completionTimer?.cancel();
     completionSigkillTimer?.cancel();
     return exitCode;
+  }
+
+  static final _lineBreak = RegExp('[\r\n]');
+
+  // Severity tag emitted when ffmpeg runs with `-loglevel repeat+level+...`.
+  // It follows the optional context prefix: `[vist#0:1/... @ 0x...] [warning] msg`
+  // or sits at line start: `[error] msg`.
+  static final _levelTag =
+      RegExp(r'^(\[[^\]]*\] )?\[(info|verbose|debug|warning|error|fatal|panic)\] ');
+
+  /// Classifies an ffmpeg stderr line by its `[level]` tag (see [_levelTag])
+  /// and strips the tag. Lines without a recognized tag — e.g. from an ffmpeg
+  /// invocation without the `level` log flag — are treated as errors, matching
+  /// the historical behavior of `-loglevel warning` where anything on stderr
+  /// was warning-or-worse.
+  static ({String line, bool isError}) classifyStderrLine(String line) {
+    final m = _levelTag.firstMatch(line);
+    if (m == null) return (line: line, isError: true);
+    final level = m.group(2)!;
+    final isError = level == 'error' || level == 'fatal' || level == 'panic';
+    final context = m.group(1) ?? '';
+    return (line: '$context${line.substring(m.end)}', isError: isError);
   }
 
   static FfmpegProgress? _parseProgress(String line) {

@@ -256,7 +256,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
         final chapterFile = await writeChapterMetadata(title.chapters, title.duration);
         final args = [
-          '-loglevel', 'warning', '-stats',
+          '-loglevel', 'repeat+level+warning', '-stats',
           '-fflags', '+genpts',
           '-probesize', '$probeBytes',
           '-analyzeduration', '$analyzeDurUs',
@@ -382,7 +382,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         final analyzeDurUs = title.duration.inMicroseconds + 60 * 1000000;
         final chapterFile  = await writeChapterMetadata(title.chapters, title.duration);
         final args = [
-          '-loglevel', 'warning', '-stats',
+          '-loglevel', 'repeat+level+warning', '-stats',
           '-fflags', '+genpts',
           '-probesize', '$probeBytes',
           '-analyzeduration', '$analyzeDurUs',

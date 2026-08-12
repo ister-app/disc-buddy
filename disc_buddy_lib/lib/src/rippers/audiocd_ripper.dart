@@ -374,7 +374,7 @@ class AudioCDRipper {
     }
 
     final args = [
-      '-loglevel', 'warning',
+      '-loglevel', 'repeat+level+warning',
       '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:0',
       '-c:a', 'flac',
       ..._metadataArgs(meta, track, trackArtist),
@@ -408,7 +408,7 @@ class AudioCDRipper {
     final timeoutDur = Duration(seconds: dur.truncate().toInt() + 30);
 
     final args = [
-      '-loglevel', 'warning', '-stats',
+      '-loglevel', 'repeat+level+warning', '-stats',
       '-f', 'libcdio',
       '-ss', track.startTime.toString(),
       '-i', options.device!,
