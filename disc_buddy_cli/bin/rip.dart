@@ -204,7 +204,8 @@ Future<void> main(List<String> arguments) async {
     llmModel:   cfgOpt('llm-model'),
     titleHint:   cfgOpt('name'),
     seasonHint:  _parseSeasons(cfgOpt('season')),
-    batchAssign:    args['batch-assign'] as bool?,
+    batchAssign:    (args['batch-assign'] as bool?) ??
+        (config['batch-assign'] as bool?),
     subtitleLangs:  _parseSubtitleLangs(cfgOpt('subtitle-langs')),
     lpcmFlac:       args.wasParsed('lpcm-flac')
         ? args['lpcm-flac'] as bool

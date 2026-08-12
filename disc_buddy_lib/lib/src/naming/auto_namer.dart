@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import '../utils/tty.dart';
 import '../audio/transcriber.dart';
@@ -654,9 +655,12 @@ class AutoNamer {
         .map((fp) => fp.summary)
         .where((s) => s.isNotEmpty)
         .toList();
-    final filteredEpisodes = _filterEpisodesBySimilarity(
+    final filteredEpisodes = filterEpisodesBySimilarity(
       episodes,
       allSummaries,
+      // Never filter below the number of files to assign (+ headroom, since
+      // the Jaccard pre-filter can push out an exact-match candidate).
+      maxEpisodes: math.max(25, items.length + 10),
     );
     _log(
       '   Batch assignment: episodes before filter=${episodes.length}, '
@@ -923,7 +927,7 @@ class AutoNamer {
   /// [summaries], using Jaccard word similarity on lowercased text.
   /// Returns the original list unchanged when there are no summaries or the
   /// list is already within the limit.
-  static List<({int season, EpisodeInfo ep})> _filterEpisodesBySimilarity(
+  static List<({int season, EpisodeInfo ep})> filterEpisodesBySimilarity(
     List<({int season, EpisodeInfo ep})> episodes,
     List<String> summaries, {
     int maxEpisodes = 25,
