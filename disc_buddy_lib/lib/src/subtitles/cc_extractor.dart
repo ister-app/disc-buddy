@@ -339,6 +339,9 @@ class Eia608Decoder {
   bool _isRollUp  = false;
   int  _ruLines   = 2;
 
+  // Whether an <i> tag is currently open in _lineBuf (set by mid-row codes).
+  bool _italic = false;
+
   // Timestamp of the last RCL (Resume Caption Loading). Used to tell an erase
   // that is part of a caption load (RCL+erase at the same instant — this
   // disc emits an EDM in every load) from a standalone erase that blanks the
@@ -415,7 +418,8 @@ class Eia608Decoder {
         case 0x2B: // RTD — Resume Text Display
           break;
 
-        case 0x21: // BS — Backspace
+        case 0x21: // BS — Backspace (may clip a char of an emitted <i> tag;
+                   // accepted: BS directly after a mid-row code is rare)
           if (_lineBuf.isNotEmpty) {
             final s = _lineBuf.toString();
             _lineBuf
@@ -487,7 +491,28 @@ class Eia608Decoder {
       return;
     }
 
-    // Mid-row codes (styling): b1 == 0x11 or 0x19, b2 == 0x20–0x2F — ignore.
+    // Mid-row codes (styling): b1 == 0x11 or 0x19, b2 == 0x20–0x2F.
+    // A mid-row code occupies a character cell, so it renders as a space.
+    // 0x2E/0x2F turn italics on; any other (color) code resets attributes.
+    if ((b1 == 0x11 || b1 == 0x19) && b2 >= 0x20 && b2 <= 0x2F) {
+      final italicsOn = b2 == 0x2E || b2 == 0x2F;
+      if (italicsOn) {
+        // Space before the tag so whitespace stays outside the styled span;
+        // suppressed at line start (would survive _flushLine's trim otherwise).
+        if (_lineBuf.isNotEmpty) _lineBuf.write(' ');
+        if (!_italic) {
+          _lineBuf.write('<i>');
+          _italic = true;
+        }
+      } else {
+        if (_italic) {
+          _lineBuf.write('</i>');
+          _italic = false;
+        }
+        if (_lineBuf.isNotEmpty) _lineBuf.write(' ');
+      }
+      return;
+    }
   }
 
   void _appendChar(int b) {
@@ -500,7 +525,15 @@ class Eia608Decoder {
   }
 
   void _flushLine() {
-    final line = _lineBuf.toString().trim();
+    // Close an italics span left open by a mid-row code; attributes do not
+    // persist across rows. A trailing bare '<i>' (no text after it) is
+    // dropped by the replaceAll below rather than closed.
+    if (_italic) {
+      if (_lineBuf.isNotEmpty) _lineBuf.write('</i>');
+      _italic = false;
+    }
+    final line =
+        _lineBuf.toString().replaceAll('<i></i>', '').replaceAll('<i> </i>', ' ').trim();
     _lineBuf.clear();
     if (line.isNotEmpty) _ndm.add(line);
   }

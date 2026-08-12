@@ -150,6 +150,82 @@ void main() {
     });
   });
 
+  group('mid-row codes', () {
+    // Pop-on load around [body]: RCL (doubled), PAC row 13, body, EOC (doubled).
+    List<(int, int)> popOn(List<(int, int)> body) => [
+          (0x14, 0x20), (0x14, 0x20),
+          (0x14, 0x50),
+          ...body,
+          (0x14, 0x2F), (0x14, 0x2F),
+        ];
+
+    String srtFor(List<(int, int)> body) {
+      final sc = Mpeg2CcScanner();
+      feed(sc, [
+        ...gopWith(userDataA, popOn(body), sec: 0),
+        ...gopWith(userDataA, eraseDisplay(), sec: 4),
+      ]);
+      return sc.decoder.buildSrt();
+    }
+
+    test('renders as a space between words (doubled code → one space)', () {
+      final srt = srtFor([
+        (0x64, 0x6F),               // "do"
+        (0x11, 0x20), (0x11, 0x20), // mid-row white, doubled
+        (0x69, 0x74),               // "it"
+      ]);
+      expect(srt, contains('do it'));
+      expect(srt, isNot(contains('do  it')));
+    });
+
+    test('italics open and close with spaces outside the tags', () {
+      final srt = srtFor([
+        (0x48, 0x69),               // "Hi"
+        (0x11, 0x2E), (0x11, 0x2E), // mid-row italics
+        (0x79, 0x6F),               // "yo"
+        (0x11, 0x20), (0x11, 0x20), // mid-row white — resets italics
+        (0x6F, 0x6B),               // "ok"
+      ]);
+      expect(srt, contains('Hi <i>yo</i> ok'));
+    });
+
+    test('italics running to end of line is closed at flush', () {
+      final srt = srtFor([
+        (0x48, 0x69),               // "Hi"
+        (0x11, 0x2E), (0x11, 0x2E), // italics
+        (0x79, 0x6F),               // "yo"
+      ]);
+      expect(srt, contains('Hi <i>yo</i>'));
+      expect('<i>'.allMatches(srt).length, '</i>'.allMatches(srt).length);
+    });
+
+    test('mid-row at line start emits no leading space', () {
+      final srt = srtFor([
+        (0x11, 0x2E), (0x11, 0x2E), // italics before any text
+        (0x79, 0x6F),               // "yo"
+      ]);
+      expect(srt, contains('\n<i>yo</i>\n'));
+    });
+
+    test('field-2 variant (b1 == 0x19) behaves identically', () {
+      final srt = srtFor([
+        (0x48, 0x69),               // "Hi"
+        (0x19, 0x2E), (0x19, 0x2E), // italics, field-2 encoding
+        (0x79, 0x6F),               // "yo"
+      ]);
+      expect(srt, contains('Hi <i>yo</i>'));
+    });
+
+    test('bare italics code with no following text leaves no dangling tag', () {
+      final srt = srtFor([
+        (0x48, 0x69),               // "Hi"
+        (0x11, 0x2E), (0x11, 0x2E), // italics, then nothing
+      ]);
+      expect(srt, contains('Hi'));
+      expect(srt, isNot(contains('<i>')));
+    });
+  });
+
   group('detectCcPayload', () {
     List<int> payloadOf(List<int> packet) => packet.sublist(4);
 
@@ -315,6 +391,51 @@ void main() {
       final payloadStart = 60 + 4;
       final payloadEnd   = 60 + userDataC(trip).length;
       expect(detectCcPayload(out, payloadStart, payloadEnd), isNull);
+    });
+
+    test('no shifted re-detection after stripping (FF-pair first triple)', () async {
+      // Regression: zeroing only the cc_count byte left variant-C packets
+      // whose first triple is an FF pair re-detectable at a shifted offset
+      // (a triple data byte read as a plausible count). Full-payload zeroing
+      // must leave nothing detectable at any offset.
+      final trip = triples(
+          [(0x14, 0x20), (0x79, 0x6F), (0x75, 0x2E), (0x94, 0x2C), (0x94, 0x2F)],
+          type: 0xFF);
+      // Interleave DTVCC nulls like the real disc: FF pair, FE 00 00, ...
+      final mixed = <int>[];
+      for (var i = 0; i < trip.length; i += 3) {
+        mixed.addAll(trip.sublist(i, i + 3));
+        mixed.addAll([0xFE, 0x00, 0x00]);
+      }
+      final bytes = <int>[
+        ...filler(30),
+        ...userDataC(mixed), ...pic(),
+        ...filler(30),
+      ];
+      final f = File('${tmp.path}/shifted.bin');
+      await f.writeAsBytes(bytes);
+
+      await stripMkvCcUserData(f);
+      final out = await f.readAsBytes();
+
+      // Scan the whole file the way the extractor would: no user_data payload
+      // may be detectable as CC, at its true offset or any shifted one.
+      for (var i = 0; i + 4 < out.length; i++) {
+        if (out[i] == 0x00 && out[i+1] == 0x00 &&
+            out[i+2] == 0x01 && out[i+3] == 0xB2) {
+          var end = out.length;
+          for (var j = i + 4; j + 2 < out.length; j++) {
+            if (out[j] == 0x00 && out[j+1] == 0x00 && out[j+2] == 0x01) {
+              end = j;
+              break;
+            }
+          }
+          expect(detectCcPayload(out, i + 4, end), isNull);
+          // The payload itself must be fully zeroed.
+          expect(out.sublist(i + 4, end).every((b) => b == 0), isTrue);
+        }
+      }
+      expect(out.length, bytes.length);
     });
 
     test('idempotent: second run leaves the file unchanged', () async {

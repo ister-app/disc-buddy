@@ -115,10 +115,13 @@ CcPayloadLayout? detectCcPayload(List<int> data, int start, int end) {
 
 /// Neutralizes EIA-608 CC user_data in the MPEG-2 video stream stored within
 /// [mkvFile], in-place, so players don't show empty "Closed Captions 1-4"
-/// tracks. For signature formats (GA94 / "CC") the 4-byte identifier is zeroed
-/// (historic behavior); for all detected formats the cc_count byte is zeroed
-/// as well, which makes decoders read zero triples — this also covers
-/// signature-less variants whose identifier is already zero.
+/// tracks. The entire detected payload (identifier + count + triples) is
+/// zeroed. Zeroing only the cc_count byte is not enough: the structural
+/// fallback in [detectCcPayload] can then re-detect the packet at a shifted
+/// offset when a leftover triple data byte happens to read as a plausible
+/// count (observed on real discs whose first triple is an FF pair). An
+/// all-zero payload can never form a start code or a valid count, and the
+/// file size is unchanged so Matroska block framing stays intact.
 ///
 /// [chunkSize] is injectable for tests.
 Future<void> stripMkvCcUserData(File mkvFile,
@@ -161,13 +164,9 @@ Future<void> stripMkvCcUserData(File mkvFile,
         final layout = detectCcPayload(buf, payloadStart, payloadEnd);
         if (layout == null) continue;
 
-        if ((buf[payloadStart] == 0x47 && buf[payloadStart + 1] == 0x41) ||
-            (buf[payloadStart] == 0x43 && buf[payloadStart + 1] == 0x43)) {
-          await raf.setPosition(readStart + payloadStart);
-          await raf.writeFrom(Uint8List(4)); // zero the identifier
-        }
-        await raf.setPosition(readStart + payloadStart + layout.countOffset);
-        await raf.writeFrom(Uint8List(1)); // zero cc_count → 0 triples
+        final consumed = layout.tripleStart + layout.ccCount * 3;
+        await raf.setPosition(readStart + payloadStart);
+        await raf.writeFrom(Uint8List(consumed));
       }
 
       scanPos += chunkSize;
