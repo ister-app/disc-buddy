@@ -32,6 +32,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
   final _seasonController = TextEditingController();
   late bool _autoName;
   late bool _batchAssign;
+  bool _showMinor = false;
 
   @override
   void initState() {
@@ -79,6 +80,14 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
 
   Set<String> _computeAutoSelect() => widget.content.suggestion;
 
+  /// Titles currently listed: minor clips (< 2 min, not suggested) are
+  /// collapsed until the user asks for them.
+  List<VideoTitle> get _visibleTitles => _showMinor
+      ? widget.content.titles
+      : widget.content.titles
+          .where((t) => !widget.content.minorKeys.contains(t.displayKey))
+          .toList();
+
   @override
   Widget build(BuildContext context) {
     final ripState = ref.watch(ripStateProvider(widget.entry.id));
@@ -94,6 +103,8 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
             selectedKeys: const {},
           );
 
+    final visible = _visibleTitles;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -101,7 +112,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
           entryId: widget.entry.id,
           discTitle: widget.content.discTitle,
           discType: widget.content.discType,
-          titleCount: widget.content.titles.length,
+          titleCount: visible.length,
         ),
         const Divider(height: 1),
         RipOptionsRow(
@@ -118,7 +129,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
         Expanded(
           child: _TitleList(
             entry: widget.entry,
-            titles: widget.content.titles,
+            titles: visible,
             selectedKeys: selState.selectedKeys,
             configs: selState.configs,
           ),
@@ -128,6 +139,10 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
           entry: widget.entry,
           selState: selState,
           content: widget.content,
+          visibleKeys: visible.map((t) => t.displayKey).toList(),
+          minorCount: widget.content.minorKeys.length,
+          showMinor: _showMinor,
+          onToggleMinor: () => setState(() => _showMinor = !_showMinor),
           nameController: _nameController,
           seasonController: _seasonController,
           autoName: _autoName,
@@ -523,6 +538,10 @@ class _Footer extends ConsumerStatefulWidget {
   final DriveEntry entry;
   final RipTitleSelection selState;
   final VideoDiscContent content;
+  final List<String> visibleKeys;
+  final int minorCount;
+  final bool showMinor;
+  final VoidCallback onToggleMinor;
   final TextEditingController nameController;
   final TextEditingController seasonController;
   final bool autoName;
@@ -533,6 +552,10 @@ class _Footer extends ConsumerStatefulWidget {
     required this.entry,
     required this.selState,
     required this.content,
+    required this.visibleKeys,
+    required this.minorCount,
+    required this.showMinor,
+    required this.onToggleMinor,
     required this.nameController,
     required this.seasonController,
     required this.autoName,
@@ -564,7 +587,7 @@ class _FooterState extends ConsumerState<_Footer> {
           ),
           TextButton(
             style: _compactTextButton,
-            onPressed: () => notifier.selectAll(),
+            onPressed: () => notifier.selectAll(widget.visibleKeys),
             child: const Text('All'),
           ),
           TextButton(
@@ -572,6 +595,14 @@ class _FooterState extends ConsumerState<_Footer> {
             onPressed: () => notifier.deselectAll(),
             child: const Text('None'),
           ),
+          if (widget.minorCount > 0)
+            TextButton(
+              style: _compactTextButton,
+              onPressed: widget.onToggleMinor,
+              child: Text(widget.showMinor
+                  ? 'Hide short'
+                  : '+${widget.minorCount} short'),
+            ),
           const Spacer(),
           if (canExtract) ...[
             Checkbox(

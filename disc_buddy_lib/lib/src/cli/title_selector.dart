@@ -1,5 +1,6 @@
 import '../models/bluray_title.dart';
 import '../models/dvd_title.dart';
+import '../models/video_title.dart';
 
 /// Median of an already-ascending-sorted, non-empty list of seconds.
 /// For an even count, returns the average of the two central values rather than
@@ -500,18 +501,24 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
 // Display filter
 // ---------------------------------------------------------------------------
 
-/// Restricts the title list shown to the user to only those VTS groups that
-/// appear in [suggestion].
+/// Titles shorter than this are treated as minor clips (menu loops, stingers,
+/// promo spots) and hidden from the default list.  Matches MakeMKV's
+/// `minlength` default, so both tools present the same set out of the box.
+const minorTitleDuration = Duration(seconds: 120);
+
+/// Returns the display keys of the titles in [all] that are hidden by default:
+/// shorter than [minorTitleDuration] and not part of [suggestion].
 ///
-/// When a series is detected (≥ 2 suggested titles), VTS groups that contain
-/// none of the suggested titles are hidden — they are typically copy-protection
-/// noise or unrelated content.  For feature films (0–1 suggested title), the
-/// full list is returned unchanged so the user can still pick an alternative.
-List<DvdTitle> filterDisplayDvdTitles(
-    List<DvdTitle> all, List<DvdTitle> suggestion) {
-  if (suggestion.length < 2) return all;
-  final relevantVts = suggestion.map((t) => t.vtsNumber).toSet();
-  return all.where((t) => relevantVts.contains(t.vtsNumber)).toList();
+/// Nothing is removed from the list — the caller decides whether to show these
+/// keys, so a hidden title always stays reachable (unlike a hard filter).
+Set<String> minorTitleKeys(
+    List<VideoTitle> all, List<VideoTitle> suggestion) {
+  final suggested = suggestion.map((t) => t.displayKey).toSet();
+  return all
+      .where((t) =>
+          t.duration < minorTitleDuration && !suggested.contains(t.displayKey))
+      .map((t) => t.displayKey)
+      .toSet();
 }
 
 // ---------------------------------------------------------------------------

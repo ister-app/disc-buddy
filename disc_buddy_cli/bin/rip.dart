@@ -253,7 +253,6 @@ Future<void> main(List<String> arguments) async {
             mountPath:     mountPath,
             errorContext:  'DVD',
             prepareTitles: deduplicateDvdTitles,
-            filterDisplay: filterDisplayDvdTitles,
           );
         case DiscType.bluray:
           await _ripVideoDisc(BlurayRipper(opts),
@@ -308,7 +307,6 @@ Future<void> main(List<String> arguments) async {
             opts:          opts,
             errorContext:  'DVD',
             prepareTitles: deduplicateDvdTitles,
-            filterDisplay: filterDisplayDvdTitles,
           );
         case DiscType.bluray:
           continueLoop = await _ripVideoDisc(BlurayRipper(opts),
@@ -349,9 +347,6 @@ Future<void> main(List<String> arguments) async {
 /// [prepareTitles] — optional pre-processing step applied to the raw title list
 ///                   before display and selection. DVD passes
 ///                   [deduplicateDvdTitles]; Blu-ray uses the default identity.
-/// [filterDisplay] — optional second filter applied after [autoSelect]; receives
-///                   (allTitles, suggestion) and returns the subset to display.
-///                   DVD passes [filterDisplayDvdTitles].
 /// [errorContext]  — label used in mount-error messages ("DVD" / "Blu-ray").
 Future<bool> _ripVideoDisc<T extends VideoTitle>(
   VideoDiscRipper<T> ripper, {
@@ -360,7 +355,6 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
   String? mountPath,
   String errorContext = 'disc',
   List<T> Function(List<T>)? prepareTitles,
-  List<T> Function(List<T>, List<T>)? filterDisplay,
 }) async {
   final isIso = mountPath != null;
 
@@ -384,16 +378,19 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
         ? prepareTitles(result.titles)
         : result.titles;
 
-    final suggestion    = autoSelect(titles);
-    final displayTitles = filterDisplay != null
-        ? filterDisplay(titles, suggestion)
-        : titles;
+    final suggestion = autoSelect(titles);
+
+    // Minor clips are listed only on request, but stay selectable by key.
+    final minorKeys = minorTitleKeys(titles, suggestion);
+    final listed    = titles.where((t) => !minorKeys.contains(t.displayKey));
 
     stdout.writeln('Disc:  $discTitle');
-    stdout.writeln('Titles found: ${displayTitles.length}');
+    stdout.writeln('Titles found: ${listed.length}'
+        '${minorKeys.isEmpty ? '' : ' (+${minorKeys.length} under '
+            '${minorTitleDuration.inSeconds} s, not listed)'}');
     stdout.writeln('');
     stdout.writeln('Available titles:');
-    for (final t in displayTitles) {
+    for (final t in listed) {
       final subLabel = switch (t) {
         DvdTitle(:final mayHaveCc) when mayHaveCc => '  CC',
         _ => '  ${t.subtitleStreamCount.toString().padLeft(2)} sub',
@@ -408,7 +405,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     }
     stdout.writeln('');
 
-    final titleMap   = {for (final t in displayTitles) t.displayKey: t};
+    final titleMap   = {for (final t in titles) t.displayKey: t};
     final suggStr    = suggestion.map((t) => t.displayKey).join(' ');
 
     final List<T> selected;

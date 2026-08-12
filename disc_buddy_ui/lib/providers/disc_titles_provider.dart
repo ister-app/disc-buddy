@@ -118,11 +118,11 @@ VideoDiscContent _buildDvdContent(String discTitle, List<DvdTitle> raw,
     {String? fingerprint}) {
   final deduped = deduplicateDvdTitles(raw);
   final suggestion = autoSelectDvd(deduped);
-  final display = filterDisplayDvdTitles(deduped, suggestion);
   return VideoDiscContent(
     discTitle: discTitle,
-    titles: display,
+    titles: deduped,
     suggestion: suggestion.map((t) => t.displayKey).toSet(),
+    minorKeys: minorTitleKeys(deduped, suggestion),
     discType: DiscType.dvd,
     fingerprint: fingerprint,
   );

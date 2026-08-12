@@ -111,7 +111,7 @@ DvdTitle _applyDvdLangOverrides(
   return DvdTitle(
     vtsNumber: t.vtsNumber,
     pgcIndex: t.pgcIndex,
-    totalAngles: t.totalAngles,
+    pgcCount: t.pgcCount,
     duration: t.duration,
     audioTracks: newAudio,
     subtitleTracks: newSubs,
@@ -302,10 +302,13 @@ class RipStateNotifier extends Notifier<RipState> {
     state = s.copyWith(selectedKeys: autoSelected);
   }
 
-  void selectAll() {
+  /// Selects [keys], or every title when omitted.  The caller passes the keys
+  /// it currently shows, so "All" never selects a collapsed minor clip.
+  void selectAll([Iterable<String>? keys]) {
     final s = state;
     if (s is! RipTitleSelection) return;
-    state = s.copyWith(selectedKeys: s.titles.map((t) => t.displayKey).toSet());
+    state = s.copyWith(
+        selectedKeys: (keys ?? s.titles.map((t) => t.displayKey)).toSet());
   }
 
   void deselectAll() {

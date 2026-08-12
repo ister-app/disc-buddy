@@ -20,6 +20,10 @@ class VideoDiscContent extends DiscContent {
   final Set<String> suggestion;
   final DiscType discType;
 
+  /// Display keys of minor clips (see [minorTitleKeys]), collapsed behind the
+  /// "Show all" button.  They stay in [titles] and remain selectable.
+  final Set<String> minorKeys;
+
   /// Disc identity at scan time (see readDiscFingerprint); null for ISO
   /// inputs and unfingerprintable discs — the pre-rip swap guard is skipped.
   final String? fingerprint;
@@ -28,6 +32,7 @@ class VideoDiscContent extends DiscContent {
     required this.titles,
     required this.suggestion,
     required this.discType,
+    this.minorKeys = const {},
     this.fingerprint,
   });
 }

@@ -94,7 +94,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         return DvdTitle(
           vtsNumber:     t.vtsNumber,
           pgcIndex:      t.pgcIndex,
-          totalAngles:   t.totalAngles,
+          pgcCount:      t.pgcCount,
           duration:      t.duration,
           audioTracks:   audioTracks,
           subtitleTracks: subtitleTracks,
@@ -604,7 +604,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       results.add(DvdTitle(
         vtsNumber:      vtsNum,
         pgcIndex:       pgcIdx,
-        totalAngles:    nrPgc,
+        pgcCount:       nrPgc,
         duration:       Duration(seconds: durSeconds),
         audioTracks:    audioTracks,
         subtitleTracks: subtitleTracks,

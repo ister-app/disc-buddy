@@ -47,8 +47,11 @@ class SubtitleTrack {
 
 class DvdTitle implements VideoTitle {
   final int vtsNumber;    // VTS file number (1-based, for VOB files)
-  final int pgcIndex;     // 0-based PGC index within the VTS (= angle - 1)
-  final int totalAngles;  // number of PGCs in this VTS (1 = no angles)
+  final int pgcIndex;     // 0-based PGC index within the VTS
+  /// Number of PGCs in this VTS (1 = the VTS holds a single title).
+  /// Not the camera-angle count: most discs store unrelated titles (episodes,
+  /// a play-all, extras) as separate PGCs of one VTS.
+  final int pgcCount;
   @override final Duration duration;
   final List<AudioTrack> audioTracks;
   final List<SubtitleTrack> subtitleTracks;
@@ -64,7 +67,7 @@ class DvdTitle implements VideoTitle {
   const DvdTitle({
     required this.vtsNumber,
     required this.pgcIndex,
-    required this.totalAngles,
+    required this.pgcCount,
     required this.duration,
     required this.audioTracks,
     required this.subtitleTracks,
@@ -74,20 +77,22 @@ class DvdTitle implements VideoTitle {
     this.videoHeight = 576,
   });
 
-  /// Display key: "7" or "7.1" for multiple angles.
+  /// Display key: "7", or "7.1" when the VTS holds more than one PGC.
   @override
   String get displayKey =>
-      totalAngles > 1 ? '$vtsNumber.${pgcIndex + 1}' : '$vtsNumber';
+      pgcCount > 1 ? '$vtsNumber.${pgcIndex + 1}' : '$vtsNumber';
 
   /// "HH:MM:SS"
   @override
   String get durationLabel => duration.hmsLabel;
 
-  /// "title_07.mkv" or "title_07_angle2.mkv"
+  /// "title_07.mkv" or "title_07_angle2.mkv".
+  /// The "_angle" infix is a historical name kept for filename stability; it
+  /// really identifies the PGC within the VTS.
   @override
   String get filename {
     final n = vtsNumber.toString().padLeft(2, '0');
-    if (totalAngles > 1) return 'title_${n}_angle${pgcIndex + 1}.mkv';
+    if (pgcCount > 1) return 'title_${n}_angle${pgcIndex + 1}.mkv';
     return 'title_$n.mkv';
   }
 
@@ -111,10 +116,10 @@ class DvdTitle implements VideoTitle {
   bool get mayHaveCc => videoHeight == 480 && subtitleTracks.isEmpty;
   @override bool    get isPrimary           => pgcIndex == 0;
   @override String? get extraInfo =>
-      totalAngles > 1 ? '  (angle ${pgcIndex + 1}/$totalAngles)' : null;
+      pgcCount > 1 ? '  (title ${pgcIndex + 1}/$pgcCount)' : null;
 
   /// Returns true if [key] matches this title's VTS number and this is the
-  /// primary angle — allows users to type "3" to select VTS 3, angle 1.
+  /// first PGC — allows users to type "3" to select VTS 3, PGC 1.
   @override
   bool matchesKey(String key) =>
       vtsNumber.toString() == key && pgcIndex == 0;
