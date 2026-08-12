@@ -31,9 +31,13 @@ class DriveDetector {
     // Step 1: hardware tray state via ioctl (udevadm cannot report this)
     final hw = readDriveStatus(device);
     if (hw == kCdsTrayOpen) {
+      // An open tray and a drive that fell off the bus both report
+      // CDS_TRAY_OPEN; only a transport-level probe separates them.
       return DriveInfo(
         device: device, vendor: vendor, model: model,
-        status: DiscStatus.ejected,
+        status: driveResponds(device)
+            ? DiscStatus.ejected
+            : DiscStatus.unreachable,
       );
     }
     if (hw == kCdsDriveNotReady) {
@@ -54,9 +58,13 @@ class DriveDetector {
     final audioTracks = int.tryParse(props['ID_CDROM_MEDIA_TRACK_COUNT_AUDIO'] ?? '') ?? 0;
 
     if (!hasMedia) {
+      // udev also reports no medium for a drive it can no longer talk to
+      // (its properties simply stop being refreshed), so probe here too.
       return DriveInfo(
         device: device, vendor: vendor, model: model,
-        status: DiscStatus.noDisc,
+        status: driveResponds(device)
+            ? DiscStatus.noDisc
+            : DiscStatus.unreachable,
       );
     }
 

@@ -70,6 +70,7 @@ class DriveListTile extends ConsumerWidget {
       DiscStatus.audioCD => Icons.album,
       DiscStatus.dataDisc => Icons.disc_full,
       DiscStatus.loading => Icons.more_horiz,
+      DiscStatus.unreachable => Icons.error_outline,
       _ => Icons.album_outlined,
     }),
     VirtualFileEntry(:final entry) => Icon(switch (entry) {

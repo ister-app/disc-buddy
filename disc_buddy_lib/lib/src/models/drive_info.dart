@@ -1,4 +1,16 @@
-enum DiscStatus { ejected, loading, noDisc, audioCD, dataDisc, unknown }
+enum DiscStatus {
+  ejected,
+  loading,
+  noDisc,
+  audioCD,
+  dataDisc,
+
+  /// The drive no longer answers at the transport layer (dead SATA/USB link,
+  /// port disabled by the kernel).  Looks like an open tray to
+  /// `CDROM_DRIVE_STATUS`, so it is detected separately — see [driveResponds].
+  unreachable,
+  unknown,
+}
 
 class DriveInfo {
   final String device;
@@ -28,6 +40,7 @@ class DriveInfo {
     DiscStatus.ejected  => '(open / ejected)',
     DiscStatus.loading  => '(loading...)',
     DiscStatus.noDisc   => '(no disc)',
+    DiscStatus.unreachable => '(not responding — check power/cable)',
     DiscStatus.audioCD  => 'Audio CD ($audioCDTracks tracks)',
     DiscStatus.dataDisc => label.isNotEmpty ? label : '(disc present)',
     DiscStatus.unknown  => '(disc present)',

@@ -14,7 +14,10 @@ import 'mkv_panel.dart';
 import 'rip_progress_panel.dart';
 import 'title_selection_panel.dart';
 
-bool _isNoDisc(DiscStatus s) => s == DiscStatus.noDisc || s == DiscStatus.ejected;
+bool _isNoDisc(DiscStatus s) =>
+    s == DiscStatus.noDisc ||
+    s == DiscStatus.ejected ||
+    s == DiscStatus.unreachable;
 bool _isDiscReady(DiscStatus s) =>
     s == DiscStatus.audioCD || s == DiscStatus.dataDisc || s == DiscStatus.unknown;
 
@@ -135,8 +138,8 @@ class _DiscContentView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // For real drives: check if a disc is present.
     if (entry case RealDriveEntry(:final info)) {
-      if (info.status == DiscStatus.noDisc ||
-          info.status == DiscStatus.ejected) {
+      // Never start a scan on a drive that is empty or off the bus.
+      if (_isNoDisc(info.status)) {
         return _NoDiscPlaceholder(status: info.statusLabel);
       }
       if (info.status == DiscStatus.loading) {
