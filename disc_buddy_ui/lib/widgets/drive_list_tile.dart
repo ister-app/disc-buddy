@@ -3,6 +3,7 @@ import 'package:disc_buddy/disc_buddy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/disc_content.dart';
+import '../providers/disc_titles_provider.dart';
 import '../providers/drive_list_provider.dart';
 import '../providers/rip_state_provider.dart';
 import '../models/rip_state.dart';
@@ -96,6 +97,8 @@ class DriveListTile extends ConsumerWidget {
   Future<void> _eject(DriveEntry entry, WidgetRef ref) async {
     if (entry is RealDriveEntry) {
       await Process.run('eject', [entry.info.device]);
+      // Flush the stale scan immediately instead of waiting for the next poll.
+      ref.invalidate(discTitlesProvider(entry.id));
     } else if (entry is VirtualFileEntry) {
       ref.read(virtualEntriesProvider.notifier).remove(entry.entry.toString());
     }

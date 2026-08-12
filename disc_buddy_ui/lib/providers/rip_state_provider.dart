@@ -7,6 +7,16 @@ import '../models/rip_state.dart';
 import '../models/settings.dart';
 import 'settings_provider.dart';
 
+/// Runs the disc-swap check in a short-lived isolate (the audio path uses a
+/// blocking SG_IO ioctl). Top-level so the Isolate.run closure captures only
+/// these sendable parameters — inside a RipStateNotifier method it would
+/// capture `this`, whose ReceivePort cannot cross an isolate boundary.
+Future<void> _verifyDiscInIsolate(
+    String device, String fingerprint, DiscType discType) {
+  return Isolate.run(
+      () => verifyDiscUnchanged(device, fingerprint, discType: discType));
+}
+
 // ---------------------------------------------------------------------------
 // Isolate message types (all fields must be sendable between isolates)
 // ---------------------------------------------------------------------------
@@ -264,11 +274,13 @@ class RipStateNotifier extends Notifier<RipState> {
 
   Settings get _settings => ref.read(settingsProvider);
 
-  void startTitleSelection(String discTitle, List<VideoTitle> titles, Set<String> autoSelected) {
+  void startTitleSelection(String discTitle, List<VideoTitle> titles, Set<String> autoSelected,
+      {String? fingerprint}) {
     state = RipTitleSelection(
       discTitle: discTitle,
       titles: titles,
       selectedKeys: autoSelected,
+      scanFingerprint: fingerprint,
     );
   }
 
@@ -319,7 +331,8 @@ class RipStateNotifier extends Notifier<RipState> {
     if (s is! RipTitleSelection) return;
     final selected = s.titles.where((t) => s.selectedKeys.contains(t.displayKey)).toList();
     if (selected.isEmpty) return;
-    state = RipNamingStep(discTitle: s.discTitle, selectedTitles: selected, configs: s.configs);
+    state = RipNamingStep(discTitle: s.discTitle, selectedTitles: selected, configs: s.configs,
+        scanFingerprint: s.scanFingerprint);
   }
 
   void proceedToSubtitles({String? nameHint, List<int> seasons = const [], bool? autoName, bool? batchAssign}) {
@@ -333,6 +346,7 @@ class RipStateNotifier extends Notifier<RipState> {
       seasons: seasons,
       autoName: autoName,
       batchAssign: batchAssign,
+      scanFingerprint: s.scanFingerprint,
     );
   }
 
@@ -350,6 +364,7 @@ class RipStateNotifier extends Notifier<RipState> {
       autoName: s.autoName,
       batchAssign: s.batchAssign,
       overwrite: overwrite,
+      scanFingerprint: s.scanFingerprint,
     );
   }
 
@@ -367,10 +382,12 @@ class RipStateNotifier extends Notifier<RipState> {
       subtitleLangs: langs,
       batchAssign: s.batchAssign,
       overwrite: overwrite,
+      scanFingerprint: s.scanFingerprint,
     );
   }
 
-  void startRipDirect(String discTitle, List<VideoTitle> selected) {
+  void startRipDirect(String discTitle, List<VideoTitle> selected,
+      {String? fingerprint}) {
     _startRip(
       discTitle: discTitle,
       selectedTitles: selected,
@@ -379,6 +396,7 @@ class RipStateNotifier extends Notifier<RipState> {
       seasons: const [],
       extractSubtitles: false,
       subtitleLangs: '',
+      scanFingerprint: fingerprint,
     );
   }
 
@@ -386,7 +404,19 @@ class RipStateNotifier extends Notifier<RipState> {
     DiscMetadata metadata,
     List<int> tracks, {
     Set<String>? overwrite,
+    String? scanFingerprint,
   }) async {
+    // Guard: refuse if the disc was swapped between scan and rip.
+    if (devicePath.startsWith('/dev/') && scanFingerprint != null) {
+      try {
+        await _verifyDiscInIsolate(
+            devicePath, scanFingerprint, DiscType.audioCD);
+      } on DiscChangedException catch (e) {
+        _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
+        return;
+      }
+    }
+
     final logs = <String>[];
     state = RipAudioCdProgress(metadata: metadata, selectedTracks: tracks);
 
@@ -432,9 +462,9 @@ class RipStateNotifier extends Notifier<RipState> {
       if (ref.read(loopEnabledProvider(devicePath)) &&
           devicePath.startsWith('/dev/')) {
         await Process.run('eject', [devicePath]);
-        _emit(LoopWaiting(lastOutputFiles: []));
+        _emit(LoopWaiting(lastOutputFiles: [], log: List.from(logs)));
       } else {
-        _emit(RipCompleted([]));
+        _emit(RipCompleted([], log: List.from(logs)));
       }
     } catch (e) {
       _emit(RipError(e.toString()));
@@ -494,7 +524,7 @@ class RipStateNotifier extends Notifier<RipState> {
         appendLog('Subtitle extraction complete.');
       }
 
-      _emit(RipCompleted([destPath]));
+      _emit(RipCompleted([destPath], log: List.from(logs)));
     } catch (e) {
       _emit(RipError(e.toString()));
     }
@@ -640,7 +670,7 @@ class RipStateNotifier extends Notifier<RipState> {
       }
 
       namer?.close();
-      _emit(RipCompleted(outputFiles));
+      _emit(RipCompleted(outputFiles, log: List.from(logs)));
     } catch (e) {
       _emit(RipError(e.toString()));
     }
@@ -657,6 +687,7 @@ class RipStateNotifier extends Notifier<RipState> {
     bool? autoName,
     bool? batchAssign,
     Set<String>? overwrite,
+    String? scanFingerprint,
   }) {
     state = RipInProgress(discTitle: discTitle, selectedTitles: selectedTitles);
     _runRip(
@@ -670,6 +701,7 @@ class RipStateNotifier extends Notifier<RipState> {
       autoName: autoName,
       batchAssign: batchAssign,
       overwrite: overwrite,
+      scanFingerprint: scanFingerprint,
     );
   }
 
@@ -684,6 +716,7 @@ class RipStateNotifier extends Notifier<RipState> {
     bool? autoName,
     bool? batchAssign,
     Set<String>? overwrite,
+    String? scanFingerprint,
   }) async {
     final logs = <String>[];
 
@@ -744,9 +777,9 @@ class RipStateNotifier extends Notifier<RipState> {
             if (ref.read(loopEnabledProvider(devicePath)) &&
                 devicePath.startsWith('/dev/')) {
               await Process.run('eject', [devicePath]);
-              _emit(LoopWaiting(lastOutputFiles: files));
+              _emit(LoopWaiting(lastOutputFiles: files, log: List.from(logs)));
             } else {
-              _emit(RipCompleted(files));
+              _emit(RipCompleted(files, log: List.from(logs)));
             }
             return;
           case _RipFail(:final error):
@@ -764,6 +797,18 @@ class RipStateNotifier extends Notifier<RipState> {
         });
       } else {
         final discType = await DiscTypeDetector.detect(devicePath);
+        // Guard: the titles being ripped were parsed at scan time — refuse if
+        // the disc has been swapped since (their cell/playlist data would be
+        // applied to the wrong disc).
+        if (devicePath.startsWith('/dev/') && scanFingerprint != null) {
+          try {
+            await _verifyDiscInIsolate(devicePath, scanFingerprint, discType);
+          } on DiscChangedException catch (e) {
+            receivePort.close();
+            _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
+            return;
+          }
+        }
         await runInIsolate(discType);
       }
     } catch (e) {
@@ -802,7 +847,7 @@ class RipStateNotifier extends Notifier<RipState> {
   void stopLoop() {
     ref.read(loopEnabledProvider(devicePath).notifier).disable();
     final s = state;
-    if (s is LoopWaiting) state = RipCompleted(s.lastOutputFiles);
+    if (s is LoopWaiting) state = RipCompleted(s.lastOutputFiles, log: s.log);
   }
 
   void reset() {

@@ -28,11 +28,16 @@ class RipTitleSelection extends RipState {
   final Set<String> selectedKeys;
   final Map<String, TitleConfig> configs;  // keyed by displayKey
 
+  /// Disc identity captured at scan time; verified again right before the
+  /// rip starts so a swapped disc is refused.
+  final String? scanFingerprint;
+
   RipTitleSelection({
     required this.discTitle,
     required this.titles,
     required this.selectedKeys,
     this.configs = const {},
+    this.scanFingerprint,
   });
   RipTitleSelection copyWith({
     Set<String>? selectedKeys,
@@ -42,6 +47,7 @@ class RipTitleSelection extends RipState {
     titles: titles,
     selectedKeys: selectedKeys ?? this.selectedKeys,
     configs: configs ?? this.configs,
+    scanFingerprint: scanFingerprint,
   );
 }
 
@@ -51,12 +57,14 @@ class RipNamingStep extends RipState {
   final Map<String, TitleConfig> configs;
   final String? nameHint;
   final List<int> seasons;
+  final String? scanFingerprint;
   RipNamingStep({
     required this.discTitle,
     required this.selectedTitles,
     this.configs = const {},
     this.nameHint,
     this.seasons = const [],
+    this.scanFingerprint,
   });
 }
 
@@ -72,6 +80,7 @@ class RipSubtitleStep extends RipState {
   final bool? autoName;
   /// null = use settings value; non-null = override settings batchAssign.
   final bool? batchAssign;
+  final String? scanFingerprint;
   RipSubtitleStep({
     required this.discTitle,
     required this.selectedTitles,
@@ -82,6 +91,7 @@ class RipSubtitleStep extends RipState {
     this.subtitleLangs = '',
     this.autoName,
     this.batchAssign,
+    this.scanFingerprint,
   });
 }
 
@@ -174,7 +184,8 @@ class MkvProcessing extends RipState {
 
 class RipCompleted extends RipState {
   final List<String> outputFiles;
-  RipCompleted(this.outputFiles);
+  final List<String> log;
+  RipCompleted(this.outputFiles, {this.log = const []});
 }
 
 class RipError extends RipState {
@@ -182,7 +193,16 @@ class RipError extends RipState {
   RipError(this.message);
 }
 
+/// The disc in the drive is not the disc that was scanned; the rip was
+/// refused. The UI should offer a rescan.
+class RipDiscMismatch extends RipState {
+  final String? expected;
+  final String? actual;
+  RipDiscMismatch({this.expected, this.actual});
+}
+
 class LoopWaiting extends RipState {
   final List<String> lastOutputFiles;
-  LoopWaiting({required this.lastOutputFiles});
+  final List<String> log;
+  LoopWaiting({required this.lastOutputFiles, this.log = const []});
 }

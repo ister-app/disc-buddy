@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'package:disc_buddy/disc_buddy.dart';
@@ -58,21 +59,70 @@ final virtualEntriesProvider = NotifierProvider<VirtualEntriesNotifier, List<Vir
   VirtualEntriesNotifier.new,
 );
 
-/// Real drives polled every 2 seconds.
+/// Real drives, refreshed on udev block-device events (near-instant reaction
+/// to disc insert/eject/swap) with a periodic poll as safety net — tray-status
+/// ioctl changes don't always emit udev events.
 /// DriveDetector.detect() contains synchronous FFI (CDROM_DRIVE_STATUS ioctl)
 /// which can block while drives are under heavy I/O. Running in a background
 /// isolate keeps the UI thread responsive during ripping.
-final realDrivesProvider = StreamProvider<List<DriveInfo>>((ref) async* {
-  while (true) {
-    try {
-      final drives = await Isolate.run(DriveDetector.detect);
-      yield drives;
-    } catch (e) {
-      stderr.writeln('DriveDetector error: $e');
-      yield [];
+final realDrivesProvider = StreamProvider<List<DriveInfo>>((ref) {
+  final controller = StreamController<List<DriveInfo>>();
+  var refreshing = false;
+  var pending = false;
+
+  Future<void> refresh() async {
+    // Reentrancy guard: coalesce triggers that arrive during a detect.
+    if (refreshing) {
+      pending = true;
+      return;
     }
-    await Future.delayed(const Duration(seconds: 2));
+    refreshing = true;
+    try {
+      do {
+        pending = false;
+        try {
+          final drives = await Isolate.run(DriveDetector.detect);
+          if (!controller.isClosed) controller.add(drives);
+        } catch (e) {
+          stderr.writeln('DriveDetector error: $e');
+          if (!controller.isClosed) controller.add([]);
+        }
+      } while (pending);
+    } finally {
+      refreshing = false;
+    }
   }
+
+  Process? monitor;
+  Timer? debounce;
+  Timer? pollTimer;
+  () async {
+    try {
+      monitor = await Process.start(
+          'udevadm', ['monitor', '--udev', '--subsystem-match=block']);
+      monitor!.stdout
+          .transform(const SystemEncoding().decoder)
+          .transform(const LineSplitter())
+          .listen((_) {
+        debounce?.cancel();
+        debounce = Timer(const Duration(milliseconds: 300), refresh);
+      });
+      unawaited(monitor!.stderr.drain<void>());
+    } catch (_) {
+      monitor = null; // no udevadm — polling carries the load alone
+    }
+    pollTimer = Timer.periodic(
+        Duration(seconds: monitor != null ? 5 : 2), (_) => refresh());
+  }();
+  refresh();
+
+  ref.onDispose(() {
+    pollTimer?.cancel();
+    debounce?.cancel();
+    monitor?.kill();
+    controller.close();
+  });
+  return controller.stream;
 });
 
 /// Combined list of all drive entries (real + virtual).

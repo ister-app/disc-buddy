@@ -17,11 +17,13 @@ const _compactTextButton = ButtonStyle(
 class AudioCdPanel extends ConsumerStatefulWidget {
   final DriveEntry entry;
   final DiscMetadata metadata;
+  final String? fingerprint;
 
   const AudioCdPanel({
     super.key,
     required this.entry,
     required this.metadata,
+    this.fingerprint,
   });
 
   @override
@@ -150,7 +152,8 @@ class _AudioCdPanelState extends ConsumerState<AudioCdPanel> {
     if (!mounted) return;
     ref
         .read(ripStateProvider(widget.entry.id).notifier)
-        .startAudioCdRip(meta, tracks, overwrite: overwrite);
+        .startAudioCdRip(meta, tracks, overwrite: overwrite,
+            scanFingerprint: widget.fingerprint);
   }
 
   @override

@@ -54,6 +54,30 @@ class DriveDetailPanel extends ConsumerWidget {
       }
     });
 
+    // Disc-swap guard tripped: tell the user and rescan the current disc.
+    ref.listen<RipState>(ripStateProvider(entry.id), (prev, next) async {
+      if (next is! RipDiscMismatch || prev is RipDiscMismatch) return;
+      if (!ref.read(loopEnabledProvider(entry.id))) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Disc changed'),
+            content: const Text(
+                'The disc in the drive is not the disc that was scanned, '
+                'so the rip was not started. The drive will be rescanned.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Rescan'),
+              ),
+            ],
+          ),
+        );
+      }
+      ref.invalidate(discTitlesProvider(entry.id));
+      ref.read(ripStateProvider(entry.id).notifier).reset();
+    });
+
     // In loop mode: auto-start rip when a new disc is scanned.
     ref.listen<AsyncValue<DiscContent?>>(discTitlesProvider(entry.id), (prev, next) {
       final rip = ref.read(ripStateProvider(entry.id));
@@ -65,12 +89,14 @@ class DriveDetailPanel extends ConsumerWidget {
                 .where((t) => value.suggestion.contains(t.displayKey))
                 .toList();
             ref.read(ripStateProvider(entry.id).notifier)
-                .startRipDirect(value.discTitle, selected);
+                .startRipDirect(value.discTitle, selected,
+                    fingerprint: value.fingerprint);
           } else if (value is AudioCdContent) {
             final tracks =
                 List.generate(value.metadata.tracks.length, (i) => i + 1);
             ref.read(ripStateProvider(entry.id).notifier)
-                .startAudioCdRip(value.metadata, tracks);
+                .startAudioCdRip(value.metadata, tracks,
+                    scanFingerprint: value.fingerprint);
           }
         default:
           break;
@@ -130,6 +156,7 @@ class _DiscContentView extends ConsumerWidget {
           AudioCdContent(:final metadata) => AudioCdPanel(
             entry: entry,
             metadata: metadata,
+            fingerprint: content.fingerprint,
           ),
           VideoDiscContent() => TitleSelectionPanel(
             entry: entry,
@@ -242,9 +269,20 @@ class _CompletedPanel extends ConsumerWidget {
                     // triggers swaps the panel), making `ref` unsafe afterwards.
                     final notifier =
                         ref.read(ripStateProvider(devicePath).notifier);
+                    // The container outlives this panel, unlike `ref`.
+                    final container = ProviderScope.containerOf(context);
                     await Process.run('eject', [info.device]);
+                    container.invalidate(discTitlesProvider(devicePath));
                     notifier.reset();
                   },
+                ),
+              ],
+              if (state.log.isNotEmpty) ...[
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  label: const Text('View log'),
+                  onPressed: () => _showLogDialog(context, state.log),
                 ),
               ],
             ],
@@ -253,6 +291,26 @@ class _CompletedPanel extends ConsumerWidget {
       ),
     );
   }
+}
+
+void _showLogDialog(BuildContext context, List<String> log) {
+  showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Rip log'),
+      content: SizedBox(
+        width: 700,
+        height: 500,
+        child: LogView(log: log),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _ErrorPanel extends ConsumerWidget {
@@ -312,11 +370,24 @@ class _LoopWaitingPanel extends ConsumerWidget {
             )),
           ],
           const SizedBox(height: 24),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.stop_circle_outlined),
-            label: const Text('Stop loop'),
-            onPressed: () =>
-                ref.read(ripStateProvider(devicePath).notifier).stopLoop(),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: const Text('Stop loop'),
+                onPressed: () =>
+                    ref.read(ripStateProvider(devicePath).notifier).stopLoop(),
+              ),
+              if (state.log.isNotEmpty) ...[
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  label: const Text('View log'),
+                  onPressed: () => _showLogDialog(context, state.log),
+                ),
+              ],
+            ],
           ),
         ],
       ),

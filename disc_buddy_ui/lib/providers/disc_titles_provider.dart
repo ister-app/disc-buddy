@@ -38,32 +38,40 @@ Future<DiscContent?> _loadContent(String devicePath, Settings settings) async {
 
   // Detect disc type for optical drives.
   final discType = await DiscTypeDetector.detect(devicePath);
+  // Capture the disc identity alongside the scan so the pre-rip guard can
+  // detect a swap between scanning and ripping.
+  final fingerprint = discType == DiscType.unknown
+      ? null
+      : await readDiscFingerprint(devicePath, discType: discType);
   return switch (discType) {
-    DiscType.audioCD => _loadAudioCD(options),
-    DiscType.dvd => _loadVideoDisc(options, DiscType.dvd),
-    DiscType.bluray => _loadVideoDisc(options, DiscType.bluray),
+    DiscType.audioCD => _loadAudioCD(options, fingerprint),
+    DiscType.dvd => _loadVideoDisc(options, DiscType.dvd, fingerprint),
+    DiscType.bluray => _loadVideoDisc(options, DiscType.bluray, fingerprint),
     _ => EmptyDisc(),
   };
 }
 
-Future<DiscContent?> _loadAudioCD(RipOptions options) async {
+Future<DiscContent?> _loadAudioCD(RipOptions options, String? fingerprint) async {
   final ripper = AudioCDRipper(options);
   final meta = await ripper.loadMetadata();
   if (meta == null) return null;
-  return AudioCdContent(meta);
+  return AudioCdContent(meta, fingerprint: fingerprint);
 }
 
-Future<DiscContent?> _loadVideoDisc(RipOptions options, DiscType type) async {
+Future<DiscContent?> _loadVideoDisc(
+    RipOptions options, DiscType type, String? fingerprint) async {
   if (type == DiscType.dvd) {
     final ripper = DVDRipper(options);
     final result = await ripper.loadTitles();
     if (result == null) return null;
-    return _buildDvdContent(result.discTitle, result.titles);
+    return _buildDvdContent(result.discTitle, result.titles,
+        fingerprint: fingerprint);
   } else {
     final ripper = BlurayRipper(options);
     final result = await ripper.loadTitles();
     if (result == null) return null;
-    return _buildBlurayContent(result.discTitle, result.titles);
+    return _buildBlurayContent(result.discTitle, result.titles,
+        fingerprint: fingerprint);
   }
 }
 
@@ -106,7 +114,8 @@ Future<DiscContent?> _loadVideoDiscFromMount(RipOptions options, String mountPat
   }
 }
 
-VideoDiscContent _buildDvdContent(String discTitle, List<DvdTitle> raw) {
+VideoDiscContent _buildDvdContent(String discTitle, List<DvdTitle> raw,
+    {String? fingerprint}) {
   final deduped = deduplicateDvdTitles(raw);
   final suggestion = autoSelectDvd(deduped);
   final display = filterDisplayDvdTitles(deduped, suggestion);
@@ -115,16 +124,19 @@ VideoDiscContent _buildDvdContent(String discTitle, List<DvdTitle> raw) {
     titles: display,
     suggestion: suggestion.map((t) => t.displayKey).toSet(),
     discType: DiscType.dvd,
+    fingerprint: fingerprint,
   );
 }
 
-VideoDiscContent _buildBlurayContent(String discTitle, List<BlurayTitle> raw) {
+VideoDiscContent _buildBlurayContent(String discTitle, List<BlurayTitle> raw,
+    {String? fingerprint}) {
   final suggestion = autoSelectBluray(raw);
   return VideoDiscContent(
     discTitle: discTitle,
     titles: raw,
     suggestion: suggestion.map((t) => t.displayKey).toSet(),
     discType: DiscType.bluray,
+    fingerprint: fingerprint,
   );
 }
 

@@ -101,7 +101,7 @@ class _VideoRipProgress extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
-        Expanded(child: _LogView(log: ripState.log)),
+        Expanded(child: LogView(log: ripState.log)),
       ],
     );
   }
@@ -184,7 +184,7 @@ class _AudioRipProgress extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
-        Expanded(child: _LogView(log: ripState.log)),
+        Expanded(child: LogView(log: ripState.log)),
       ],
     );
   }
@@ -227,25 +227,25 @@ class _MkvProgress extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
-        Expanded(child: _LogView(log: ripState.log)),
+        Expanded(child: LogView(log: ripState.log)),
       ],
     );
   }
 }
 
-class _LogView extends StatefulWidget {
+class LogView extends StatefulWidget {
   final List<String> log;
-  const _LogView({required this.log});
+  const LogView({super.key, required this.log});
 
   @override
-  State<_LogView> createState() => _LogViewState();
+  State<LogView> createState() => _LogViewState();
 }
 
-class _LogViewState extends State<_LogView> {
+class _LogViewState extends State<LogView> {
   final _scrollController = ScrollController();
 
   @override
-  void didUpdateWidget(_LogView old) {
+  void didUpdateWidget(LogView old) {
     super.didUpdateWidget(old);
     if (widget.log.length != old.log.length) {
       WidgetsBinding.instance.addPostFrameCallback((_) {

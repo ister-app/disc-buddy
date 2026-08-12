@@ -45,7 +45,8 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
       final state = ref.read(ripStateProvider(widget.entry.id));
       if (state is RipIdle) {
         final autoSelected = _computeAutoSelect();
-        notifier.startTitleSelection(widget.content.discTitle, widget.content.titles, autoSelected);
+        notifier.startTitleSelection(widget.content.discTitle, widget.content.titles, autoSelected,
+            fingerprint: widget.content.fingerprint);
       }
     });
   }
@@ -62,6 +63,7 @@ class _TitleSelectionPanelState extends ConsumerState<TitleSelectionPanel> {
             widget.content.discTitle,
             widget.content.titles,
             _computeAutoSelect(),
+            fingerprint: widget.content.fingerprint,
           );
         }
       });

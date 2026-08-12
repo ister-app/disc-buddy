@@ -7,7 +7,11 @@ class EmptyDisc extends DiscContent {}
 
 class AudioCdContent extends DiscContent {
   final DiscMetadata metadata;
-  AudioCdContent(this.metadata);
+
+  /// Disc identity at scan time (see readDiscFingerprint); null for
+  /// unfingerprintable discs — the pre-rip swap guard is skipped then.
+  final String? fingerprint;
+  AudioCdContent(this.metadata, {this.fingerprint});
 }
 
 class VideoDiscContent extends DiscContent {
@@ -15,11 +19,16 @@ class VideoDiscContent extends DiscContent {
   final List<VideoTitle> titles;
   final Set<String> suggestion;
   final DiscType discType;
+
+  /// Disc identity at scan time (see readDiscFingerprint); null for ISO
+  /// inputs and unfingerprintable discs — the pre-rip swap guard is skipped.
+  final String? fingerprint;
   VideoDiscContent({
     required this.discTitle,
     required this.titles,
     required this.suggestion,
     required this.discType,
+    this.fingerprint,
   });
 }
 
