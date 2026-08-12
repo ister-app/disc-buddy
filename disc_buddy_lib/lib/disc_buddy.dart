@@ -15,6 +15,7 @@ export 'src/rippers/bluray_ripper.dart';
 export 'src/rippers/audiocd_ripper.dart';
 export 'src/device/drive_detector.dart';
 export 'src/device/disc_type_detector.dart';
+export 'src/device/disc_fingerprint.dart';
 export 'src/ffmpeg/ffmpeg_runner.dart' show FfmpegProgress, ProgressCallback;
 export 'src/utils/xdg.dart';
 export 'src/utils/config_loader.dart';

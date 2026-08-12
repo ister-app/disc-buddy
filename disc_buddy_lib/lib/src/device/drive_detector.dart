@@ -66,6 +66,7 @@ class DriveDetector {
         device: device, vendor: vendor, model: model,
         status: DiscStatus.audioCD,
         audioCDTracks: audioTracks,
+        mediaId: mediaIdFromProps(props),
       );
     }
 
@@ -76,6 +77,7 @@ class DriveDetector {
       device: device, vendor: vendor, model: model,
       status: DiscStatus.dataDisc,
       label: label,
+      mediaId: mediaIdFromProps(props),
     );
   }
 

@@ -273,9 +273,13 @@ Future<void> main(List<String> arguments) async {
   // On the first run with an interactive-menu drive the disc is already present,
   // so _waitForDisc returns immediately.  On subsequent iterations (afterEject)
   // the function first waits for the tray to empty, then waits for a new disc.
-  var looping = false;
+  var looping  = false;
+  var skipWait = false; // set after a disc-swap rescan: the new disc is present
   while (true) {
-    if (rawInput.isNotEmpty || looping) await _waitForDisc(device, afterEject: looping);
+    if (!skipWait && (rawInput.isNotEmpty || looping)) {
+      await _waitForDisc(device, afterEject: looping);
+    }
+    skipWait = false;
 
     // Detect without mounting; one mount cycle covers scan + rip.
     final discType    = await DiscTypeDetector.detect(device);
@@ -294,26 +298,36 @@ Future<void> main(List<String> arguments) async {
     stdout.writeln('');
 
     bool continueLoop;
-    switch (discType) {
-      case DiscType.audioCD:
-        continueLoop = await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
-      case DiscType.dvd:
-        continueLoop = await _ripVideoDisc(DVDRipper(opts),
-          autoSelect:    autoSelectDvd,
-          opts:          opts,
-          errorContext:  'DVD',
-          prepareTitles: deduplicateDvdTitles,
-          filterDisplay: filterDisplayDvdTitles,
-        );
-      case DiscType.bluray:
-        continueLoop = await _ripVideoDisc(BlurayRipper(opts),
-          autoSelect:   autoSelectBluray,
-          opts:         opts,
-          errorContext: 'Blu-ray',
-        );
-      case DiscType.unknown:
-        stderr.writeln('Unknown disc type — cannot rip.');
-        continueLoop = false;
+    try {
+      switch (discType) {
+        case DiscType.audioCD:
+          continueLoop = await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
+        case DiscType.dvd:
+          continueLoop = await _ripVideoDisc(DVDRipper(opts),
+            autoSelect:    autoSelectDvd,
+            opts:          opts,
+            errorContext:  'DVD',
+            prepareTitles: deduplicateDvdTitles,
+            filterDisplay: filterDisplayDvdTitles,
+          );
+        case DiscType.bluray:
+          continueLoop = await _ripVideoDisc(BlurayRipper(opts),
+            autoSelect:   autoSelectBluray,
+            opts:         opts,
+            errorContext: 'Blu-ray',
+          );
+        case DiscType.unknown:
+          stderr.writeln('Unknown disc type — cannot rip.');
+          continueLoop = false;
+      }
+    } on DiscChangedException {
+      // The exception unwound through withMountedDisc, so the stale mount is
+      // already cleaned up; re-detect the disc that is now in the drive.
+      stderr.writeln('Error: the disc in the drive is not the disc that was '
+          'scanned — it was swapped during selection. Rescanning...');
+      stderr.writeln('');
+      skipWait = true;
+      continue;
     }
 
     if (!continueLoop) break;
@@ -351,6 +365,17 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
   final isIso = mountPath != null;
 
   Future<bool> doWork(String? mp) async {
+    // Fingerprint the disc before scanning so a swap during the interactive
+    // prompts can be detected right before the rip starts.
+    String? scanFp;
+    if (!isIso && (opts.device?.startsWith('/dev/') ?? false)) {
+      scanFp = await readDiscFingerprint(opts.device!);
+      if (scanFp == null) {
+        stderr.writeln('Warning: disc has no readable identity — '
+            'swap protection unavailable.');
+      }
+    }
+
     final result = await ripper.loadTitles(mountPath: mp);
     if (result == null) throw const _RipAborted();
 
@@ -444,6 +469,9 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
         ? await _askNamingHints(opts)
         : null;
 
+    // Guard: refuse if the disc was swapped during the prompts above.
+    if (scanFp != null) await verifyDiscUnchanged(opts.device!, scanFp);
+
     await ripper.rip(discTitle, selected, mountPath: mp);
 
     final outDir = Directory(p.join(opts.outputDir, sanitizeFilename(discTitle)));
@@ -484,6 +512,11 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 Future<bool> _ripAudioCD(RipOptions opts) async {
   final ripper = AudioCDRipper(opts);
 
+  String? scanFp;
+  if (opts.device?.startsWith('/dev/') ?? false) {
+    scanFp = await readDiscFingerprint(opts.device!, discType: DiscType.audioCD);
+  }
+
   final meta = await ripper.loadMetadata();
   if (meta == null) throw const _RipAborted();
 
@@ -504,6 +537,12 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
   }
 
   final selected = Menu.selectTracks(meta.tracks.length);
+
+  // Guard: refuse if the disc was swapped during track selection.
+  if (scanFp != null) {
+    await verifyDiscUnchanged(opts.device!, scanFp, discType: DiscType.audioCD);
+  }
+
   await ripper.rip(meta, selected);
 
   final action = _promptEject(opts);

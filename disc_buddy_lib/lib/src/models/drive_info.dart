@@ -8,6 +8,10 @@ class DriveInfo {
   final int audioCDTracks;
   final String label;
 
+  /// Cheap udev-derived identity of the inserted medium ('' when none).
+  /// Changes when the disc is swapped — used to invalidate stale scans.
+  final String mediaId;
+
   const DriveInfo({
     required this.device,
     required this.vendor,
@@ -15,6 +19,7 @@ class DriveInfo {
     required this.status,
     this.audioCDTracks = 0,
     this.label = '',
+    this.mediaId = '',
   });
 
   String get displayModel => '$vendor $model'.trim();
