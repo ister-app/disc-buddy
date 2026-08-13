@@ -59,7 +59,7 @@ class CcExtractor {
           'CC results may be incomplete.', isError: true);
     }
 
-    final srt = scanner.decoder.buildSrt();
+    final srt = scanner.buildSrt();
     if (srt.isEmpty) {
       _logNoCaptions(scanner);
       return null;
@@ -117,7 +117,7 @@ class CcExtractor {
           'was seen — the source stream may not have been demuxed.', isError: true);
     }
 
-    final srt = scanner.decoder.buildSrt();
+    final srt = scanner.buildSrt();
     if (srt.isEmpty) {
       _logNoCaptions(scanner);
       return null;
@@ -167,10 +167,27 @@ class Mpeg2CcScanner {
   // Previous GOP's drop-frame-corrected timecode, to measure the delta.
   int? _lastGopTicks;
 
-  // Frame counter within current GOP (for sub-second timing).
-  int _frameInGop = 0;
+  // Displayed-field count of the GOP that just ended (fallback for a timecode
+  // discontinuity, and set by _flushGop).
+  int _lastGopFields = 0;
 
-  final Eia608Decoder decoder = Eia608Decoder();
+  // Pictures of the GOP being scanned, in coded order. [tr] is the picture's
+  // temporal_reference (its position in DISPLAY order within the GOP); [fields]
+  // is how long it stays on screen, which is 3 rather than 2 for every other
+  // frame under 3:2 pulldown.
+  final _gopPictures = <_GopPicture>[];
+
+  // CC packets of the GOP being scanned. [picture] is the index in
+  // [_gopPictures] of the picture the packet followed, or -1 when the packet
+  // preceded the first picture (DVD encoders put one packet carrying the whole
+  // GOP right after the GOP header). Null pairs are kept: each pair occupies one
+  // displayed field, so dropping them here would shift every later pair.
+  final _gopPackets = <_CcPacket>[];
+
+  final Eia608Decoder decoder;
+
+  Mpeg2CcScanner({Eia608Decoder? decoder})
+      : decoder = decoder ?? Eia608Decoder();
 
   // Count of user_data packets encountered (useful for diagnosing missing CC).
   int userDataPackets = 0;
@@ -202,12 +219,37 @@ class Mpeg2CcScanner {
       if (type == 0xB8) {
         // group_of_pictures_header — 4 bytes of timecode data follow.
         if (i + 8 > len) break;
+        // The previous GOP is complete: its pictures are all known, so its CC
+        // pairs can be placed on the display timeline and decoded.
+        _flushGop();
         _parseGop(i + 4);
-        _frameInGop = 0;
         i += 8;
       } else if (type == 0x00) {
-        // picture_start_code — count frames within GOP.
-        _frameInGop++;
+        // picture_start_code — temporal_reference is the next 10 bits.
+        if (i + 6 > len) break;
+        // A stream without GOP headers would never flush; cut it into chunks so
+        // the buffer stays bounded and the clock keeps running. Real DVD and
+        // Blu-ray streams always carry GOP headers, so this never fires there.
+        if (_gopPictures.length >= _maxPicturesPerGop) {
+          _flushGop(advanceClock: true);
+        }
+        _gopPictures.add(_GopPicture((_buf[i + 4] << 2) | (_buf[i + 5] >> 6)));
+        i += 4;
+      } else if (type == 0xB5) {
+        // extension_start_code — picture_coding_extension (id 8) carries
+        // repeat_first_field, which is how 3:2 pulldown stretches 12 coded
+        // frames into 15 displayed ones.
+        if (i + 8 > len) break;
+        if ((_buf[i + 4] >> 4) == 8 && _gopPictures.isNotEmpty) {
+          final pictureStructure = _buf[i + 6] & 0x03;
+          final repeatFirstField = (_buf[i + 7] >> 1) & 0x01;
+          _gopPictures.last.fields =
+              pictureStructure == 3 ? 2 + repeatFirstField : 1;
+        }
+        i += 4;
+      } else if (type == 0xB7) {
+        // sequence_end_code — nothing more belongs to this GOP.
+        _flushGop();
         i += 4;
       } else if (type == 0xB2) {
         // user_data — look for CC payload.
@@ -281,9 +323,79 @@ class Mpeg2CcScanner {
     if (_lastGopTicks != null) {
       final delta = ticks - _lastGopTicks!;
       const maxNormalDelta = 150; // ~5s; real DVD GOPs are well under ~0.5s
-      _outputTicks += (delta >= 0 && delta < maxNormalDelta) ? delta : _frameInGop;
+      _outputTicks += (delta >= 0 && delta < maxNormalDelta)
+          ? delta
+          : _lastGopFields ~/ 2;
     }
     _lastGopTicks = ticks;
+  }
+
+  /// Places the CC pairs buffered for the GOP that just ended on the display
+  /// timeline and feeds them to the decoder in display order.
+  ///
+  /// The pairs are one per DISPLAYED FIELD: a DVD encoder emits a single
+  /// user_data right after the GOP header holding a pair for every field of the
+  /// GOP (verified on real discs: the triple count equals the summed field count
+  /// of the GOP's pictures, including the 3:2-pulldown repeats). Timestamping
+  /// them all at the GOP header — as this scanner used to — shows captions up to
+  /// half a second early.
+  /// Far more pictures than any real GOP holds; see the picture_start_code case.
+  static const _maxPicturesPerGop = 600;
+
+  void _flushGop({bool advanceClock = false}) {
+    // Display order: temporal_reference is the picture's position in display
+    // order, so walking the pictures in that order gives each one the field
+    // offset at which it appears on screen.
+    final byDisplayOrder = List<int>.generate(_gopPictures.length, (i) => i)
+      ..sort((a, b) => _gopPictures[a].tr.compareTo(_gopPictures[b].tr));
+    var gopFields = 0;
+    for (final index in byDisplayOrder) {
+      _gopPictures[index].fieldOffset = gopFields;
+      gopFields += _gopPictures[index].fields;
+    }
+
+    // Field offset per pair, then a stable sort so packets that map to the same
+    // field keep the order they were transmitted in.
+    final events = <_CcEvent>[];
+    for (final packet in _gopPackets) {
+      final base =
+          packet.picture < 0 ? 0 : _gopPictures[packet.picture].fieldOffset;
+      for (var i = 0; i < packet.pairs.length; i++) {
+        final pair = packet.pairs[i];
+        events.add(_CcEvent(base + i, events.length, pair.$1, pair.$2));
+      }
+      // The CC pairs span the whole GOP, so they are a lower bound on its
+      // length when the picture headers are missing or incomplete (synthetic
+      // streams, or a GOP truncated by a cell boundary).
+      final extent = base + packet.pairs.length;
+      if (extent > gopFields) gopFields = extent;
+    }
+    events.sort((a, b) => a.field != b.field
+        ? a.field.compareTo(b.field)
+        : a.seq.compareTo(b.seq));
+
+    for (final event in events) {
+      if (event.b1 == 0 && event.b2 == 0) continue; // null padding
+      nonNullCcPairs++;
+      // One field is 1001/60000 s; _outputTicks counts whole frames.
+      final ms = ((_outputTicks * 2 + event.field) * 1001) ~/ 60;
+      decoder.processPair(ms, event.b1, event.b2);
+    }
+
+    _lastGopFields = gopFields;
+    // Normally _parseGop moves the clock on, from the next GOP header's
+    // timecode; without one the flushed pictures have to do it themselves.
+    if (advanceClock) _outputTicks += gopFields ~/ 2;
+    _gopPictures.clear();
+    _gopPackets.clear();
+  }
+
+  /// Flushes the trailing GOP and returns the completed SRT document. Callers
+  /// must use this rather than `decoder.buildSrt()`, which would drop the CC
+  /// pairs of the last GOP.
+  String buildSrt() {
+    _flushGop();
+    return decoder.buildSrt();
   }
 
   void _parseUserData(int start, int end) {
@@ -294,33 +406,99 @@ class Mpeg2CcScanner {
     if (layout == null) return;
     ccPacketsDetected++;
 
-    // Continuous output position = ticks at this GOP's start + frames since it.
-    final ms = ((_outputTicks + _frameInGop) * 1001) ~/ 30;
-
+    // Buffer the pairs; they are timestamped in _flushGop, once the GOP's
+    // pictures (and therefore the display timeline) are fully known.
+    final pairs = <(int, int)>[];
     final tripleStart = start + layout.tripleStart;
     for (int i = 0; i < layout.ccCount; i++) {
       final off = tripleStart + i * 3;
       final t0 = _buf[off];
-      final b1 = _buf[off + 1] & 0x7F;
-      final b2 = _buf[off + 2] & 0x7F;
       // NTSC field 1 (0xFC), field 2 (0xFD), or non-standard 0xFF EIA-608 triple.
+      // 0xFE triples are DTVCC padding and take up no 608 field.
       if (t0 == 0xFC || t0 == 0xFD || t0 == 0xFF) {
-        if (b1 != 0 || b2 != 0) {
-          nonNullCcPairs++;
-          decoder.processPair(ms, b1, b2);
-        }
+        pairs.add((_buf[off + 1] & 0x7F, _buf[off + 2] & 0x7F));
       }
     }
+    if (pairs.isEmpty) return;
+    _gopPackets.add(_CcPacket(_gopPictures.length - 1, pairs));
   }
+}
+
+/// A picture header seen inside the GOP being scanned.
+class _GopPicture {
+  _GopPicture(this.tr);
+
+  /// temporal_reference — the picture's index in display order within the GOP.
+  final int tr;
+
+  /// Displayed fields: 2 normally, 3 when repeat_first_field is set (3:2
+  /// pulldown), 1 for a field picture. Assumed 2 until the picture coding
+  /// extension is seen.
+  int fields = 2;
+
+  /// Offset in displayed fields from the start of the GOP; filled in by
+  /// _flushGop once every picture of the GOP is known.
+  int fieldOffset = 0;
+}
+
+/// CC pairs from one user_data packet, tagged with the picture they followed
+/// (-1 when the packet came before the GOP's first picture).
+class _CcPacket {
+  _CcPacket(this.picture, this.pairs);
+  final int picture;
+  final List<(int, int)> pairs;
+}
+
+/// One EIA-608 pair placed on the GOP's field timeline. [seq] preserves
+/// transmission order across a sort that is not otherwise stable.
+class _CcEvent {
+  _CcEvent(this.field, this.seq, this.b1, this.b2);
+  final int field;
+  final int seq;
+  final int b1;
+  final int b2;
 }
 
 // ---------------------------------------------------------------------------
 // EIA-608 decoder
 // ---------------------------------------------------------------------------
 
+/// One completed caption line, with the screen position its PAC put it at.
+class _CaptionLine {
+  _CaptionLine(this.row, this.indent, this.text);
+
+  /// Screen row 1–15 (1 is the top), or 0 when no PAC was seen.
+  final int row;
+
+  /// Column the line starts at, 0–28.
+  final int indent;
+
+  final String text;
+}
+
 class Eia608Decoder {
+  /// Whether to keep the caption's horizontal position, by indenting each line
+  /// with the column its PAC (and any tab offset) placed it at. Off means every
+  /// line is left-trimmed, which loses e.g. a second speaker parked on the left.
+  final bool horizontalPlacement;
+
+  /// Whether to mark captions that sit in the top half of the screen (rows 1–7)
+  /// with an `{\an8}` tag, so players don't move them over the picture the
+  /// broadcaster deliberately kept clear.
+  final bool verticalPlacement;
+
+  /// Gap left between a caption's end and the next one's start, in ms. One NTSC
+  /// frame by default; 0 makes cues touch, which flickers in some players.
+  final int cueGapMs;
+
+  Eia608Decoder({
+    this.horizontalPlacement = true,
+    this.verticalPlacement = true,
+    this.cueGapMs = 33,
+  });
+
   // Non-displayed memory (loaded during pop-on mode).
-  final _ndm = <String>[];
+  final _ndm = <_CaptionLine>[];
 
   // Displayed memory (emitted SRT).
   final _srt = StringBuffer();
@@ -328,7 +506,8 @@ class Eia608Decoder {
 
   // Current partial line being assembled in non-displayed memory.
   final _lineBuf = StringBuffer();
-  int _currentRow = 0;  // row set by last PAC (1–15)
+  int _currentRow = 0;     // row set by last PAC (1–15)
+  int _currentIndent = 0;  // column set by last PAC, plus any leading tab offset
 
   // Pending SRT entry: start_ms set on EOC (pop-on) or CR (roll-up).
   int? _entryStartMs;
@@ -346,7 +525,7 @@ class Eia608Decoder {
   // that is part of a caption load (RCL+erase at the same instant — this
   // disc emits an EDM in every load) from a standalone erase that blanks the
   // screen during a silence. Only the latter ends the displayed caption.
-  int _lastRclMs = -1;
+  int _lastRclMs = -1000000;
 
   // Deduplication: skip if pair == previous pair (EIA-608 sends each code twice).
   int _prevB1 = -1;
@@ -364,6 +543,48 @@ class Eia608Decoder {
     0x35: '¢', 0x36: '£', 0x37: '♪', 0x38: 'à', 0x39: ' ',
     0x3A: 'è', 0x3B: 'â', 0x3C: 'ê', 0x3D: 'î', 0x3E: 'ô', 0x3F: 'û',
   };
+
+  // Extended character set 1 (Spanish/French): second byte of (0x12, 0x20–0x3F).
+  static const _extendedSpanishFrench = <int, String>{
+    0x20: 'Á', 0x21: 'É', 0x22: 'Ó', 0x23: 'Ú', 0x24: 'Ü', 0x25: 'ü',
+    0x26: '‘', 0x27: '¡', 0x28: '*', 0x29: '’', 0x2A: '─', 0x2B: '©',
+    0x2C: '℠', 0x2D: '•', 0x2E: '“', 0x2F: '”',
+    0x30: 'À', 0x31: 'Â', 0x32: 'Ç', 0x33: 'È', 0x34: 'Ê', 0x35: 'Ë',
+    0x36: 'ë', 0x37: 'Î', 0x38: 'Ï', 0x39: 'ï', 0x3A: 'Ô', 0x3B: 'Ù',
+    0x3C: 'ù', 0x3D: 'Û', 0x3E: '«', 0x3F: '»',
+  };
+
+  // Extended character set 2 (Portuguese/German/Danish): (0x13, 0x20–0x3F).
+  static const _extendedPortugueseGerman = <int, String>{
+    0x20: 'Ã', 0x21: 'ã', 0x22: 'Í', 0x23: 'Ì', 0x24: 'ì', 0x25: 'Ò',
+    0x26: 'ò', 0x27: 'Õ', 0x28: 'õ', 0x29: '{', 0x2A: '}', 0x2B: r'\',
+    0x2C: '^', 0x2D: '_', 0x2E: '¦', 0x2F: '~',
+    0x30: 'Ä', 0x31: 'ä', 0x32: 'Ö', 0x33: 'ö', 0x34: 'ß', 0x35: '¥',
+    0x36: '¤', 0x37: '│', 0x38: 'Å', 0x39: 'å', 0x3A: 'Ø', 0x3B: 'ø',
+    0x3C: '┌', 0x3D: '┐', 0x3E: '└', 0x3F: '┘',
+  };
+
+  // The plain-ASCII stand-in an encoder is expected to transmit immediately
+  // before an extended character, for decoders that can't render it. A
+  // compliant decoder backspaces over that stand-in — but only when it really
+  // is one: encoders that omit it (or that follow the extended character with
+  // its ASCII twin) would otherwise lose a real character.
+  static const _extendedBase = <String, String>{
+    'Á': 'A', 'À': 'A', 'Â': 'A', 'Ã': 'A', 'Ä': 'A', 'Å': 'A',
+    'á': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a',
+    'É': 'E', 'È': 'E', 'Ê': 'E', 'Ë': 'E', 'ë': 'e',
+    'Í': 'I', 'Ì': 'I', 'Î': 'I', 'Ï': 'I', 'ì': 'i', 'ï': 'i',
+    'Ó': 'O', 'Ò': 'O', 'Ô': 'O', 'Õ': 'O', 'Ö': 'O', 'Ø': 'O',
+    'ò': 'o', 'õ': 'o', 'ö': 'o', 'ø': 'o',
+    'Ú': 'U', 'Ù': 'U', 'Û': 'U', 'Ü': 'U', 'ù': 'u', 'ü': 'u',
+    'Ç': 'C', '©': 'C', 'ß': 's', '℠': 'S', '¥': 'Y',
+    '¡': '!', '•': '*', '‘': "'", '’': "'", '“': '"', '”': '"',
+    '«': '"', '»': '"',
+  };
+
+  // Extended quotes and their ASCII twins. Used to drop the duplicate when an
+  // encoder sends both (seen on real discs: "teachers" + ’ + ' ).
+  static const _quoteChars = '‘’“”«»';
 
   void processPair(int ms, int b1, int b2) {
     _lastProcessedMs = ms;
@@ -393,9 +614,20 @@ class Eia608Decoder {
       // A PAC marks the row for text loading into NDM (off-screen). It does not
       // change what's currently displayed, so it must not end the shown caption.
       final row = _pacRow(b1, b2);
-      if (row > 0 && row != _currentRow) {
-        _flushLine();
-        _currentRow = row;
+      if (row > 0) {
+        if (row != _currentRow) {
+          _flushLine();
+          _currentRow = row;
+        }
+        // Attribute: 0–6 colour, 7 italics, 8–15 an indent of (attr − 8) × 4.
+        final attribute = (b2 & 0x1E) >> 1;
+        if (_lineBuf.isEmpty) {
+          _currentIndent = attribute >= 8 ? (attribute - 8) * 4 : 0;
+        }
+        if (attribute == 7 && !_italic) {
+          _lineBuf.write('<i>');
+          _italic = true;
+        }
       }
       return;
     }
@@ -418,14 +650,8 @@ class Eia608Decoder {
         case 0x2B: // RTD — Resume Text Display
           break;
 
-        case 0x21: // BS — Backspace (may clip a char of an emitted <i> tag;
-                   // accepted: BS directly after a mid-row code is rare)
-          if (_lineBuf.isNotEmpty) {
-            final s = _lineBuf.toString();
-            _lineBuf
-              ..clear()
-              ..write(s.substring(0, s.length - 1));
-          }
+        case 0x21: // BS — Backspace
+          _backspace();
 
         case 0x2C: // ENM — Erase Non-Displayed Memory
           if (_isStandaloneClear(ms)) {
@@ -448,7 +674,7 @@ class Eia608Decoder {
             final lines = _ruLines >= _ndm.length
                 ? _ndm
                 : _ndm.sublist(_ndm.length - _ruLines);
-            _emitEntry(ms, lines.join('\n'));
+            _emitEntry(ms, _render(lines));
           }
 
         case 0x2E: // EDM — Erase Displayed Memory
@@ -471,7 +697,7 @@ class Eia608Decoder {
           // until the next EOC or EDM — not until the next caption pre-loads.
           _closeEntry(ms);
           if (_ndm.isNotEmpty) {
-            _emitEntry(ms, _ndm.join('\n'));
+            _emitEntry(ms, _render(_ndm));
           }
           _ndm.clear();
       }
@@ -485,9 +711,30 @@ class Eia608Decoder {
       return;
     }
 
-    // Tab offsets: b1 == 0x17 or 0x1F, b2 == 0x21–0x23 → 1–3 spaces.
+    // Extended character sets: b1 == 0x12/0x1A (Spanish/French) or 0x13/0x1B
+    // (Portuguese/German/Danish), b2 == 0x20–0x3F. Field 2 uses the +8 variants.
+    if (b2 >= 0x20 && b2 <= 0x3F) {
+      final table = switch (b1) {
+        0x12 || 0x1A => _extendedSpanishFrench,
+        0x13 || 0x1B => _extendedPortugueseGerman,
+        _ => null,
+      };
+      if (table != null) {
+        final ch = table[b2];
+        if (ch != null) _appendExtended(ch);
+        return;
+      }
+    }
+
+    // Tab offsets: b1 == 0x17 or 0x1F, b2 == 0x21–0x23 → 1–3 columns.
     if ((b1 == 0x17 || b1 == 0x1F) && b2 >= 0x21 && b2 <= 0x23) {
-      _lineBuf.write(' ' * (b2 - 0x20));
+      // Before any text a tab shifts where the line starts, which is placement
+      // rather than content; in mid-line it is just spacing.
+      if (_lineBuf.isEmpty) {
+        _currentIndent += b2 - 0x20;
+      } else {
+        _lineBuf.write(' ' * (b2 - 0x20));
+      }
       return;
     }
 
@@ -496,10 +743,10 @@ class Eia608Decoder {
     // 0x2E/0x2F turn italics on; any other (color) code resets attributes.
     if ((b1 == 0x11 || b1 == 0x19) && b2 >= 0x20 && b2 <= 0x2F) {
       final italicsOn = b2 == 0x2E || b2 == 0x2F;
+      final atLineStart = _lineBuf.isEmpty;
       if (italicsOn) {
-        // Space before the tag so whitespace stays outside the styled span;
-        // suppressed at line start (would survive _flushLine's trim otherwise).
-        if (_lineBuf.isNotEmpty) _lineBuf.write(' ');
+        // Space before the tag so whitespace stays outside the styled span.
+        if (!atLineStart) _lineBuf.write(' ');
         if (!_italic) {
           _lineBuf.write('<i>');
           _italic = true;
@@ -509,19 +756,51 @@ class Eia608Decoder {
           _lineBuf.write('</i>');
           _italic = false;
         }
-        if (_lineBuf.isNotEmpty) _lineBuf.write(' ');
+        if (!atLineStart) _lineBuf.write(' ');
       }
+      // At line start the cell the code occupies shifts where the text begins;
+      // written as a space it would just be trimmed off again.
+      if (atLineStart) _currentIndent++;
       return;
     }
   }
 
   void _appendChar(int b) {
-    final sub = _charSub[b];
-    if (sub != null) {
-      _lineBuf.write(sub);
-    } else {
-      _lineBuf.writeCharCode(b);
+    final ch = _charSub[b] ?? String.fromCharCode(b);
+    // An encoder that sent an extended quote may follow it with the ASCII twin
+    // it was standing in for; keep only the extended one. The emptiness check
+    // matters: every string contains '', so a quote opening a line would
+    // otherwise look like a duplicate and be dropped.
+    final last = _lastChar();
+    if (last.isNotEmpty &&
+        (ch == "'" || ch == '"') &&
+        _quoteChars.contains(last)) {
+      return;
     }
+    _lineBuf.write(ch);
+  }
+
+  /// Writes an extended character, backspacing over the ASCII stand-in that
+  /// precedes it — but only when the preceding character really is that
+  /// stand-in, since not every encoder sends one.
+  void _appendExtended(String ch) {
+    if (_extendedBase[ch] == _lastChar()) _backspace();
+    _lineBuf.write(ch);
+  }
+
+  /// Last character of the line under construction, or '' when empty.
+  String _lastChar() {
+    final s = _lineBuf.toString();
+    return s.isEmpty ? '' : s.substring(s.length - 1);
+  }
+
+  /// Removes the last character, leaving any emitted markup intact.
+  void _backspace() {
+    final s = _lineBuf.toString();
+    if (s.isEmpty || s.endsWith('>')) return;
+    _lineBuf
+      ..clear()
+      ..write(s.substring(0, s.length - 1));
   }
 
   void _flushLine() {
@@ -535,14 +814,35 @@ class Eia608Decoder {
     final line =
         _lineBuf.toString().replaceAll('<i></i>', '').replaceAll('<i> </i>', ' ').trim();
     _lineBuf.clear();
-    if (line.isNotEmpty) _ndm.add(line);
+    if (line.isNotEmpty) {
+      _ndm.add(_CaptionLine(_currentRow, _currentIndent, line));
+    }
+  }
+
+  /// Renders caption lines to SRT text, restoring the on-screen placement the
+  /// PACs asked for: an indent per line, and `{\an8}` when the whole caption
+  /// sits in the top half of the screen.
+  String _render(List<_CaptionLine> lines) {
+    final body = lines
+        .map((l) => horizontalPlacement ? ' ' * l.indent + l.text : l.text)
+        .join('\n');
+    final atTop = verticalPlacement &&
+        lines.every((l) => l.row > 0 && l.row <= 7);
+    return atTop ? r'{\an8}' '$body' : body;
   }
 
   /// True when an erase command (ENM/EDM) is a real screen-blank rather than
   /// part of a caption load: nothing is being loaded into NDM and it doesn't
-  /// coincide with this load's RCL (this disc emits an EDM with every RCL).
+  /// belong to this load's RCL (this disc emits an EDM with every RCL).
+  ///
+  /// The erase follows its RCL by a field or two — pairs are transmitted one
+  /// per field — whereas a screen-blank during a silence stands seconds clear
+  /// of any load, so a short window separates the two reliably.
   bool _isStandaloneClear(int ms) =>
-      _lineBuf.isEmpty && _ndm.isEmpty && ms != _lastRclMs;
+      _lineBuf.isEmpty && _ndm.isEmpty && (ms - _lastRclMs) > _rclWindowMs;
+
+  /// How long after an RCL an erase still counts as part of that caption load.
+  static const _rclWindowMs = 200;
 
   void _emitEntry(int startMs, String text) {
     _entryStartMs = startMs;
@@ -551,11 +851,14 @@ class Eia608Decoder {
 
   void _closeEntry(int endMs) {
     if (_entryStartMs == null || _entryText == null) return;
-    if (endMs <= _entryStartMs!) endMs = _entryStartMs! + 3000;
+    var end = endMs <= _entryStartMs! ? _entryStartMs! + 3000 : endMs;
+    // Stop one frame short of the next caption so consecutive cues don't touch.
+    end -= cueGapMs;
+    if (end <= _entryStartMs!) end = _entryStartMs! + 1;
     _srtIndex++;
     _srt
       ..writeln(_srtIndex)
-      ..writeln('${_msToSrt(_entryStartMs!)} --> ${_msToSrt(endMs)}')
+      ..writeln('${_msToSrt(_entryStartMs!)} --> ${_msToSrt(end)}')
       ..writeln(_entryText!)
       ..writeln();
     _entryStartMs = null;
@@ -570,9 +873,11 @@ class Eia608Decoder {
     return _srt.toString();
   }
 
-  // Returns the 1-based row number (1–15) for a PAC.
-  // EIA-608 assigns rows via b1 (channel/row-set) and b2 bit 5 (row within set).
-  // Bit 3 of b1 selects the channel (CC1/CC3 vs CC2/CC4); strip it for row lookup.
+  // Returns the 1-based row number (1–15) for a PAC, or 0 when [b1] is not a
+  // PAC base code. EIA-608 assigns rows via b1 (channel/row-set) and b2 bit 5
+  // (row within set). Bit 3 of b1 selects the channel (CC1/CC3 vs CC2/CC4);
+  // strip it for row lookup. Note the row sets are not in numeric order of b1,
+  // and row 11 (base 0x10) is the odd one out with no pair.
   static int _pacRow(int b1, int b2) {
     final high = (b2 & 0x20) != 0 ? 1 : 0; // 0 → lower row, 1 → upper row of pair
     return switch (b1 & 0xF7) { // strip channel bit (bit 3)
@@ -581,8 +886,9 @@ class Eia608Decoder {
       0x15 => high == 0 ?  5 :  6,
       0x16 => high == 0 ?  7 :  8,
       0x17 => high == 0 ?  9 : 10,
-      0x13 => high == 0 ? 11 : 12,
-      0x14 => high == 0 ? 13 : 14,
+      0x10 => 11, // the only row with a single base code
+      0x13 => high == 0 ? 12 : 13,
+      0x14 => high == 0 ? 14 : 15,
       _ => 0,
     };
   }

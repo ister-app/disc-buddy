@@ -24,7 +24,15 @@ List<int> gop({int h = 0, int m = 0, int s = 0, int f = 0, bool drop = true}) {
           (w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF];
 }
 
-List<int> pic() => [0x00, 0x00, 0x01, 0x00];
+/// Picture header: 00 00 01 00 + 10-bit temporal_reference (display position
+/// within the GOP; pictures are transmitted in coded order).
+List<int> pic([int tr = 0]) =>
+    [0x00, 0x00, 0x01, 0x00, (tr >> 2) & 0xFF, (tr & 0x03) << 6];
+
+/// picture_coding_extension for a frame picture. [rff] sets repeat_first_field,
+/// which is how 3:2 pulldown stretches a coded frame over three fields.
+List<int> picExt({bool rff = false}) =>
+    [0x00, 0x00, 0x01, 0xB5, 0x80, 0x00, 0x03, rff ? 0x02 : 0x00];
 
 /// Builds 3-byte A/53 triples from EIA-608 pairs, applying odd parity.
 List<int> triples(List<(int, int)> pairs, {int type = 0xFC}) => [
@@ -100,7 +108,7 @@ void main() {
       test('variant $name yields HELLO caption', () {
         final sc = Mpeg2CcScanner();
         feed(sc, helloEs(wrap));
-        final srt = sc.decoder.buildSrt();
+        final srt = sc.buildSrt();
         expect(srt, contains('HELLO'));
         expect(srt, contains('-->'));
         expect(sc.ccPacketsDetected, 2);
@@ -122,7 +130,7 @@ void main() {
       ];
       final sc = Mpeg2CcScanner();
       feed(sc, es);
-      expect(sc.decoder.buildSrt(), contains('HELLO'));
+      expect(sc.buildSrt(), contains('HELLO'));
     });
 
     test('empty variant-C channel: detected but no captions', () {
@@ -135,7 +143,7 @@ void main() {
       ];
       final sc = Mpeg2CcScanner();
       feed(sc, es);
-      expect(sc.decoder.buildSrt(), isEmpty);
+      expect(sc.buildSrt(), isEmpty);
       expect(sc.userDataPackets, 5);
       expect(sc.ccPacketsDetected, 5);
       expect(sc.nonNullCcPairs, 0);
@@ -146,7 +154,7 @@ void main() {
       final bulk = Mpeg2CcScanner()..addChunk(es);
       final drip = Mpeg2CcScanner();
       feed(drip, es, chunk: 1);
-      expect(drip.decoder.buildSrt(), bulk.decoder.buildSrt());
+      expect(drip.buildSrt(), bulk.buildSrt());
     });
   });
 
@@ -165,7 +173,7 @@ void main() {
         ...gopWith(userDataA, popOn(body), sec: 0),
         ...gopWith(userDataA, eraseDisplay(), sec: 4),
       ]);
-      return sc.decoder.buildSrt();
+      return sc.buildSrt();
     }
 
     test('renders as a space between words (doubled code → one space)', () {
@@ -199,12 +207,14 @@ void main() {
       expect('<i>'.allMatches(srt).length, '</i>'.allMatches(srt).length);
     });
 
-    test('mid-row at line start emits no leading space', () {
+    test('mid-row at line start shifts the line instead of padding the tag', () {
       final srt = srtFor([
         (0x11, 0x2E), (0x11, 0x2E), // italics before any text
         (0x79, 0x6F),               // "yo"
       ]);
-      expect(srt, contains('\n<i>yo</i>\n'));
+      // The code still occupies a cell, so the text starts one column in — but
+      // the space belongs outside the styled span, as an indent.
+      expect(srt, contains('\n <i>yo</i>\n'));
     });
 
     test('field-2 variant (b1 == 0x19) behaves identically', () {
@@ -223,6 +233,263 @@ void main() {
       ]);
       expect(srt, contains('Hi'));
       expect(srt, isNot(contains('<i>')));
+    });
+  });
+
+  group('display-timeline placement of CC pairs', () {
+    // Coded order of a 12-picture IBBP GOP, with each picture's display
+    // position (temporal_reference). Six pictures repeat a field, so the GOP
+    // covers 30 displayed fields — 3:2 pulldown, exactly as on a real NTSC DVD.
+    const codedOrderTrs = [2, 0, 1, 5, 3, 4, 8, 6, 7, 11, 9, 10];
+
+    List<int> pulldownGop() => [
+          for (var i = 0; i < codedOrderTrs.length; i++) ...[
+            ...pic(codedOrderTrs[i]),
+            ...picExt(rff: i.isEven),
+          ],
+        ];
+
+    test('a pair is timed at its own field, not at the GOP header', () {
+      // One packet after the GOP header carrying a pair per displayed field,
+      // with the caption flipped on screen by an EOC at field 20.
+      final pairs = List<(int, int)>.filled(30, (0, 0));
+      pairs[0] = (0x14, 0x20); // RCL
+      pairs[1] = (0x14, 0x20);
+      pairs[2] = (0x14, 0x50); // PAC row 13
+      pairs[3] = (0x48, 0x49); // "HI"
+      pairs[20] = (0x14, 0x2F); // EOC — flip
+
+      final sc = Mpeg2CcScanner();
+      feed(sc, [
+        ...gop(s: 0), ...userDataA(triples(pairs)), ...pulldownGop(),
+        ...gop(s: 1), ...userDataA(triples(eraseDisplay())), ...pulldownGop(),
+      ]);
+      final srt = sc.buildSrt();
+
+      expect(srt, contains('HI'));
+      // Field 20 of the GOP = 20 × 1001/60 ms, not 0.
+      expect(srt, contains('00:00:00,333 -->'));
+      // Erase at the start of the second GOP (1 s in), one frame early.
+      expect(srt, contains('--> 00:00:00,968'));
+    });
+
+    test('an EDM a few fields after its RCL does not cut the caption short', () {
+      // This encoder erases displayed memory inside every pop-on load. Now that
+      // each pair sits on its own field, that EDM no longer shares a timestamp
+      // with the RCL, so it must still be recognised as part of the load.
+      List<(int, int)> load(int c1, int c2, {bool erase = false}) {
+        final pairs = List<(int, int)>.filled(30, (0, 0));
+        pairs[0] = (0x14, 0x20);                     // RCL
+        if (erase) pairs[2] = (0x14, 0x2E);          // EDM two fields later
+        pairs[4] = (0x14, 0x50);                     // PAC row 13
+        pairs[5] = (c1, c2);
+        pairs[20] = (0x14, 0x2F);                    // EOC
+        return pairs;
+      }
+
+      final sc = Mpeg2CcScanner();
+      feed(sc, [
+        ...gop(s: 0), ...userDataA(triples(load(0x48, 0x49))), ...pulldownGop(),
+        // Second load: its EDM must not end the caption still on screen.
+        ...gop(s: 1),
+        ...userDataA(triples(load(0x59, 0x4F, erase: true))),
+        ...pulldownGop(),
+        ...gop(s: 2), ...userDataA(triples(eraseDisplay())), ...pulldownGop(),
+      ]);
+      final srt = sc.buildSrt();
+
+      expect(srt, contains('HI'));
+      expect(srt, contains('YO'));
+      // "HI" lasts from its own EOC until the second caption flips on at
+      // 1 s + field 20 — not until that load's EDM at 1 s + field 2.
+      expect(srt, contains('00:00:00,333 --> 00:00:01,301'));
+    });
+
+    test('packets are decoded in display order, not coded order', () {
+      List<(int, int)> popOn(int c1, int c2) => [
+            (0x14, 0x20), (0x14, 0x20), // RCL
+            (0x14, 0x50),               // PAC row 13
+            (c1, c2),
+            (0x14, 0x2F), (0x14, 0x2F), // EOC
+          ];
+      final sc = Mpeg2CcScanner();
+      feed(sc, [
+        ...gop(s: 0),
+        // Coded first but displayed second.
+        ...pic(1), ...picExt(), ...userDataA(triples(popOn(0x42, 0x42))), // BB
+        ...pic(0), ...picExt(), ...userDataA(triples(popOn(0x41, 0x41))), // AA
+        ...gop(s: 4), ...userDataA(triples(eraseDisplay())), ...pic(0),
+      ]);
+      final srt = sc.buildSrt();
+
+      expect(srt, contains('AA'));
+      expect(srt, contains('BB'));
+      expect(srt.indexOf('AA'), lessThan(srt.indexOf('BB')));
+    });
+  });
+
+  group('extended characters and placement', () {
+    String srtFor(List<(int, int)> body, {Eia608Decoder? decoder}) {
+      final sc = Mpeg2CcScanner(decoder: decoder);
+      feed(sc, [
+        ...gopWith(userDataA, [
+          (0x14, 0x20), (0x14, 0x20), // RCL
+          ...body,
+          (0x14, 0x2F), (0x14, 0x2F), // EOC
+        ], sec: 0),
+        ...gopWith(userDataA, eraseDisplay(), sec: 4),
+      ]);
+      return sc.buildSrt();
+    }
+
+    // PAC for row 13 with attribute [attr] (0–6 colour, 7 italics, 8–15 indent).
+    (int, int) pacRow13(int attr) => (0x14, 0x40 | (attr << 1));
+
+    test('extended char with no ASCII stand-in is inserted as-is', () {
+      // ¡ (0x12, 0x27) straight after the PAC, then "Ay".
+      final srt = srtFor([
+        pacRow13(0),
+        (0x12, 0x27), (0x12, 0x27),
+        (0x41, 0x79),
+      ]);
+      expect(srt, contains('¡Ay'));
+    });
+
+    test('extended char backspaces over its ASCII stand-in', () {
+      // "A" then Á (0x12, 0x20): the A was only a stand-in for decoders that
+      // cannot render Á.
+      final srt = srtFor([
+        pacRow13(0),
+        (0x41, 0x41), // "AA"
+        (0x12, 0x20), (0x12, 0x20),
+      ]);
+      expect(srt, contains('AÁ'));
+      expect(srt, isNot(contains('AAÁ')));
+    });
+
+    test('a real character before an unrelated extended char is kept', () {
+      // "teachers" + ’ + ' — 's' is not a stand-in for ’, so it must survive,
+      // and the ASCII twin that follows the curly quote is dropped.
+      final srt = srtFor([
+        pacRow13(0),
+        (0x72, 0x73),               // "rs"
+        (0x12, 0x29), (0x12, 0x29), // ’
+        (0x27, 0x20),               // "' "
+      ]);
+      expect(srt, contains('rs’'));
+      expect(srt, isNot(contains("rs’'")));
+    });
+
+    test('a quote opening a line is kept', () {
+      // Regression: every string contains '', so the duplicate-quote guard used
+      // to swallow a quote with nothing before it.
+      final srt = srtFor([
+        pacRow13(0),
+        (0x22, 0x48), // '"H'
+        (0x69, 0x22), // 'i"'
+      ]);
+      expect(srt, contains('"Hi"'));
+    });
+
+    test('rows 11–15 map to the right PAC base codes', () {
+      // Row 11 is the only row with a single base code (0x10); rows 12/13 sit
+      // on 0x13 and 14/15 on 0x14. Getting these wrong loses the line break,
+      // because an unrecognised PAC does not flush the line in progress.
+      for (final (b1, b2, row) in [
+        (0x10, 0x40, 11),
+        (0x13, 0x40, 12),
+        (0x13, 0x60, 13),
+        (0x14, 0x40, 14),
+        (0x14, 0x60, 15),
+      ]) {
+        final srt = srtFor([
+          (0x11, 0x40),  // row 1
+          (0x41, 0x41),  // "AA"
+          (b1, b2),      // move to [row] — must break the line
+          (0x42, 0x42),  // "BB"
+        ]);
+        expect(srt, contains('AA\nBB'), reason: 'row $row (b1 $b1, b2 $b2)');
+        // Mixing row 1 with a bottom row is not a top-half caption.
+        expect(srt, isNot(contains(r'{\an8}')), reason: 'row $row');
+      }
+    });
+
+    test('German/Danish extended set decodes', () {
+      final srt = srtFor([
+        pacRow13(0),
+        (0x13, 0x34), (0x13, 0x34), // ß
+        (0x13, 0x31), (0x13, 0x31), // ä
+      ]);
+      expect(srt, contains('ßä'));
+    });
+
+    test('PAC indent becomes leading spaces', () {
+      final srt = srtFor([
+        pacRow13(10), // indent (10 − 8) × 4 = 8 columns
+        (0x48, 0x69), // "Hi"
+      ]);
+      expect(srt, contains('\n        Hi\n'));
+    });
+
+    test('PAC attribute 7 turns on italics', () {
+      final srt = srtFor([
+        pacRow13(7),
+        (0x48, 0x69), // "Hi"
+      ]);
+      expect(srt, contains('<i>Hi</i>'));
+    });
+
+    test('a tab before any text shifts the line, not the words', () {
+      final srt = srtFor([
+        pacRow13(8),
+        (0x17, 0x23), // tab 3
+        (0x48, 0x69), // "Hi"
+      ]);
+      expect(srt, contains('\n   Hi\n'));
+    });
+
+    test('a caption in the top half is tagged {\\an8}', () {
+      // PAC row 1: b1 0x11, row-select bit clear.
+      final srt = srtFor([(0x11, 0x40), (0x48, 0x69)]);
+      expect(srt, contains(r'{\an8}Hi'));
+    });
+
+    test('a caption at the bottom carries no placement tag', () {
+      final srt = srtFor([pacRow13(0), (0x48, 0x69)]);
+      expect(srt, isNot(contains(r'{\an')));
+    });
+
+    test('placement can be switched off', () {
+      final srt = srtFor(
+        [(0x11, 0x40 | (10 << 1)), (0x48, 0x69)], // row 1, indent 8
+        decoder: Eia608Decoder(
+            horizontalPlacement: false, verticalPlacement: false),
+      );
+      expect(srt, contains('\nHi\n'));
+    });
+
+    test('consecutive cues are separated by one frame', () {
+      final sc = Mpeg2CcScanner();
+      List<(int, int)> popOn(int c1, int c2) => [
+            (0x14, 0x20), (0x14, 0x20),
+            (0x14, 0x50),
+            (c1, c2),
+            (0x14, 0x2F), (0x14, 0x2F),
+          ];
+      feed(sc, [
+        ...gopWith(userDataA, popOn(0x41, 0x41), sec: 0),
+        ...gopWith(userDataA, popOn(0x42, 0x42), sec: 4),
+        ...gopWith(userDataA, eraseDisplay(), sec: 8),
+      ]);
+      final srt = sc.buildSrt();
+      // Second cue starts at 4 s + its EOC field; the first ends 33 ms earlier.
+      final times = RegExp(r'(\d\d:\d\d:\d\d,\d\d\d) --> (\d\d:\d\d:\d\d,\d\d\d)')
+          .allMatches(srt)
+          .toList();
+      expect(times.length, 2);
+      int ms(String t) =>
+          int.parse(t.substring(6, 8)) * 1000 + int.parse(t.substring(9));
+      expect(ms(times[1].group(1)!) - ms(times[0].group(2)!), 33);
     });
   });
 
