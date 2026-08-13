@@ -5,13 +5,13 @@ publish_to: none
 resolution: workspace
 
 environment:
-  sdk: ^3.11.4
+  sdk: ^3.13.0
 
 dependencies:
   disc_buddy:
     path: ../disc_buddy_lib
-  args: ^2.6.0
-  path: ^1.9.0
+  args: ^2.7.0
+  path: ^1.9.1
 
 dev_dependencies:
-  lints: ^6.0.0
+  lints: ^6.1.0

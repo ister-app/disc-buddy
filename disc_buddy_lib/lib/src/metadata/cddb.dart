@@ -98,7 +98,9 @@ class Cddb {
 
       if (genre == null || cddbId == null) return null;
 
-      return _readEntry(genre, cddbId, startTimes, leadOutTime);
+      // Awaited so a timeout or error inside _readEntry is caught below rather
+      // than escaping this try block.
+      return await _readEntry(genre, cddbId, startTimes, leadOutTime);
     } on TimeoutException {
       stderr.writeln('CDDB: timeout (>${_timeout.inSeconds}s).');
       return null;

@@ -14,7 +14,7 @@ jobs:
 
       - uses: dart-lang/setup-dart@v1
         with:
-          sdk: stable
+          sdk: 3.13.0
 
       - name: Install dependencies
         run: dart pub get
@@ -57,6 +57,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: 3.47.0
           channel: stable
 
       - name: Install Linux build dependencies

@@ -34,9 +34,9 @@ Drive detection updates in real time using `udevadm monitor` and the `CDROM_DRIV
 | `mkvextract` + `subtile-ocr` (optional) | subtitle extraction / OCR — feeds LLM auto-naming |
 | `whisper-cli` + ggml model (optional) | whisper.cpp audio-transcription fallback for auto-naming titles **without** subtitles (config keys `whisper` / `whisper-model`, CLI `--whisper` / `--whisper-model`; use a multilingual model such as `ggml-small.bin` for non-English discs) |
 
-**Build (CLI):** Dart SDK ≥ 3.11
+**Build (CLI):** Dart SDK ≥ 3.13
 
-**Build (UI):** Flutter stable channel
+**Build (UI):** Flutter ≥ 3.47 (stable channel)
 
 Install runtime dependencies on Fedora:
 

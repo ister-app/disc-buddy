@@ -5,24 +5,32 @@ publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.11.4
+  sdk: ^3.13.0
+  flutter: '>=3.47.0'
 
 dependencies:
   flutter:
     sdk: flutter
   disc_buddy:
     path: ../disc_buddy_lib
-  flutter_riverpod: ^3.3.1
-  riverpod_annotation: ^4.0.2
+  flutter_riverpod: ^3.4.2
   skeletonizer: ^2.1.3
-  file_picker: ^11.0.2
-  path_provider: ^2.1.5
-  path: ^1.9.0
+  file_picker: ^11.0.3
+  path_provider: ^2.1.6
+  path: ^1.9.1
 
 # jni (transitive via path_provider_android) is compiled for the host by its
-# build hook even on Linux. Versions after 1.0.0 dropped the __ENVP_CAST macro
-# around AttachCurrentThread, so dartjni.h/.c no longer compile against the
-# non-Android jni.h (JNIEnv** vs void**) — an error, not a warning, on GCC 14+.
+# build hook even on Linux. Its dartjni.c calls AttachCurrentThread(vm, &jniEnv,
+# NULL) where jniEnv is a JNIEnv*, which only type-checks against the Android
+# flavour of jni.h; the JDK's declares that parameter void**, and passing
+# JNIEnv** to it is an error (not a warning) on GCC 14+ and clang 15+.
+#   - 1.0.0 handles both via its __ENVP_CAST macro.
+#   - 1.0.3 dropped the macro and instead points CMake at its own bundled
+#     third_party/jni.h — but only when JAVA_INCLUDE_PATH is unset, i.e. when no
+#     JDK headers are installed. Machines (and CI runners) that do have a JDK
+#     resolve the JDK header instead and fail to build.
+# Verified 2026-08-13 against jni 1.0.3: builds here only because this host has
+# JDK runtimes but no headers.
 dependency_overrides:
   jni: 1.0.0
 
@@ -30,8 +38,6 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  riverpod_generator: ^4.0.3
-  build_runner: ^2.4.15
 
 flutter:
   uses-material-design: true
