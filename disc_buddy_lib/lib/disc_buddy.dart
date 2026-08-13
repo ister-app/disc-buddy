@@ -14,6 +14,8 @@ export 'src/rippers/dvd_ripper.dart';
 export 'src/rippers/bluray_ripper.dart';
 export 'src/rippers/audiocd_ripper.dart';
 export 'src/device/drive_detector.dart';
+export 'src/device/drive_status.dart'
+    show readDriveStatus, kCdsTrayOpen, kCdsNoDisc, kCdsDriveNotReady, kCdsDiscOk;
 export 'src/device/disc_type_detector.dart';
 export 'src/device/disc_fingerprint.dart';
 export 'src/ffmpeg/ffmpeg_runner.dart' show FfmpegProgress, ProgressCallback;

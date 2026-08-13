@@ -36,6 +36,19 @@ Future<DiscContent?> _loadContent(String devicePath, Settings settings) async {
     return _loadIsoContent(devicePath, options);
   }
 
+  // Optical drive: never touch the device unless a disc is actually loaded.
+  // Everything below opens the device node in blocking mode — dd for the
+  // fingerprint, mount and libdvdread for the scan — and the kernel pulls an
+  // open tray shut as soon as that happens. Without this guard a rescan
+  // triggered right after ejecting (the disc-change watcher fires on exactly
+  // that status change) closes the drive again a second after it opened.
+  final tray = readDriveStatus(devicePath);
+  if (tray == kCdsTrayOpen ||
+      tray == kCdsNoDisc ||
+      tray == kCdsDriveNotReady) {
+    return EmptyDisc();
+  }
+
   // Detect disc type for optical drives.
   final discType = await DiscTypeDetector.detect(devicePath);
   // Capture the disc identity alongside the scan so the pre-rip guard can
