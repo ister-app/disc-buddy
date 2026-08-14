@@ -10,6 +10,7 @@ typedef EpisodeInfo = ({
   String overview,
   String guestStars, // comma-separated character names, may be empty
   String airDate,    // "YYYY-MM-DD" or empty
+  int?   runtime,    // minutes, null when TMDB has none
 });
 
 /// A candidate returned by [TmdbClient.searchMovieCandidates].
@@ -260,8 +261,8 @@ class TmdbClient {
     String language = 'en',
   }) async {
     // Language is part of the cache key so Dutch and English results are stored
-    // separately.
-    final cacheFile = 'tmdb_${seriesId}_s${season}_$language.json';
+    // separately. The v2 suffix invalidates pre-runtime caches.
+    final cacheFile = 'tmdb_${seriesId}_s${season}_${language}_v2.json';
     final cached = await _readCache(cacheFile);
     if (cached != null) {
       final eps = (cached['episodes'] as List?) ?? [];
@@ -273,6 +274,7 @@ class TmdbClient {
                 overview:   e['overview']   as String? ?? '',
                 guestStars: e['guestStars'] as String? ?? '',
                 airDate:    e['airDate']    as String? ?? '',
+                runtime:    (e['runtime']   as num?)?.toInt(),
               ))
           .toList();
     }
@@ -295,6 +297,7 @@ class TmdbClient {
           overview:   e['overview']       as String? ?? '',
           guestStars: guests,
           airDate:    e['air_date']       as String? ?? '',
+          runtime:    (e['runtime']       as num?)?.toInt(),
         );
       }).toList();
 
@@ -306,6 +309,7 @@ class TmdbClient {
                   'overview':   e.overview,
                   'guestStars': e.guestStars,
                   'airDate':    e.airDate,
+                  'runtime':    e.runtime,
                 })
             .toList(),
       });

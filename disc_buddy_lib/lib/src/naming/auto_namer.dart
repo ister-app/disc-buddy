@@ -21,6 +21,10 @@ class Fingerprint {
   bool get isEmpty => summary.isEmpty && titleGuess.isEmpty;
 }
 
+/// Role of one file among several cuts of the same episode.
+/// See [AutoNamer.classifyVersions].
+enum VersionRole { primary, extended, leaveUnnamed }
+
 /// LLM-based auto-namer.
 ///
 /// Two LLM calls per file:
@@ -104,6 +108,7 @@ class AutoNamer {
       subtitleText: sub.text,
       subLang: sub.language,
       seasonHint: seasonHint,
+      mediaFile: mkvFile,
     );
   }
 
@@ -218,6 +223,8 @@ class AutoNamer {
             items: items,
             subs: subs,
             fps: fps,
+            seriesId: winner.id,
+            subLang: subLang,
           );
 
     final results = <File, String?>{};
@@ -529,6 +536,7 @@ class AutoNamer {
     required String subtitleText,
     required String subLang,
     List<int>? seasonHint,
+    File? mediaFile,
   }) async {
     final pick = await _matchEpisode(
       seriesId: seriesId,
@@ -537,6 +545,7 @@ class AutoNamer {
       subtitleText: subtitleText,
       subLang: subLang,
       seasonHint: seasonHint,
+      mediaFile: mediaFile,
     );
     if (pick == null) return null;
     _log(
@@ -572,41 +581,384 @@ class AutoNamer {
     required List<({File file, String discName, List<File> srts})> items,
     required Map<int, ({String text, String language})> subs,
     required Map<int, Fingerprint> fps,
+    required int seriesId,
+    required String subLang,
   }) async {
     final picks = <int, _EpisodePick?>{};
     final usedStems = <String, int>{};
+
+    // TMDB season 0 (specials) — fetched lazily, once, for files that match
+    // no regular episode: DVD bonus content usually lives there.
+    List<({int season, EpisodeInfo ep})>? specials;
+    Future<List<({int season, EpisodeInfo ep})>> loadSpecials() async =>
+        specials ??=
+            (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
+                .map((ep) => (season: 0, ep: ep))
+                .toList();
+
+    // Probe real durations once; the median anchors multi-part and
+    // play-all detection when TMDB runtimes are missing.
+    final durations = <int, double>{};
+    for (var i = 0; i < items.length; i++) {
+      final d = await _probeDurationSecs(items[i].file);
+      if (d != null) durations[i] = d;
+    }
+    final medianSecs = _median(durations.values);
+
+    // The same episode ripped from two discs: name the first copy only.
+    final duplicateOf = <int, int>{};
+    final subIdxs = subs.keys.toList()..sort();
+    for (var a = 0; a < subIdxs.length; a++) {
+      for (var b = a + 1; b < subIdxs.length; b++) {
+        final i = subIdxs[a], j = subIdxs[b];
+        if (duplicateOf.containsKey(j)) continue;
+        if (isNearDuplicateText(subs[i]!.text, subs[j]!.text)) {
+          duplicateOf[j] = i;
+        }
+      }
+    }
 
     for (var i = 0; i < items.length; i++) {
       final sub = subs[i];
       // Reuse the per-file summary computed earlier; it's the strongest signal.
       final fp = fps[i] ?? Fingerprint.empty;
       if (sub == null) continue;
+      final dupSrc = duplicateOf[i];
+      if (dupSrc != null) {
+        _log(
+          '   AutoNamer: ${items[i].file.path} has near-identical subtitles '
+          'to ${items[dupSrc].file.path} — duplicate copy, leaving unnamed.',
+          isError: true,
+        );
+        picks[i] = null;
+        continue;
+      }
       _log(
         '   [${i + 1}/${items.length}] Naming: ${items[i].file.path}',
       );
-      final pick = await _llmEpisodeMatch(
+      var pick = await _llmEpisodeMatch(
         fp: fp,
         episodes: episodes,
         subtitleText: sub.text,
       );
       if (pick == null) {
-        picks[i] = await _promptEpisodePick(episodes: episodes);
+        // Retry once with a proper-noun-dense excerpt before giving up.
+        _log('   Episode match failed — retrying with name-dense excerpt.');
+        pick = await _llmEpisodeMatch(
+          fp: fp,
+          episodes: episodes,
+          subtitleText: entityDenseExcerpt(sub.text),
+        );
+      }
+      if (pick == null) {
+        // Season-0 fallback: DVD bonus content lives in TMDB's specials.
+        final sp = await loadSpecials();
+        if (sp.isNotEmpty) {
+          _log('   No regular episode matched — trying season 0 (specials).');
+          pick = await _llmEpisodeMatch(
+            fp: fp,
+            episodes: sp,
+            subtitleText: sub.text,
+          );
+          if (pick != null &&
+              !await _verifyPick(fp: fp, pick: pick, episodes: sp)) {
+            pick = null;
+          }
+        }
+        if (pick == null) {
+          picks[i] = await _promptEpisodePick(episodes: episodes);
+          continue;
+        }
+        // Specials get no duration refinement (their runtimes vary wildly).
+        final dupSp = usedStems[pick.stem];
+        if (dupSp != null) {
+          _log(
+            '   AutoNamer: ${items[i].file.path} duplicate special '
+            '${pick.stem}, kept ${items[dupSp].file.path} — skipping.',
+            isError: true,
+          );
+          picks[i] = null;
+        } else {
+          usedStems[pick.stem] = i;
+          picks[i] = pick;
+        }
         continue;
       }
+
+      final refined = _applyDurationRefinement(
+        pick: pick,
+        episodes: episodes,
+        durationSecs: durations[i],
+        medianSecs: medianSecs,
+        filePath: items[i].file.path,
+      );
+      if (refined == null) {
+        picks[i] = null; // play-all title
+        continue;
+      }
+      pick = refined;
+
       final dup = usedStems[pick.stem];
       if (dup != null) {
-        _log(
-          '   AutoNamer: ${items[i].file.path} duplicate stem '
-          '${pick.stem}, kept ${items[dup].file.path} — skipping.',
-          isError: true,
+        pick = await _handleStemConflict(
+          i: i,
+          dupIdx: dup,
+          pick: pick,
+          episodes: episodes,
+          items: items,
+          fps: fps,
+          subs: subs,
+          picks: picks,
+          usedStems: usedStems,
+          durations: durations,
+          medianSecs: medianSecs,
         );
-        picks[i] = null;
-      } else {
-        usedStems[pick.stem] = i;
-        picks[i] = pick;
+        if (pick == null) {
+          picks[i] = null;
+          continue;
+        }
       }
+
+      if (!await _verifyPick(fp: fp, pick: pick, episodes: episodes)) {
+        picks[i] = null;
+        continue;
+      }
+      usedStems[pick.stem] = i;
+      picks[i] = pick;
     }
     return picks;
+  }
+
+  /// Resolves a duplicate-stem conflict between file [i] and earlier file
+  /// [dupIdx]. Similar subtitle texts mean the disc carries the same episode
+  /// in different cuts — resolved by duration (primary/extended/bonus).
+  /// Dissimilar texts mean at most one file is that episode — resolved via
+  /// one LLM disambiguation call, which may reassign [dupIdx]'s pick in
+  /// place. Returns file [i]'s corrected pick, or null to leave it unnamed.
+  Future<_EpisodePick?> _handleStemConflict({
+    required int i,
+    required int dupIdx,
+    required _EpisodePick pick,
+    required List<({int season, EpisodeInfo ep})> episodes,
+    required List<({File file, String discName, List<File> srts})> items,
+    required Map<int, Fingerprint> fps,
+    required Map<int, ({String text, String language})> subs,
+    required Map<int, _EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required Map<int, double> durations,
+    required double? medianSecs,
+  }) async {
+    final textA = subs[dupIdx]?.text ?? '';
+    final textB = subs[i]?.text ?? '';
+    final similarity = textSimilarity(textA, textB);
+    if (textA.isNotEmpty && textB.isNotEmpty && similarity >= 0.5) {
+      return _resolveVersionConflict(
+        i: i,
+        dupIdx: dupIdx,
+        pick: pick,
+        episodes: episodes,
+        items: items,
+        picks: picks,
+        usedStems: usedStems,
+        durations: durations,
+        medianSecs: medianSecs,
+        similarity: similarity,
+      );
+    }
+
+    _log(
+      '   AutoNamer: ${items[i].file.path} and ${items[dupIdx].file.path} '
+      'both matched ${pick.stem} — asking LLM to disambiguate.',
+      isError: true,
+    );
+    final resolved = await _resolveStemConflict(
+      firstFp: fps[dupIdx] ?? Fingerprint.empty,
+      secondFp: fps[i] ?? Fingerprint.empty,
+      contested: pick,
+      episodes: episodes,
+    );
+    if (resolved == null) {
+      _log(
+        '   Disambiguation failed — keeping ${items[dupIdx].file.path}, '
+        'leaving ${items[i].file.path} unnamed.',
+        isError: true,
+      );
+      return null;
+    }
+
+    // Reassign the earlier claimant when the LLM moved it elsewhere.
+    if (resolved.first > 0) {
+      final newFirst = _refineOrNull(
+        _pickFromEpisodeIndex(episodes, resolved.first),
+        episodes: episodes,
+        durationSecs: durations[dupIdx],
+        medianSecs: medianSecs,
+        filePath: items[dupIdx].file.path,
+      );
+      if (newFirst != null && newFirst.stem != picks[dupIdx]?.stem) {
+        _log(
+          '   Disambiguation: ${items[dupIdx].file.path} reassigned '
+          '→ ${newFirst.stem} "${newFirst.title}".',
+        );
+        usedStems.remove(picks[dupIdx]?.stem);
+        picks[dupIdx] = newFirst;
+        usedStems[newFirst.stem] = dupIdx;
+      }
+    } else {
+      _log(
+        '   Disambiguation: ${items[dupIdx].file.path} could not be placed '
+        '— leaving it unnamed.',
+        isError: true,
+      );
+      usedStems.remove(picks[dupIdx]?.stem);
+      picks[dupIdx] = null;
+    }
+
+    if (resolved.second == 0) {
+      _log(
+        '   Disambiguation: ${items[i].file.path} could not be placed '
+        '— leaving unnamed.',
+        isError: true,
+      );
+      return null;
+    }
+    final newPick = _refineOrNull(
+      _pickFromEpisodeIndex(episodes, resolved.second),
+      episodes: episodes,
+      durationSecs: durations[i],
+      medianSecs: medianSecs,
+      filePath: items[i].file.path,
+    );
+    if (newPick == null) return null;
+    if (usedStems.containsKey(newPick.stem)) {
+      _log(
+        '   Disambiguation: ${newPick.stem} already taken — leaving '
+        '${items[i].file.path} unnamed.',
+        isError: true,
+      );
+      return null;
+    }
+    return newPick;
+  }
+
+  /// Same-episode-different-cuts resolution: the file whose duration best
+  /// matches the TMDB runtime keeps the plain stem, an extended cut gets an
+  /// " (extended)" suffix, an episode-plus-extras cut stays unnamed.
+  /// May demote the earlier claimant [dupIdx] in place.
+  _EpisodePick? _resolveVersionConflict({
+    required int i,
+    required int dupIdx,
+    required _EpisodePick pick,
+    required List<({int season, EpisodeInfo ep})> episodes,
+    required List<({File file, String discName, List<File> srts})> items,
+    required Map<int, _EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required Map<int, double> durations,
+    required double? medianSecs,
+    required double similarity,
+  }) {
+    _log(
+      '   AutoNamer: ${items[i].file.path} and ${items[dupIdx].file.path} '
+      'carry the same episode ${pick.stem} in different cuts '
+      '(similarity ${similarity.toStringAsFixed(2)}) — resolving by duration.',
+    );
+    final expected = _expectedSecsFor(pick, episodes, medianSecs);
+    final roles = classifyVersions(
+      durationsSecs: [durations[dupIdx], durations[i]],
+      expectedSecs: expected,
+    );
+
+    // Builds the pick for a non-primary role, registering its stem.
+    _EpisodePick? assignSecondary(int fileIdx, VersionRole role) {
+      if (role == VersionRole.leaveUnnamed) {
+        _log(
+          '   Version: ${items[fileIdx].file.path} runs '
+          '${((durations[fileIdx] ?? 0) / 60).toStringAsFixed(1)} min — '
+          'episode-plus-extras cut, leaving unnamed.',
+          isError: true,
+        );
+        return null;
+      }
+      final stem = _uniqueExtendedStem(pick.stem, usedStems);
+      _log(
+        '   Version: ${items[fileIdx].file.path} → "$stem" (longer cut).',
+      );
+      return _EpisodePick(
+        stem: stem,
+        title: pick.title,
+        season: pick.season,
+        ep: pick.ep,
+        epEnd: pick.epEnd,
+      );
+    }
+
+    if (roles[1] == VersionRole.primary) {
+      // New file is the better version: demote the earlier claimant.
+      usedStems.remove(pick.stem);
+      final demoted = assignSecondary(dupIdx, roles[0]);
+      picks[dupIdx] = demoted;
+      if (demoted != null) usedStems[demoted.stem] = dupIdx;
+      _log('   Version: ${items[i].file.path} keeps ${pick.stem}.');
+      return pick;
+    }
+    // Earlier claimant stays primary; place the new file.
+    return assignSecondary(i, roles[1]);
+  }
+
+  /// Expected duration in seconds of the episode(s) covered by [pick]:
+  /// summed TMDB runtimes, with [medianSecs] filling in per missing part.
+  double? _expectedSecsFor(
+    _EpisodePick pick,
+    List<({int season, EpisodeInfo ep})> episodes,
+    double? medianSecs,
+  ) {
+    var total = 0.0;
+    for (var n = pick.ep; n <= pick.epEnd; n++) {
+      final e = episodes
+          .where((x) => x.season == pick.season && x.ep.number == n)
+          .toList();
+      final r = e.isEmpty ? null : e.first.ep.runtime;
+      if (r != null) {
+        total += r * 60;
+      } else if (medianSecs != null) {
+        total += medianSecs;
+      } else {
+        return null;
+      }
+    }
+    return total == 0 ? null : total;
+  }
+
+  static String _uniqueExtendedStem(String base, Map<String, int> usedStems) {
+    var stem = '$base (extended)';
+    for (var n = 2; usedStems.containsKey(stem); n++) {
+      stem = '$base (extended $n)';
+    }
+    return stem;
+  }
+
+  _EpisodePick? _refineOrNull(
+    _EpisodePick pick, {
+    required List<({int season, EpisodeInfo ep})> episodes,
+    required double? durationSecs,
+    required double? medianSecs,
+    required String filePath,
+  }) =>
+      _applyDurationRefinement(
+        pick: pick,
+        episodes: episodes,
+        durationSecs: durationSecs,
+        medianSecs: medianSecs,
+        filePath: filePath,
+      );
+
+  static double? _median(Iterable<double> values) {
+    final sorted = values.toList()..sort();
+    if (sorted.length < 3) return null;
+    final mid = sorted.length ~/ 2;
+    return sorted.length.isOdd
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   // ---------------------------------------------------------------------------
@@ -902,25 +1254,262 @@ class AutoNamer {
       }
     }
 
-    // Build final picks from resolved assignments.
+    // Build final picks from resolved assignments, refined against the
+    // files' real durations (multi-part ranges, play-all rejection).
+    final durations = <int, double>{};
+    for (var i = 0; i < items.length; i++) {
+      final d = await _probeDurationSecs(items[i].file);
+      if (d != null) durations[i] = d;
+    }
+    final medianSecs = _median(durations.values);
+
     final picks = <int, _EpisodePick?>{};
     for (final entry in epToBest.entries) {
       final epIdx = entry.key;
       final fileIdx = entry.value.fileIdx;
       final c = filteredEpisodes[epIdx];
-      final label =
-          's${c.season.toString().padLeft(2, "0")}'
-          'e${c.ep.number.toString().padLeft(2, "0")}';
-      _log('   [${fileIdx + 1}/${items.length}] → $label "${c.ep.title}"');
-      picks[fileIdx] = _EpisodePick(
-        stem: label,
+      final pick = _EpisodePick(
+        stem: episodeStem(c.season, c.ep.number),
         title: c.ep.title,
         season: c.season,
         ep: c.ep.number,
       );
+      final refined = _applyDurationRefinement(
+        pick: pick,
+        episodes: episodes,
+        durationSecs: durations[fileIdx],
+        medianSecs: medianSecs,
+        filePath: items[fileIdx].file.path,
+      );
+      if (refined == null) {
+        picks[fileIdx] = null; // play-all title
+        continue;
+      }
+      _log(
+        '   [${fileIdx + 1}/${items.length}] → ${refined.stem} '
+        '"${refined.title}"',
+      );
+      picks[fileIdx] = refined;
     }
 
     return picks;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Duration-aware refinement (multi-part ranges, play-all detection)
+  // ---------------------------------------------------------------------------
+
+  /// Builds an `s01e02` stem, or `s01e02-e04` when [epEnd] > [epStart].
+  static String episodeStem(int season, int epStart, [int? epEnd]) {
+    final s = season.toString().padLeft(2, '0');
+    final e1 = epStart.toString().padLeft(2, '0');
+    if (epEnd == null || epEnd == epStart) return 's${s}e$e1';
+    return 's${s}e$e1-e${epEnd.toString().padLeft(2, "0")}';
+  }
+
+  /// Strips a trailing part marker — "(2)", "[2]", "Part 3", "- Part One" —
+  /// so multi-part episodes ("iPsycho (1)"/"iPsycho (2)") share a base title.
+  static String baseEpisodeTitle(String title) => title
+      .replaceFirst(
+        RegExp(
+          r'\s*[-–—:,]?\s*(?:[(\[]\s*(?:part\s*)?(?:\d+|one|two|three)\s*[)\]]'
+          r'|\bpart\s+(?:\d+|one|two|three))\s*$',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .trim();
+
+  /// Returns the consecutive run of episodes in [season] that share the same
+  /// base title as episode [epNumber] (a multi-part group), or null when the
+  /// episode stands alone.
+  static ({int start, int end})? partGroup(
+    List<({int season, EpisodeInfo ep})> episodes,
+    int season,
+    int epNumber,
+  ) {
+    final inSeason = episodes.where((e) => e.season == season).toList()
+      ..sort((a, b) => a.ep.number.compareTo(b.ep.number));
+    final idx = inSeason.indexWhere((e) => e.ep.number == epNumber);
+    if (idx < 0) return null;
+    final base = baseEpisodeTitle(inSeason[idx].ep.title);
+    if (base.isEmpty) return null;
+
+    var start = idx;
+    while (start > 0 &&
+        inSeason[start - 1].ep.number == inSeason[start].ep.number - 1 &&
+        baseEpisodeTitle(inSeason[start - 1].ep.title) == base) {
+      start--;
+    }
+    var end = idx;
+    while (end < inSeason.length - 1 &&
+        inSeason[end + 1].ep.number == inSeason[end].ep.number + 1 &&
+        baseEpisodeTitle(inSeason[end + 1].ep.title) == base) {
+      end++;
+    }
+    if (start == end) return null;
+    return (start: inSeason[start].ep.number, end: inSeason[end].ep.number);
+  }
+
+  /// Classifies a matched episode against the file's real duration.
+  ///
+  /// Returns the episode range the file most plausibly covers, or
+  /// `playAll: true` when the duration is far beyond any multi-part group
+  /// (a whole-disc "play all" title that should not claim an episode name).
+  /// TMDB per-episode runtimes are the primary yardstick — a 44-minute
+  /// special whose TMDB runtime is 44 stays a single episode; the batch
+  /// median only fills in when runtimes are missing.
+  static ({int epStart, int epEnd, bool playAll}) refineWithDuration({
+    required List<({int season, EpisodeInfo ep})> episodes,
+    required int season,
+    required int epNumber,
+    required double? durationSecs,
+    required double? medianSecs,
+  }) {
+    final single = (epStart: epNumber, epEnd: epNumber, playAll: false);
+    if (durationSecs == null) return single;
+
+    final inSeason = episodes.where((e) => e.season == season).toList();
+    final picked = inSeason.where((e) => e.ep.number == epNumber).toList();
+    final ownRuntime = picked.isEmpty ? null : picked.first.ep.runtime;
+    final fallbackMins = medianSecs != null ? medianSecs / 60 : null;
+
+    double? groupSumMins;
+    final group = partGroup(episodes, season, epNumber);
+    if (group != null) {
+      groupSumMins = 0;
+      for (var n = group.start; n <= group.end; n++) {
+        final e = inSeason.where((e) => e.ep.number == n).toList();
+        final r = e.isEmpty ? null : e.first.ep.runtime;
+        final mins = r?.toDouble() ?? ownRuntime?.toDouble() ?? fallbackMins;
+        if (mins == null) {
+          groupSumMins = null;
+          break;
+        }
+        groupSumMins = groupSumMins! + mins;
+      }
+    }
+
+    // Play-all: several times the median and well beyond the part group.
+    if (medianSecs != null && durationSecs / medianSecs >= 3.6) {
+      final beyondGroup =
+          groupSumMins == null || durationSecs > groupSumMins * 60 * 1.3;
+      if (beyondGroup) return (epStart: epNumber, epEnd: epNumber, playAll: true);
+    }
+
+    // Matches its own single-episode runtime → single, even for long specials.
+    if (ownRuntime != null && durationSecs <= ownRuntime * 60 * 1.5) {
+      return single;
+    }
+
+    if (group != null) {
+      if (groupSumMins != null &&
+          (durationSecs - groupSumMins * 60).abs() <= groupSumMins * 60 * 0.25) {
+        return (epStart: group.start, epEnd: group.end, playAll: false);
+      }
+      // No usable runtimes: infer the part count from the median.
+      if (medianSecs != null) {
+        final k = (durationSecs / medianSecs)
+            .round()
+            .clamp(1, group.end - group.start + 1);
+        if (k >= 2) {
+          return (
+            epStart: group.start,
+            epEnd: group.start + k - 1,
+            playAll: false,
+          );
+        }
+      }
+      return single;
+    }
+
+    // No part group: only claim a range when consecutive runtimes genuinely
+    // sum to the file duration (within 20%).
+    final expectedMins = ownRuntime?.toDouble() ?? fallbackMins;
+    if (expectedMins == null || durationSecs <= expectedMins * 60 * 1.5) {
+      return single;
+    }
+    ({int epStart, int epEnd, bool playAll})? bestRange;
+    var bestErr = double.infinity;
+    final sorted = [...inSeason]
+      ..sort((a, b) => a.ep.number.compareTo(b.ep.number));
+    final startIdx = sorted.indexWhere((e) => e.ep.number == epNumber);
+    if (startIdx >= 0) {
+      var sumMins = 0.0;
+      for (var i = startIdx; i < sorted.length && i < startIdx + 4; i++) {
+        if (i > startIdx &&
+            sorted[i].ep.number != sorted[i - 1].ep.number + 1) {
+          break;
+        }
+        final r = sorted[i].ep.runtime?.toDouble() ?? fallbackMins;
+        if (r == null) break;
+        sumMins += r;
+        if (i == startIdx) continue;
+        final err = (durationSecs - sumMins * 60).abs() / (sumMins * 60);
+        if (err <= 0.2 && err < bestErr) {
+          bestErr = err;
+          bestRange = (
+            epStart: epNumber,
+            epEnd: sorted[i].ep.number,
+            playAll: false,
+          );
+        }
+      }
+    }
+    return bestRange ?? single;
+  }
+
+  /// Jaccard word-set similarity between two subtitle texts (case-folded).
+  /// Unlike [isNearDuplicateText] there is no length-ratio gate, so an
+  /// extended cut still scores high against its broadcast version.
+  static double textSimilarity(String a, String b) =>
+      _similarity(a.toLowerCase(), b.toLowerCase());
+
+  /// Assigns a [VersionRole] to each of several files that carry the same
+  /// episode in different cuts. The file whose duration sits closest to
+  /// [expectedSecs] becomes [VersionRole.primary]; the rest become
+  /// [VersionRole.extended] up to 1.5× the expected duration and
+  /// [VersionRole.leaveUnnamed] beyond that (episode-plus-extras cuts).
+  /// With no expected duration or no known durations the first file wins and
+  /// the rest are extended — skipping without evidence is too aggressive.
+  static List<VersionRole> classifyVersions({
+    required List<double?> durationsSecs,
+    required double? expectedSecs,
+  }) {
+    if (durationsSecs.isEmpty) return const [];
+    var best = 0;
+    if (expectedSecs != null) {
+      var bestErr = double.infinity;
+      for (var i = 0; i < durationsSecs.length; i++) {
+        final d = durationsSecs[i];
+        if (d == null) continue;
+        final err = (d - expectedSecs).abs();
+        if (err < bestErr) {
+          bestErr = err;
+          best = i;
+        }
+      }
+    }
+    return [
+      for (var i = 0; i < durationsSecs.length; i++)
+        i == best
+            ? VersionRole.primary
+            : (expectedSecs == null ||
+                    durationsSecs[i] == null ||
+                    durationsSecs[i]! <= expectedSecs * 1.5)
+                ? VersionRole.extended
+                : VersionRole.leaveUnnamed,
+    ];
+  }
+
+  /// True when two subtitle texts are near-identical — the same episode
+  /// ripped from two discs. Compares length ratio plus Jaccard word-set
+  /// similarity, so capitalisation and small CC differences don't matter.
+  static bool isNearDuplicateText(String a, String b) {
+    if (a.isEmpty || b.isEmpty) return false;
+    final ratio = a.length < b.length ? a.length / b.length : b.length / a.length;
+    if (ratio < 0.8) return false;
+    return _similarity(a.toLowerCase(), b.toLowerCase()) >= 0.8;
   }
 
   /// Filters [episodes] to the top [maxEpisodes] most similar to any of
@@ -979,6 +1568,7 @@ class AutoNamer {
     required String subtitleText,
     required String subLang,
     List<int>? seasonHint,
+    File? mediaFile,
   }) async {
     // Determine seasons.
     final seasons = <int>[];
@@ -1015,12 +1605,55 @@ class AutoNamer {
     }
 
     // LLM matches subtitle excerpt to episode.
-    final pick = await _llmEpisodeMatch(
+    var pick = await _llmEpisodeMatch(
       fp: fp,
       episodes: episodes,
       subtitleText: subtitleText,
     );
-    if (pick != null) return pick;
+    if (pick == null) {
+      // Retry once with a proper-noun-dense excerpt before giving up.
+      _log('   Episode match failed — retrying with name-dense excerpt.');
+      pick = await _llmEpisodeMatch(
+        fp: fp,
+        episodes: episodes,
+        subtitleText: entityDenseExcerpt(subtitleText),
+      );
+    }
+    if (pick != null) {
+      if (mediaFile != null) {
+        final refined = _applyDurationRefinement(
+          pick: pick,
+          episodes: episodes,
+          durationSecs: await _probeDurationSecs(mediaFile),
+          medianSecs: null,
+          filePath: mediaFile.path,
+        );
+        if (refined == null) return null; // play-all title
+        pick = refined;
+      }
+      if (!await _verifyPick(fp: fp, pick: pick, episodes: episodes)) {
+        return null;
+      }
+      return pick;
+    }
+
+    // Season-0 fallback: DVD bonus content lives in TMDB's specials.
+    final specials =
+        (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
+            .map((ep) => (season: 0, ep: ep))
+            .toList();
+    if (specials.isNotEmpty) {
+      _log('   No regular episode matched — trying season 0 (specials).');
+      final spPick = await _llmEpisodeMatch(
+        fp: fp,
+        episodes: specials,
+        subtitleText: subtitleText,
+      );
+      if (spPick != null &&
+          await _verifyPick(fp: fp, pick: spPick, episodes: specials)) {
+        return spPick;
+      }
+    }
 
     // LLM declined — ask user (or skip in force mode).
     return _promptEpisodePick(episodes: episodes);
@@ -1236,6 +1869,275 @@ class AutoNamer {
   }
 
   // ---------------------------------------------------------------------------
+  // Duration probing
+  // ---------------------------------------------------------------------------
+
+  final Map<String, double?> _durationCache = {};
+
+  /// Container duration in seconds via ffprobe, or null when unavailable.
+  Future<double?> _probeDurationSecs(File mediaFile) async {
+    final key = mediaFile.path;
+    if (_durationCache.containsKey(key)) return _durationCache[key];
+    double? secs;
+    try {
+      final result = await Process.run(extractor.ffprobe, [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'csv=p=0',
+        mediaFile.path,
+      ]);
+      if (result.exitCode == 0) {
+        secs = double.tryParse((result.stdout as String).trim());
+      }
+    } catch (_) {}
+    _durationCache[key] = secs;
+    return secs;
+  }
+
+  /// Applies [refineWithDuration] to a pick. Returns null for a play-all
+  /// title (which must not claim an episode name); otherwise the pick,
+  /// upgraded to a range stem when the duration covers a multi-part group.
+  _EpisodePick? _applyDurationRefinement({
+    required _EpisodePick pick,
+    required List<({int season, EpisodeInfo ep})> episodes,
+    required double? durationSecs,
+    required double? medianSecs,
+    required String filePath,
+  }) {
+    final r = refineWithDuration(
+      episodes: episodes,
+      season: pick.season,
+      epNumber: pick.ep,
+      durationSecs: durationSecs,
+      medianSecs: medianSecs,
+    );
+    if (r.playAll) {
+      final mins = (durationSecs! / 60).toStringAsFixed(0);
+      _log(
+        '   AutoNamer: $filePath is $mins min — looks like a play-all/'
+        'concatenated disc title, not episode ${pick.stem} — leaving unnamed.',
+        isError: true,
+      );
+      return null;
+    }
+    if (r.epStart == pick.ep && r.epEnd == pick.ep) {
+      // Kept as a single episode — warn when the duration clearly exceeds
+      // the expected length (likely an extended or episode-plus-extras cut).
+      final expected = _expectedSecsFor(pick, episodes, medianSecs);
+      if (durationSecs != null &&
+          expected != null &&
+          durationSecs > expected * 1.5) {
+        _log(
+          '   ⚠ $filePath runs ${(durationSecs / 60).toStringAsFixed(1)} min '
+          'but ${pick.stem} expects ~${(expected / 60).toStringAsFixed(0)} min '
+          '— possible extended/bonus cut.',
+          isError: true,
+        );
+      }
+      return pick;
+    }
+    final stem = episodeStem(pick.season, r.epStart, r.epEnd);
+    final first = episodes
+        .where((e) => e.season == pick.season && e.ep.number == r.epStart)
+        .toList();
+    final title = first.isEmpty
+        ? pick.title
+        : baseEpisodeTitle(first.first.ep.title);
+    _log(
+      '   Duration ${((durationSecs ?? 0) / 60).toStringAsFixed(1)} min '
+      'covers a multi-part episode → $stem "$title".',
+    );
+    return _EpisodePick(
+      stem: stem,
+      title: title,
+      season: pick.season,
+      ep: r.epStart,
+      epEnd: r.epEnd,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Entity-dense retry excerpt
+  // ---------------------------------------------------------------------------
+
+  /// Builds an excerpt of sentences dense in recurring proper nouns —
+  /// character and place names are the strongest episode-identification
+  /// signal when a plain excerpt failed.
+  static String entityDenseExcerpt(String text, {int maxChars = 8000}) {
+    final counts = <String, int>{};
+    for (final m in RegExp(r'\b[A-Z][a-z]{2,}\b').allMatches(text)) {
+      final w = m.group(0)!;
+      counts[w] = (counts[w] ?? 0) + 1;
+    }
+    final recurring = counts.entries
+        .where((e) => e.value >= 3)
+        .map((e) => e.key)
+        .toSet();
+    if (recurring.isEmpty) return _episodeExcerpt(text);
+
+    final buf = StringBuffer();
+    for (final sentence in text.split(RegExp(r'(?<=[.!?])\s+'))) {
+      if (buf.length >= maxChars) break;
+      final hasEntity = RegExp(r'\b[A-Z][a-z]{2,}\b')
+          .allMatches(sentence)
+          .any((m) => recurring.contains(m.group(0)));
+      if (hasEntity) buf.write('$sentence ');
+    }
+    final out = buf.toString().trim();
+    return out.isEmpty ? _episodeExcerpt(text) : out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Post-assignment verification
+  // ---------------------------------------------------------------------------
+
+  /// Second-opinion check: an independent re-match of the summary against
+  /// the episode list, without the original pick in sight. The pick is
+  /// rejected only when this blind re-match lands on a DIFFERENT episode —
+  /// an inconclusive answer (pick 0) accepts, so sparse evidence (short
+  /// whisper transcripts, thin TMDB overviews) never blocks a rename that
+  /// the primary match and the re-match agree on.
+  Future<bool> _verifyPick({
+    required Fingerprint fp,
+    required _EpisodePick pick,
+    required List<({int season, EpisodeInfo ep})> episodes,
+  }) async {
+    if (fp.summary.isEmpty) return true;
+
+    final epBuf = StringBuffer();
+    for (var i = 0; i < episodes.length; i++) {
+      final c = episodes[i];
+      epBuf.writeln(
+        '${i + 1}. ${episodeStem(c.season, c.ep.number)} '
+        '"${c.ep.title}": ${c.ep.overview}',
+      );
+    }
+
+    final response = await llm.chat(
+      timeout: const Duration(minutes: 2),
+      maxTokens: 2000,
+      temperature: 0.0,
+      [
+        {
+          'role': 'system',
+          'content':
+              'You identify which TV episode a plot summary describes.\n'
+              'Output STRICT JSON: {"pick":N} (1-based index into the '
+              'episode list), or {"pick":0} when unsure.',
+        },
+        {
+          'role': 'user',
+          'content': 'Summary:\n${fp.summary}\n\nEpisodes:\n$epBuf\nJSON:',
+        },
+      ],
+    );
+    if (response == null) return true;
+    final obj = _parseJsonObject(response);
+    if (obj == null) return true;
+    final n = obj['pick'] is int
+        ? obj['pick'] as int
+        : int.tryParse('${obj['pick']}') ?? 0;
+    if (n < 1 || n > episodes.length) return true; // inconclusive → accept
+
+    final re = episodes[n - 1];
+    final samePick = re.season == pick.season &&
+        re.ep.number >= pick.ep &&
+        re.ep.number <= pick.epEnd;
+    // Same part group also counts: parts of one special are one story.
+    final group = partGroup(episodes, pick.season, pick.ep);
+    final sameGroup = group != null &&
+        re.season == pick.season &&
+        re.ep.number >= group.start &&
+        re.ep.number <= group.end;
+    if (samePick || sameGroup) return true;
+
+    _log(
+      '   ⚠ Verification: blind re-match says '
+      '${episodeStem(re.season, re.ep.number)} "${re.ep.title}", '
+      'not ${pick.stem} "${pick.title}" — leaving unnamed.',
+      isError: true,
+    );
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Duplicate-stem conflict resolution
+  // ---------------------------------------------------------------------------
+
+  /// Two files claimed the same episode; at most one is right. One LLM call
+  /// compares both summaries against the episode list and reassigns each.
+  /// Returns 1-based episode indices (0 = could not place) for the earlier
+  /// claimant and the new claimant, or null when the LLM gave no usable answer.
+  Future<({int first, int second})?> _resolveStemConflict({
+    required Fingerprint firstFp,
+    required Fingerprint secondFp,
+    required _EpisodePick contested,
+    required List<({int season, EpisodeInfo ep})> episodes,
+  }) async {
+    if (firstFp.summary.isEmpty || secondFp.summary.isEmpty) return null;
+
+    final epBuf = StringBuffer();
+    for (var i = 0; i < episodes.length; i++) {
+      final c = episodes[i];
+      epBuf.writeln(
+        '${i + 1}. ${episodeStem(c.season, c.ep.number)} '
+        '"${c.ep.title}": ${c.ep.overview}',
+      );
+    }
+
+    final response = await llm.chat(
+      timeout: const Duration(minutes: 3),
+      maxTokens: 4000,
+      temperature: 0.0,
+      [
+        {
+          'role': 'system',
+          'content':
+              'Two subtitle summaries were both matched to episode '
+              '"${contested.title}" (${contested.stem}), but each summary '
+              'belongs to a DIFFERENT episode — at most one of them is that '
+              'episode. Assign each summary to the episode it really '
+              'describes, choosing from the numbered list.\n'
+              'Output STRICT JSON: {"first":N,"second":M} (1-based indices '
+              'into the episode list, 0 = cannot place). first and second '
+              'must differ unless both are 0.',
+        },
+        {
+          'role': 'user',
+          'content':
+              'Summary FIRST:\n${firstFp.summary}\n\n'
+              'Summary SECOND:\n${secondFp.summary}\n\n'
+              'Episodes:\n$epBuf\nJSON:',
+        },
+      ],
+    );
+    if (response == null) return null;
+    final obj = _parseJsonObject(response);
+    if (obj == null) return null;
+    int parse(dynamic v) =>
+        v is int ? v : int.tryParse('$v') ?? 0;
+    final first = parse(obj['first']);
+    final second = parse(obj['second']);
+    if (first < 0 || first > episodes.length) return null;
+    if (second < 0 || second > episodes.length) return null;
+    if (first == second && first != 0) return null;
+    return (first: first, second: second);
+  }
+
+  _EpisodePick _pickFromEpisodeIndex(
+    List<({int season, EpisodeInfo ep})> episodes,
+    int oneBased,
+  ) {
+    final c = episodes[oneBased - 1];
+    return _EpisodePick(
+      stem: episodeStem(c.season, c.ep.number),
+      title: c.ep.title,
+      season: c.season,
+      ep: c.ep.number,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Utilities
   // ---------------------------------------------------------------------------
 
@@ -1433,13 +2335,16 @@ class _EpisodePick {
   final String title;
   final int season;
   final int ep;
+  /// Last episode covered by this file; equals [ep] for single episodes.
+  final int epEnd;
 
   _EpisodePick({
     required this.stem,
     required this.title,
     required this.season,
     required this.ep,
-  });
+    int? epEnd,
+  }) : epEnd = epEnd ?? ep;
 }
 
 class _ScoredCandidate {
