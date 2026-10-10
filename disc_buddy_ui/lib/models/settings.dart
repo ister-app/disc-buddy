@@ -12,6 +12,7 @@ class Settings {
   final String? whisper;
   /// Path to the whisper.cpp ggml model file.
   final String? whisperModel;
+  final String? transcribeLanguage;
   final String? tmdbToken;
   final String? llmUrl;
   final String? llmKey;
@@ -41,6 +42,7 @@ class Settings {
     this.subtileOcr,
     this.whisper,
     this.whisperModel,
+    this.transcribeLanguage,
     this.tmdbToken,
     this.llmUrl,
     this.llmKey,
@@ -72,6 +74,7 @@ class Settings {
     subtileOcr: json['subtile-ocr'] as String?,
     whisper: json['whisper'] as String?,
     whisperModel: json['whisper-model'] as String?,
+    transcribeLanguage: json['transcribe-lang'] as String?,
     tmdbToken: json['tmdb-token'] as String?,
     llmUrl: json['llm-url'] as String?,
     llmKey: json['llm-key'] as String?,
@@ -93,6 +96,7 @@ class Settings {
     if (subtileOcr != null) 'subtile-ocr': subtileOcr,
     if (whisper != null) 'whisper': whisper,
     if (whisperModel != null) 'whisper-model': whisperModel,
+    if (transcribeLanguage != null) 'transcribe-lang': transcribeLanguage,
     if (tmdbToken != null) 'tmdb-token': tmdbToken,
     if (llmUrl != null) 'llm-url': llmUrl,
     if (llmKey != null) 'llm-key': llmKey,
@@ -120,6 +124,7 @@ class Settings {
     subtileOcr: subtileOcr,
     whisper: whisper,
     whisperModel: whisperModel,
+    transcribeLanguage: transcribeLanguage,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -143,6 +148,7 @@ class Settings {
     Object? subtileOcr = _sentinel,
     Object? whisper = _sentinel,
     Object? whisperModel = _sentinel,
+    Object? transcribeLanguage = _sentinel,
     Object? tmdbToken = _sentinel,
     Object? llmUrl = _sentinel,
     Object? llmKey = _sentinel,
@@ -163,6 +169,7 @@ class Settings {
     subtileOcr: subtileOcr == _sentinel ? this.subtileOcr : subtileOcr as String?,
     whisper: whisper == _sentinel ? this.whisper : whisper as String?,
     whisperModel: whisperModel == _sentinel ? this.whisperModel : whisperModel as String?,
+    transcribeLanguage: transcribeLanguage == _sentinel ? this.transcribeLanguage : transcribeLanguage as String?,
     tmdbToken: tmdbToken == _sentinel ? this.tmdbToken : tmdbToken as String?,
     llmUrl: llmUrl == _sentinel ? this.llmUrl : llmUrl as String?,
     llmKey: llmKey == _sentinel ? this.llmKey : llmKey as String?,

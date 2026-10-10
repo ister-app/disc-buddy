@@ -17,6 +17,9 @@ class RipOptions {
   final String? whisper;
   /// Path to the whisper.cpp ggml model file (e.g. ggml-base.en.bin).
   final String? whisperModel;
+  /// Spoken language (ISO 639-1) to force on whisper; null = from the audio
+  /// track tag, else auto-detect.
+  final String? transcribeLanguage;
   final String? tmdbToken;
   final String? llmUrl;
   final String? llmKey;
@@ -60,6 +63,7 @@ class RipOptions {
     this.subtileOcr,
     this.whisper,
     this.whisperModel,
+    this.transcribeLanguage,
     this.tmdbToken,
     this.llmUrl,
     this.llmKey,
@@ -106,6 +110,7 @@ class RipOptions {
     subtileOcr: subtileOcr,
     whisper: whisper,
     whisperModel: whisperModel,
+    transcribeLanguage: transcribeLanguage,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -134,6 +139,7 @@ class RipOptions {
     subtileOcr: subtileOcr,
     whisper: whisper,
     whisperModel: whisperModel,
+    transcribeLanguage: transcribeLanguage,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,
@@ -162,6 +168,7 @@ class RipOptions {
     subtileOcr: subtileOcr,
     whisper: whisper,
     whisperModel: whisperModel,
+    transcribeLanguage: transcribeLanguage,
     tmdbToken: tmdbToken,
     llmUrl: llmUrl,
     llmKey: llmKey,

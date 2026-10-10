@@ -30,6 +30,20 @@ String convertIso2Tto2B(String code) {
   return iso639_2Tto2B[code.toLowerCase()] ?? code.toLowerCase();
 }
 
+/// Converts an ISO 639-2 (3-letter, B or T) code to ISO 639-1 (2-letter).
+/// A 2-letter input is returned lower-cased. Returns null for `und`, empty
+/// or unmapped codes.
+String? convertIso2to1(String raw) {
+  final code = raw.trim().toLowerCase();
+  if (code.isEmpty || code == 'und') return null;
+  if (code.length == 2) return code;
+  final b = convertIso2Tto2B(code);
+  for (final e in iso639_1to2B.entries) {
+    if (e.value == b) return e.key;
+  }
+  return null;
+}
+
 /// Returns true when [trackLang] matches [filterLang], normalizing both to
 /// ISO 639-2/B so that e.g. "nl" matches "dut" and "de" matches "ger".
 bool langMatchesFilter(String trackLang, String filterLang) {

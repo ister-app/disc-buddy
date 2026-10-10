@@ -5,6 +5,38 @@ import 'package:disc_buddy/disc_buddy.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('language helpers', () {
+    test('majorityLanguage picks the mode, first seen on ties', () {
+      expect(Transcriber.majorityLanguage([]), isNull);
+      expect(Transcriber.majorityLanguage(['en', 'nl', 'nl']), 'nl');
+      expect(Transcriber.majorityLanguage(['en', 'nl']), 'en');
+    });
+
+    test('looksLikeGarbage flags wrong-script and repeated text', () {
+      expect(Transcriber.looksLikeGarbage(
+          'Floris Wolfs and I often met each other over hope.', 'nl'), isFalse);
+      expect(Transcriber.looksLikeGarbage(
+          'Weet je dat er een telefoon onder de auto ligt?', 'nl'), isFalse);
+      expect(Transcriber.looksLikeGarbage(
+          '中文字幕:YK 中文字幕:YK 中文字幕:YK', 'nl'), isTrue);
+      expect(Transcriber.looksLikeGarbage(
+          List.filled(20, 'Dank je wel.').join(' '), 'nl'), isTrue);
+      expect(Transcriber.looksLikeGarbage('', 'nl'), isTrue);
+      // Non-Latin language with its own script is fine.
+      expect(Transcriber.looksLikeGarbage('これはテストです。昨日は雨でした。', 'ja'), isFalse);
+    });
+
+    test('convertIso2to1 maps B/T codes and rejects und', () {
+      expect(convertIso2to1('dut'), 'nl');
+      expect(convertIso2to1('nld'), 'nl');
+      expect(convertIso2to1('eng'), 'en');
+      expect(convertIso2to1('DE'), 'de');
+      expect(convertIso2to1('und'), isNull);
+      expect(convertIso2to1(''), isNull);
+      expect(convertIso2to1('xyz'), isNull);
+    });
+  });
+
   group('Transcriber.windowOffsets', () {
     test('unknown duration falls back to a single 5-minute window', () {
       for (final duration in [null, 0.0, -3.0]) {
@@ -205,6 +237,94 @@ echo '$whisperJson' > "\$prefix.json"
         File('${tmpDir.path}/episode.whisper.json').existsSync(),
         isTrue,
       );
+    });
+
+    // Fake whisper that records its `-l` argument per call and answers with
+    // a language chosen by the shell snippet [langExpr] (sees \$lang, \$prefix).
+    Future<File> fakeWhisper(String langExpr) => fakeBin('whisper-cli', '''
+prefix=""
+lang=""
+prev=""
+for arg; do
+  if [ "\$prev" = "-of" ]; then prefix="\$arg"; fi
+  if [ "\$prev" = "-l" ]; then lang="\$arg"; fi
+  prev="\$arg"
+done
+echo "\$lang \$(basename "\$prefix")" >> "${tmpDir.path}/calls.log"
+out=\$($langExpr)
+printf '%s' "{\\"result\\":{\\"language\\":\\"\$out\\"},\\"transcription\\":[{\\"text\\":\\"een lange nederlandse zin met genoeg woorden om ruim boven de minimale lengte van het transcript uit te komen zodat de controle slaagt en de test door kan gaan\\"}]}" > "\$prefix.json"
+''');
+
+    Future<File> fakeProbe(String tag) async => fakeBin('ffprobe',
+        "echo '${jsonEncode({
+          'streams': [{'codec_type': 'audio', 'tags': {'language': tag}}],
+          'format': {'duration': '2700.0'},
+        })}'");
+
+    Future<List<String>> calls() async =>
+        (await File('${tmpDir.path}/calls.log').readAsLines());
+
+    test('auto-detect: minority-language window is redone as the majority',
+        () async {
+      final mkv = File('${tmpDir.path}/ep.mkv');
+      await mkv.writeAsString('');
+      final ffprobe = await fakeProbe('und');
+      final ffmpeg = await fakeBin('ffmpeg', 'for out; do true; done; touch "\$out"');
+      // win0 detects English on auto; everything else is Dutch.
+      final whisper = await fakeWhisper(
+          'if [ "\$lang" = auto ] && [ "\$(basename "\$prefix")" = win0 ]; '
+          'then echo en; else echo nl; fi');
+
+      final t = Transcriber(
+        ffmpeg: ffmpeg.path, ffprobe: ffprobe.path,
+        whisperCli: whisper.path, whisperModel: 'm.bin',
+        onLog: (_, {isError = false}) {},
+      );
+      final result = await t.transcribe(mkv);
+      expect(result, isNotNull);
+      expect(result!.language, 'nl');
+      expect(await calls(), [
+        'auto win0', 'auto win1', 'auto win2', 'nl win0_redo',
+      ]);
+      final side = jsonDecode(
+          await File('${tmpDir.path}/ep.whisper.json').readAsString());
+      expect(side['version'], 2);
+      expect(side['language'], 'nl');
+      expect(side['languages'], ['nl', 'nl', 'nl']);
+    });
+
+    test('audio track tag pins the language without auto-detect', () async {
+      final mkv = File('${tmpDir.path}/ep.mkv');
+      await mkv.writeAsString('');
+      final ffprobe = await fakeProbe('dut');
+      final ffmpeg = await fakeBin('ffmpeg', 'for out; do true; done; touch "\$out"');
+      final whisper = await fakeWhisper('echo "\$lang"');
+
+      final t = Transcriber(
+        ffmpeg: ffmpeg.path, ffprobe: ffprobe.path,
+        whisperCli: whisper.path, whisperModel: 'm.bin',
+        onLog: (_, {isError = false}) {},
+      );
+      final result = await t.transcribe(mkv);
+      expect(result!.language, 'nl');
+      expect(await calls(), ['nl win0', 'nl win1', 'nl win2']);
+    });
+
+    test('explicit language wins over the track tag', () async {
+      final mkv = File('${tmpDir.path}/ep.mkv');
+      await mkv.writeAsString('');
+      final ffprobe = await fakeProbe('dut');
+      final ffmpeg = await fakeBin('ffmpeg', 'for out; do true; done; touch "\$out"');
+      final whisper = await fakeWhisper('echo "\$lang"');
+
+      final t = Transcriber(
+        ffmpeg: ffmpeg.path, ffprobe: ffprobe.path,
+        whisperCli: whisper.path, whisperModel: 'm.bin', language: 'en',
+        onLog: (_, {isError = false}) {},
+      );
+      final result = await t.transcribe(mkv);
+      expect(result!.language, 'en');
+      expect(await calls(), ['en win0', 'en win1', 'en win2']);
     });
 
     test('returns null when the file has no audio streams', () async {

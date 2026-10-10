@@ -31,6 +31,7 @@ Future<void> main(List<String> arguments) async {
     ..addOption('tmdb-token',   help: 'The Movie Database API read access token')
     ..addOption('whisper',      help: 'Path to whisper-cli (whisper.cpp) — audio-transcription fallback for auto-naming titles without subtitles')
     ..addOption('whisper-model', help: 'Path to the whisper.cpp ggml model file (e.g. ggml-base.en.bin)')
+    ..addOption('transcribe-lang', help: 'Spoken language for whisper transcription (ISO 639-1, e.g. nl). Default: the audio track\'s language tag, else auto-detect per window')
     ..addOption('llm-url',      help: 'OpenAI-compatible LLM base URL (e.g. http://localhost:11434/v1)')
     ..addOption('llm-key',      help: 'LLM API key (default: "ollama" for local)')
     ..addOption('llm-model',    help: 'LLM model name (e.g. gpt-4o, llama3)')
@@ -39,7 +40,7 @@ Future<void> main(List<String> arguments) async {
     ..addFlag('force',        abbr: 'f', negatable: false,
         help: 'Overwrite existing files; skip language prompts')
     ..addFlag('auto-name',    abbr: 'a', negatable: false,
-        help: 'Automatically use LLM auto-naming for all titles (skips rename prompt)')
+        help: 'Automatically use LLM auto-naming for all titles or files (skips rename prompt)')
     ..addFlag('batch-assign', defaultsTo: null,
         help: 'Send all subtitle excerpts in one LLM call for episode matching '
               '(better accuracy with large models; ask if omitted)')
@@ -198,6 +199,7 @@ Future<void> main(List<String> arguments) async {
     subtileOcr: subtileOcrBin,
     whisper:      whisperBin,
     whisperModel: whisperModelPath,
+    transcribeLanguage: cfgOpt('transcribe-lang'),
     tmdbToken:  cfgOpt('tmdb-token'),
     llmUrl:     cfgOpt('llm-url'),
     llmKey:     cfgOpt('llm-key'),
@@ -611,7 +613,11 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
 
   // --- Collect rename preferences (once for all files) ---
   final namePrefs = <String, String>{}; // file path → new stem or '?'
-  if (!opts.force) {
+  if (opts.autoName && opts.canAutoName) {
+    for (final f in selected) {
+      namePrefs[f.path] = '?';
+    }
+  } else if (!opts.force) {
     final canAuto  = opts.canAutoName;
     final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
     stdout.write('Rename items?$modeHint ');
@@ -659,10 +665,13 @@ Future<void> _processDirectory(RipOptions opts, String dirPath) async {
     autoNamer = _buildAutoNamer(opts, extractor, batchAssign: resolvedBatchAssign);
   }
 
-  // Ask naming hints upfront so no questions interrupt processing.
-  final namingHints = namePrefs.containsValue('?') && !opts.force
-      ? await _askNamingHints(opts)
-      : null;
+  // Ask naming hints upfront so no questions interrupt processing.  With
+  // --force nothing may be asked: use whatever hints the CLI/config supplied.
+  final namingHints = !namePrefs.containsValue('?')
+      ? null
+      : opts.force
+          ? (title: opts.titleHint, season: opts.seasonHint)
+          : await _askNamingHints(opts);
 
   try {
   // --- Step 1: Extract subtitles for all selected files ---
@@ -748,7 +757,9 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
   // --- Rename preference ---
   String? newStem; // null = keep, '?' = auto-name, otherwise the new stem
 
-  if (!opts.force) {
+  if (opts.autoName && opts.canAutoName) {
+    newStem = '?';
+  } else if (!opts.force) {
     final canAuto  = opts.canAutoName;
     final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
     stdout.write('Rename "$discName.mkv"?$modeHint ');
@@ -772,9 +783,11 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
   final extractLangs = extractResult.langs;
 
   // Ask naming hints before any processing starts.
-  final namingHints = newStem == '?' && !opts.force
-      ? await _askNamingHints(opts)
-      : null;
+  final namingHints = newStem != '?'
+      ? null
+      : opts.force
+          ? (title: opts.titleHint, season: opts.seasonHint)
+          : await _askNamingHints(opts);
 
   SubtitleExtractor? extractor;
   if ((canExtract && doExtract) || (newStem == '?' && opts.canAutoName)) {
@@ -791,7 +804,7 @@ Future<void> _processMkv(RipOptions opts, String mkvPath) async {
     final autoNamer = _buildAutoNamer(opts, extractor);
     try {
       stdout.writeln('\n── Auto-naming: $mkvPath');
-      final hints    = namingHints ?? await _askNamingHints(opts);
+      final hints    = namingHints!;
       final srts     = extractor.findExistingSrts(mkvFile);
       final resolved = await autoNamer.nameFile(mkvFile, discName,
           existingSrts: srts,
@@ -990,6 +1003,7 @@ AutoNamer _buildAutoNamer(
               ffprobe:      opts.ffprobe,
               whisperCli:   opts.whisper!,
               whisperModel: opts.whisperModel!,
+              language:     opts.transcribeLanguage,
             )
           : null,
       tmdb: TmdbClient(token: opts.tmdbToken!),

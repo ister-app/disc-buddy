@@ -587,6 +587,7 @@ class RipStateNotifier extends Notifier<RipState> {
                   ffprobe: settings.ffprobe ?? 'ffprobe',
                   whisperCli: settings.whisper!,
                   whisperModel: settings.whisperModel!,
+                  language: settings.transcribeLanguage,
                   onLog: appendLog,
                 )
               : null,

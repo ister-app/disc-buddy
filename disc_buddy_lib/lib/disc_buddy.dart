@@ -23,7 +23,7 @@ export 'src/utils/xdg.dart';
 export 'src/utils/config_loader.dart';
 export 'src/utils/mount.dart' show withMountedDisc;
 export 'src/utils/sanitize.dart' show sanitizeFilename;
-export 'src/utils/languages.dart' show langMatchesFilter;
+export 'src/utils/languages.dart' show langMatchesFilter, convertIso2to1;
 export 'src/subtitles/subtitle_extractor.dart';
 export 'src/subtitles/cc_extractor.dart' show CcExtractor;
 export 'src/audio/transcriber.dart' show Transcriber;

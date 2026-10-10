@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../rippers/video_disc_ripper.dart' show LogCallback;
+import '../utils/languages.dart' show convertIso2to1;
 
 /// Audio-transcription fallback for auto-naming titles without subtitles.
 ///
@@ -26,6 +27,10 @@ class Transcriber {
   final String ffprobe;
   final String whisperCli;
   final String whisperModel;
+  /// Spoken language (ISO 639-1, e.g. `nl`) to force on whisper. When null
+  /// the language is taken from the audio track's language tag, and only when
+  /// that is missing too does whisper auto-detect per window.
+  final String? language;
   final LogCallback? onLog;
 
   Transcriber({
@@ -33,6 +38,7 @@ class Transcriber {
     required this.ffprobe,
     required this.whisperCli,
     required this.whisperModel,
+    this.language,
     this.onLog,
   });
 
@@ -73,15 +79,30 @@ class Transcriber {
       return null;
     }
 
-    // Prefer an English-tagged track for identification; fall back to first.
+    // Track choice: a track in the forced language if any, else an
+    // English-tagged track, else the first one.
+    final forced = language?.trim().toLowerCase();
+    final forcedIdx = forced == null
+        ? -1
+        : probe.streams.indexWhere((s) => convertIso2to1(s.language) == forced);
     final enIdx = probe.streams.indexWhere((s) => s.language.startsWith('en'));
-    final audioIdx = enIdx >= 0 ? enIdx : 0;
+    final audioIdx = forcedIdx >= 0 ? forcedIdx : enIdx >= 0 ? enIdx : 0;
+
+    // Language to hand whisper: forced → audio-tag → auto-detect.
+    final tagLang = convertIso2to1(probe.streams[audioIdx].language);
+    final fixedLang = (forced != null && forced.isNotEmpty && forced != 'auto')
+        ? forced
+        : tagLang;
+    _log(fixedLang != null
+        ? '   Transcriber: language $fixedLang'
+            '${forced == fixedLang ? '' : ' (from audio track tag)'}'
+        : '   Transcriber: language auto-detect per window');
 
     final windows = windowOffsets(probe.duration);
     final tmpDir = await Directory('/tmp').createTemp('whisper_');
     try {
-      final texts = <String>[];
-      String? language;
+      // First pass: one whisper run per window.
+      final results = <int, ({String text, String language})>{};
       for (var i = 0; i < windows.length; i++) {
         final w = windows[i];
         _log('   Transcribing window ${i + 1}/${windows.length} '
@@ -90,24 +111,64 @@ class Transcriber {
         if (!await _extractWindow(videoFile, audioIdx, w.start, w.len, wav)) {
           continue;
         }
-        final result = await _runWhisper(wav, '${tmpDir.path}/win$i');
+        final result =
+            await _runWhisper(wav, '${tmpDir.path}/win$i', fixedLang ?? 'auto');
         if (result == null) continue;
         final cleaned = cleanTranscript(result.text);
         if (cleaned.isNotEmpty) {
-          texts.add(cleaned);
-          language ??= result.language;
+          results[i] = (text: cleaned, language: result.language);
         }
       }
 
-      final joined = texts.join('\n...\n');
+      // Decide the file's language: forced/tagged, else the majority of the
+      // per-window detections.
+      final detected = results.values.map((r) => r.language).toList();
+      final majority = fixedLang ?? majorityLanguage(detected) ?? tagLang;
+
+      // Second pass: windows whose detection disagrees with the majority, or
+      // whose text looks like a wrong-script hallucination, are transcribed
+      // again with the language pinned.  Whisper's auto-detection is fragile
+      // on a short window that is mostly music; a wrong guess silently yields
+      // translated or garbage text.
+      if (majority != null) {
+        for (final i in results.keys.toList()) {
+          final r = results[i]!;
+          final wrongLang = r.language != majority;
+          final garbage = looksLikeGarbage(r.text, majority);
+          if (!wrongLang && !garbage) continue;
+          if (fixedLang != null && !wrongLang) {
+            // Already pinned; nothing better to try — drop the window.
+            _log('   Transcriber: window ${i + 1} looks like garbage — dropped.',
+                isError: true);
+            results.remove(i);
+            continue;
+          }
+          _log('   Transcribing window ${i + 1} again as $majority '
+              '(detected ${r.language}${garbage ? ', garbage' : ''})...');
+          final wav = File('${tmpDir.path}/win$i.wav');
+          final redo = await _runWhisper(wav, '${tmpDir.path}/win${i}_redo', majority);
+          final cleaned = redo == null ? '' : cleanTranscript(redo.text);
+          if (cleaned.isEmpty || looksLikeGarbage(cleaned, majority)) {
+            _log('   Transcriber: window ${i + 1} still unusable — dropped.',
+                isError: true);
+            results.remove(i);
+          } else {
+            results[i] = (text: cleaned, language: majority);
+          }
+        }
+      }
+
+      final ordered = results.keys.toList()..sort();
+      final joined = ordered.map((i) => results[i]!.text).join('\n...\n');
       if (joined.trim().length < _minTranscriptChars) {
         _log('   Transcriber: transcript too short '
             '(${joined.trim().length} chars) — skipping.', isError: true);
         return null;
       }
 
-      final out = (text: joined, language: language ?? 'en');
-      await _writeSidecar(videoFile, out);
+      final out = (text: joined, language: majority ?? 'en');
+      await _writeSidecar(
+        videoFile, out, ordered.map((i) => results[i]!.language).toList());
       return out;
     } finally {
       await tmpDir.delete(recursive: true).catchError((_) => Directory(''));
@@ -135,10 +196,13 @@ class Transcriber {
   Future<void> _writeSidecar(
     File videoFile,
     ({String text, String language}) result,
+    List<String> windowLanguages,
   ) async {
     try {
       await sidecarFor(videoFile).writeAsString(jsonEncode({
+        'version': 2,
         'language': result.language,
+        'languages': windowLanguages,
         'text': result.text,
       }));
     } catch (e) {
@@ -227,12 +291,13 @@ class Transcriber {
   Future<({String text, String language})?> _runWhisper(
     File wav,
     String outPrefix,
+    String lang,
   ) async {
     try {
       final result = await Process.run(whisperCli, [
         '-m', whisperModel,
         '-f', wav.path,
-        '-l', 'auto',
+        '-l', lang,
         '-oj',
         '-of', outPrefix,
         '-np',
@@ -313,6 +378,48 @@ class Transcriber {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Most frequent language code in [langs]; ties go to the first seen.
+  /// Returns null for an empty list.
+  static String? majorityLanguage(List<String> langs) {
+    final counts = <String, int>{};
+    for (final l in langs) {
+      counts[l] = (counts[l] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return null;
+    return counts.entries.reduce((a, b) => b.value > a.value ? b : a).key;
+  }
+
+  static final _latinScript = RegExp(r'[A-Za-z\u00C0-\u024F]');
+  static final _otherScript = RegExp(
+      r'[\u0370-\u03FF\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF'
+      r'\u0E00-\u0E7F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]');
+  static const _latinLangs = {
+    'en', 'nl', 'de', 'fr', 'es', 'it', 'pt', 'sv', 'da', 'no', 'fi', 'pl',
+    'cs', 'hu', 'ro', 'sk', 'hr', 'tr', 'ca', 'sq', 'is', 'et', 'lv', 'lt',
+    'sl', 'ms', 'id', 'vi', 'eu', 'gl', 'cy', 'ga', 'af', 'sw', 'tl',
+  };
+
+  /// Heuristic for a whisper hallucination: text in a script that does not
+  /// belong to [lang] (e.g. CJK when the language is Dutch), or text that is
+  /// almost entirely one short phrase repeated (`中文字幕:YK 中文字幕:YK …`).
+  static bool looksLikeGarbage(String text, String lang) {
+    final t = text.trim();
+    if (t.isEmpty) return true;
+    final latin = _latinScript.allMatches(t).length;
+    final other = _otherScript.allMatches(t).length;
+    final letters = latin + other;
+    if (letters > 0 && _latinLangs.contains(lang) && other / letters > 0.3) {
+      return true;
+    }
+    // Repetition: few distinct words relative to the total.
+    final words = t.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    if (words.length >= 8) {
+      final distinct = words.map((w) => w.toLowerCase()).toSet().length;
+      if (distinct / words.length < 0.15) return true;
+    }
+    return false;
   }
 
   /// Strips whisper non-speech markers (`[BLANK_AUDIO]`, `(music)`, `♪`)
