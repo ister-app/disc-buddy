@@ -106,12 +106,12 @@ class _BottomActions extends ConsumerWidget {
 
   Future<void> _pickFile(BuildContext context, WidgetRef ref) async {
     final messenger = ScaffoldMessenger.of(context);
-    final result = await FilePicker.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.any,
       dialogTitle: 'Select file',
     );
-    if (result == null || result.files.single.path == null) return;
-    final path = result.files.single.path!;
+    final path = file?.path;
+    if (path == null) return;
     _addByPath(messenger, ref, path);
   }
 
