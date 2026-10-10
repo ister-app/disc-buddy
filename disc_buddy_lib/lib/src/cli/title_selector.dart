@@ -310,9 +310,25 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
       ? angle1.where((t) => t.audioTracks.length == targetAudio).toList()
       : angle1;
   final targetSub   = _modeWeighted(byAudio.map((t) => t.subtitleTracks.length));
-  final filtered    = targetSub != null
+  final bySub       = targetSub != null
       ? byAudio.where((t) => t.subtitleTracks.length == targetSub).toList()
       : byAudio;
+
+  // Re-admit titles the stream-count filter dropped when their duration fits
+  // the surviving group (±30 % of its median, or a ≈ 2× double episode).  An
+  // episode that merely lacks a subtitle track on this disc is still an
+  // episode; the filter only has to keep out short, stripped-down extras.
+  final filtered = <DvdTitle>[...bySub];
+  if (bySub.isNotEmpty) {
+    final secs   = bySub.map((t) => t.duration.inSeconds).toList()..sort();
+    final median = _median(secs);
+    bool fits(DvdTitle t) {
+      final s = t.duration.inSeconds;
+      return (s - median).abs() <= median * 0.3 ||
+             (s - 2 * median).abs() <= 2 * median * 0.3;
+    }
+    filtered.addAll(angle1.where((t) => !bySub.contains(t) && fits(t)));
+  }
 
   final selected = _autoSelect(
     titles:            filtered,

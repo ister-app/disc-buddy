@@ -36,6 +36,7 @@ Duration d(int min, int sec) => Duration(minutes: min, seconds: sec);
 List<Duration> ch(List<(int, int)> ms) => [for (final e in ms) d(e.$1, e.$2)];
 
 void main() {
+  _fm20d3Tests();
   group('deduplicateDvdTitles — cell overlap authoritative', () {
     // Real data from DVD_VVE4698_2_SAMANDCAT_D2: 7 episodes stored as 7 PGCs
     // in one VTS, chapters authored at fixed ~5-minute intervals so that four
@@ -307,6 +308,42 @@ void main() {
     test('single title passes through', () {
       final result = deduplicateDvdTitles([t(pgc: 0, dur: d(90, 0))]);
       expect(result.length, 1);
+    });
+  });
+}
+
+void _fm20d3Tests() {
+  group('episode without subtitle track still counts as an episode', () {
+    // Real layout of FM20_DVD3: three episodes in separate VTS sections, the
+    // first of which carries no subtitle stream.  The stream-count filter used
+    // to drop it, leaving two titles — below the series threshold — so only
+    // the longest episode was suggested.
+    final fm20d3 = [
+      t(vts: 1, pgc: 0, dur: d(0, 14), subs: 0, cells: [(first: 0, last: 1543)]),
+      t(vts: 2, pgc: 0, dur: d(46, 51), subs: 0,
+        chapters: ch([(0, 0), (10, 0), (20, 0), (30, 0), (40, 0)]),
+        cells: [(first: 0, last: 982914)]),
+      t(vts: 3, pgc: 0, dur: d(47, 53), subs: 1,
+        chapters: ch([(0, 0), (9, 0), (19, 0), (29, 0), (39, 0)]),
+        cells: [(first: 0, last: 1003945)]),
+      t(vts: 4, pgc: 0, dur: d(50, 20), subs: 1,
+        chapters: ch([(0, 0), (11, 0), (21, 0), (31, 0), (41, 0)]),
+        cells: [(first: 0, last: 1055866)]),
+    ];
+
+    test('autoSelectDvd suggests all three episodes', () {
+      expect(autoSelectDvd(fm20d3).map((x) => x.displayKey), ['2', '3', '4']);
+    });
+
+    test('short stripped-down extras are still kept out', () {
+      final withExtras = [
+        ...fm20d3,
+        t(vts: 5, pgc: 0, dur: d(8, 0), subs: 0, audio: 1,
+          cells: [(first: 0, last: 100000)]),
+        t(vts: 6, pgc: 0, dur: d(12, 0), subs: 0, audio: 1,
+          cells: [(first: 0, last: 150000)]),
+      ];
+      expect(autoSelectDvd(withExtras).map((x) => x.displayKey), ['2', '3', '4']);
     });
   });
 }
