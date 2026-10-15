@@ -46,4 +46,33 @@ void main() {
       expect(r.line, '[mpeg @ 0x55d] Packet corrupt [something] happened');
     });
   });
+
+  group('FfmpegRunner.run stdin errors', () {
+    test('producer die gooit wordt via onStdinError gemeld', () async {
+      Object? reported;
+      final logs = <String>[];
+      Stream<List<int>> producer() async* {
+        yield [1, 2, 3];
+        throw StateError('disc gone');
+      }
+      final code = await FfmpegRunner(
+        executable: 'cat',
+        onLog: (m, {isError = false}) => logs.add(m),
+      ).run(const [], stdinData: producer(), onStdinError: (e) => reported = e);
+      expect(reported, isA<StateError>());
+      expect(logs.join('\n'), contains('ffmpeg input error'));
+      expect(code, 0); // cat itself ended fine on EOF
+    });
+
+    test('vroegtijdig einde van het proces faalt de run niet', () async {
+      Stream<List<int>> producer() async* {
+        for (var i = 0; i < 2000; i++) {
+          yield List.filled(65536, 0);
+        }
+      }
+      final code = await FfmpegRunner(executable: 'true')
+          .run(const [], stdinData: producer());
+      expect(code, 0);
+    });
+  });
 }

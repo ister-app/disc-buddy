@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import '../rippers/video_disc_ripper.dart' show LogCallback;
+import '../utils/log.dart';
 
 class FfmpegProgress {
   final Duration elapsed;
@@ -26,6 +26,10 @@ class FfmpegRunner {
   ///   This prevents libcdio from hanging after the last CD track.
   /// [onProgress] — callback for each progress line on stderr.
   /// [stderrCollect] — if provided, all non-progress stderr lines are appended.
+  /// [onStdinError] — receives an error raised while piping [stdinData]
+  ///   (from the producer stream or the pipe itself). Such an error does not
+  ///   fail the run by itself — ffmpeg just sees end-of-input — but it is
+  ///   logged and reported so the caller can decide the output is incomplete.
   Future<int> run(
     List<String> args, {
     Stream<List<int>>? stdinData,
@@ -33,17 +37,22 @@ class FfmpegRunner {
     Duration? expectedDuration,
     ProgressCallback? onProgress,
     List<String>? stderrCollect,
+    void Function(Object error)? onStdinError,
   }) async {
     final process = await Process.start(executable, args);
     onProcessStarted?.call(process);
 
+    Object? stdinError;
     Future<void>? stdinDone;
     if (stdinData != null) {
-      // Ignore broken-pipe errors when ffmpeg finishes early. The cast keeps
-      // pipe() happy when the caller passes a Stream<Uint8List>: its pipe()
-      // demands a StreamConsumer<Uint8List>, which process.stdin is not.
-      stdinDone =
-          stdinData.cast<List<int>>().pipe(process.stdin).catchError((_) {});
+      // Broken-pipe errors when ffmpeg finishes early must not throw; capture
+      // them (and producer errors) instead. The cast keeps pipe() happy when
+      // the caller passes a Stream<Uint8List>: its pipe() demands a
+      // StreamConsumer<Uint8List>, which process.stdin is not.
+      stdinDone = stdinData
+          .cast<List<int>>()
+          .pipe(process.stdin)
+          .catchError((Object e) { stdinError ??= e; });
     }
 
     Timer? killTimer;
@@ -79,7 +88,7 @@ class FfmpegRunner {
           }
         } else if (line.trim().isNotEmpty) {
           final (line: stripped, :isError) = classifyStderrLine(line);
-          if (onLog != null) { onLog!(stripped, isError: isError); } else { stderr.writeln(stripped); }
+          emitLog(onLog, stripped, isError: isError);
           stderrCollect?.add(stripped);
         }
       }
@@ -96,11 +105,20 @@ class FfmpegRunner {
       stderrDone,
       stdoutDone,
       ?stdinDone,
-    ]).catchError((_) => <void>[]);
+    ]).catchError((Object e) { stdinError ??= e; return <void>[]; });
     killTimer?.cancel();
     killSigkillTimer?.cancel();
     completionTimer?.cancel();
     completionSigkillTimer?.cancel();
+    if (stdinError != null) {
+      final e = stdinError!;
+      // EPIPE after ffmpeg already exited is routine; anything else matters.
+      final routine = exitCode == 0 && e is SocketException;
+      if (!routine) {
+        emitLog(onLog, '   ffmpeg input error: $e', isError: true);
+      }
+      onStdinError?.call(e);
+    }
     return exitCode;
   }
 

@@ -10,6 +10,8 @@ export 'src/metadata/disc_id.dart';
 export 'src/metadata/musicbrainz.dart';
 export 'src/metadata/cover_art.dart';
 export 'src/rippers/video_disc_ripper.dart';
+export 'src/rippers/rip_report.dart';
+export 'src/device/resilient_read.dart' show ReadStats, DvdReadException;
 export 'src/rippers/dvd_ripper.dart';
 export 'src/rippers/bluray_ripper.dart';
 export 'src/rippers/audiocd_ripper.dart';

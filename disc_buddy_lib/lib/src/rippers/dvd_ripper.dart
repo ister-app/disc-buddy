@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:path/path.dart' as p;
-import '../device/dvdread.dart' show DVDSession, dvdreadAvailable;
+import '../device/dvdread.dart' show DVDSession, dvdreadAvailable, ReadStats, DvdReadException;
+import '../utils/duration_ext.dart';
+import 'rip_report.dart';
 import '../ffmpeg/ffmpeg_runner.dart';
 import '../models/dvd_title.dart';
 import '../models/rip_options.dart';
@@ -27,6 +29,15 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// Set once a single-pass (map-by-id) attempt fails verification, so the rest
   /// of this disc's titles skip straight to the proven two-pass scan.
   bool _singlePassDisabled = false;
+
+  /// Unreadable sectors tolerated per title before the rip is abandoned.
+  /// 4096 sectors = 8 MiB ≈ 10-15 s of DVD video: enough to get past a
+  /// scratch, little enough that a hopeless disc fails fast.
+  static const int kMaxBadSectorsPerTitle = 4096;
+
+  /// One entry per title that produced a file, in rip order. Lets the caller
+  /// warn about zero-filled sectors or a too-short output after [rip].
+  final List<TitleRipReport> reports = [];
 
   /// Asks about languages and overwrites. `force` always wins: with
   /// `options.force` set every question is answered with its default.
@@ -217,8 +228,34 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           }
         }
 
+        // Damaged-disc handling: unreadable sectors are zero-filled and
+        // tallied; past the cap the producer stops and the title fails.
+        final stats = ReadStats();
+        DvdReadException? producerError;
+        var lastWarnAt = 0;
+        void onBadRange(int first, int last) {
+          if (stats.badRanges.length <= 3 || stats.badBlocks - lastWarnAt >= 64) {
+            lastWarnAt = stats.badBlocks;
+            _log('   Unreadable sectors $first-$last zero-filled '
+                '(${stats.badBlocks} so far).', isError: true);
+          }
+        }
+        Stream<List<int>> readTitle() async* {
+          try {
+            yield* session.stream(title.vtsNumber,
+                cells: cells,
+                stats: stats,
+                maxBadBlocks: kMaxBadSectorsPerTitle,
+                onBadRange: onBadRange);
+          } on DvdReadException catch (e) {
+            // End the stream cleanly so ffmpeg finalises; the check below
+            // fails the title.
+            producerError = e;
+          }
+        }
+
         final produced = await withPartFile<bool>(outFile, (part) async {
-        final ripStream = session.stream(title.vtsNumber, cells: cells);
+        final ripStream = readTitle();
         var ripInput = ripStream;
         if (teeCc) {
           final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
@@ -279,11 +316,14 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           part.path,
         ];
 
+        // Retries on a scratched disc push the read rate well below 1x, so
+        // the hard timeout is generous; the expectedDuration timer still
+        // stops ffmpeg promptly on a clean rip.
         final dur      = title.duration.inSeconds;
         final exitCode = await _ffmpeg.run(
           args,
           stdinData:        ripInput,
-          timeout:          Duration(seconds: dur + 120),
+          timeout:          Duration(seconds: dur * 3 + 120),
           expectedDuration: title.duration,
           onProgress:       onProgress ?? logProgress,
         );
@@ -291,8 +331,11 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         _log('');
 
         final fileSize = await part.exists() ? await part.length() : 0;
-        if (exitCode != 0 || fileSize == 0) {
-          _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
+        if (exitCode != 0 || fileSize == 0 || producerError != null) {
+          final why = producerError != null
+              ? '$producerError'
+              : 'exit code $exitCode';
+          _log('   Error ripping ${title.displayKey} ($why).', isError: true);
           await cleanupCcPartial();
           return false;
         }
@@ -309,7 +352,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         }, succeeded: (ok) => ok, onLog: onLog);
         if (!produced) return false;
 
-        _log('   Done: ${outFile.path}');
+        await _reportTitle(title, outFile, stats);
         await _injectSubtitlePalette(outFile, title, langs.subLangs);
         if (teeCc && ccTeeOk) {
           // CC was scanned during the rip (single disc read) — finalize it.
@@ -421,7 +464,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         }, succeeded: (ok) => ok, onLog: onLog);
 
         if (produced) {
-          _log('   Done: ${outFile.path}');
+          await _reportTitle(title, outFile, null);
           await _injectSubtitlePalette(outFile, title, langs.subLangs);
           await _extractClosedCaptions(
             outFile,
@@ -1222,6 +1265,45 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     args.addAll(_codecAndMetaArgs(
       title: title, audioLangs: audioLangs, keptSubs: keptSubs));
     return args;
+  }
+
+  /// Logs "Done" (or "Done (with warnings)"), records a [TitleRipReport] and
+  /// warns when sectors were zero-filled or the output is clearly too short.
+  Future<void> _reportTitle(DvdTitle title, File outFile, ReadStats? stats) async {
+    final report = TitleRipReport(
+      titleKey: title.displayKey,
+      outputPath: outFile.path,
+      read: stats,
+      expected: title.duration,
+      actual: await _probeDuration(outFile),
+    );
+    reports.add(report);
+    if (report.hasReadErrors) {
+      _log('   Warning: ${stats!.summary()}.', isError: true);
+    }
+    if (!report.durationOk) {
+      _log('   Warning: output is ${report.actual!.hmsLabel}, title is '
+          '${title.durationLabel} — rip is probably truncated.', isError: true);
+    }
+    _log(report.hasWarnings
+        ? '   Done (with warnings): ${outFile.path}'
+        : '   Done: ${outFile.path}');
+  }
+
+  /// Container duration via ffprobe, or null when the probe fails.
+  Future<Duration?> _probeDuration(File f) async {
+    try {
+      final r = await Process.run(options.ffprobe, [
+        '-v', 'quiet', '-show_entries', 'format=duration',
+        '-of', 'csv=p=0', f.path,
+      ]);
+      if (r.exitCode != 0) return null;
+      final secs = double.tryParse((r.stdout as String).trim());
+      if (secs == null) return null;
+      return Duration(milliseconds: (secs * 1000).round());
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Verifies the ripped MKV actually contains at least [expected] audio streams.

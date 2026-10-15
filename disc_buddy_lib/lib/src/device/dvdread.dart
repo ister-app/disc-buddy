@@ -2,6 +2,9 @@ import 'dart:ffi';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
+import 'resilient_read.dart';
+export 'resilient_read.dart' show ReadStats, DvdReadException, BlockRange;
+
 // ---------------------------------------------------------------------------
 // Load libdvdread
 // ---------------------------------------------------------------------------
@@ -167,10 +170,21 @@ Stream<List<int>> _stream(
   }
 }
 
+/// Streams the VOB blocks of [vtsNum]: the given [cells] (multi-angle
+/// support) or the whole title set linearly.
+///
+/// Read errors no longer end the stream: a failing chunk is retried,
+/// bisected and, where the disc stays unreadable, zero-filled (see
+/// `resilientBlockStream`). [stats] collects the tally, [onBadRange] is
+/// called per unreadable run, and more than [maxBadBlocks] zero-filled
+/// sectors throw a [DvdReadException] from the stream.
 Stream<List<int>> _streamFromHandle(
   Pointer<Void> dvd,
   int vtsNum, {
-  List<({int first, int last})>? cells,
+  List<BlockRange>? cells,
+  ReadStats? stats,
+  int? maxBadBlocks,
+  void Function(int first, int last)? onBadRange,
 }) async* {
   final file = _suppressStderr(() => _dvdOpenFile(dvd, vtsNum, _kReadTitleVobs));
   if (file == nullptr) {
@@ -180,38 +194,25 @@ Stream<List<int>> _streamFromHandle(
   try {
     final buf = calloc<Uint8>(_kChunkBlocks * _kBlockLen);
     try {
-      if (cells != null && cells.isNotEmpty) {
-        // Cell navigation: read only sectors belonging to this PGC/angle
-        for (final cell in cells) {
-          var offset = cell.first;
-          while (offset <= cell.last) {
-            final toRead = (_kChunkBlocks < cell.last - offset + 1)
-                ? _kChunkBlocks
-                : cell.last - offset + 1;
-            final n = _dvdReadBlocks(file, offset, toRead, buf);
-            if (n <= 0) break;
-            // Copy the native buffer in one memcpy (asTypedList is a view over
-            // [buf], which is reused next iteration, so fromList must copy it).
-            final bytes = Uint8List.fromList(buf.asTypedList(n * _kBlockLen));
-            yield bytes;
-            offset += n;
-          }
-        }
-      } else {
-        // Linear read (all blocks)
-        final numBlocks = _dvdFileSize(file);
-        var offset = 0;
-        while (offset < numBlocks) {
-          final toRead = (_kChunkBlocks < numBlocks - offset)
-              ? _kChunkBlocks
-              : numBlocks - offset;
-          final n = _dvdReadBlocks(file, offset, toRead, buf);
-          if (n <= 0) break;
-          final bytes = Uint8List.fromList(buf.asTypedList(n * _kBlockLen));
-          yield bytes;
-          offset += n;
-        }
+      // Copy the native buffer in one memcpy (asTypedList is a view over
+      // [buf], which is reused next call, so fromList must copy it).
+      Uint8List? read(int offset, int count) {
+        final n = _dvdReadBlocks(file, offset, count, buf);
+        if (n <= 0) return null;
+        return Uint8List.fromList(buf.asTypedList(n * _kBlockLen));
       }
+
+      final ranges = (cells != null && cells.isNotEmpty)
+          ? cells
+          : <BlockRange>[(first: 0, last: _dvdFileSize(file) - 1)];
+      yield* resilientBlockStream(
+        ranges: ranges,
+        read: read,
+        chunkBlocks: _kChunkBlocks,
+        stats: stats,
+        maxBadBlocks: maxBadBlocks,
+        onBadRange: onBadRange,
+      );
     } finally {
       calloc.free(buf);
     }
@@ -238,9 +239,17 @@ class DVDSession {
   }
 
   /// Streams VOB blocks for [vtsNum], reusing the already-open disc handle.
-  /// Equivalent to [streamVobs] but does not re-open the disc.
-  Stream<List<int>> stream(int vtsNum, {List<({int first, int last})>? cells}) =>
-      _streamFromHandle(_dvd, vtsNum, cells: cells);
+  /// Equivalent to [streamVobs] but does not re-open the disc. See
+  /// `_streamFromHandle` for the read-error parameters.
+  Stream<List<int>> stream(
+    int vtsNum, {
+    List<BlockRange>? cells,
+    ReadStats? stats,
+    int? maxBadBlocks,
+    void Function(int first, int last)? onBadRange,
+  }) =>
+      _streamFromHandle(_dvd, vtsNum,
+          cells: cells, stats: stats, maxBadBlocks: maxBadBlocks, onBadRange: onBadRange);
 
   void close() => _dvdClose(_dvd);
 }

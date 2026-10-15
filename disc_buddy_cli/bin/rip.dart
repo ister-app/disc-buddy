@@ -324,6 +324,20 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 
     await ripper.rip(discTitle, selected, mountPath: mp);
 
+    // Damaged-disc summary: zero-filled sectors or a too-short output.
+    final dvdRipper = ripper is DVDRipper ? ripper as DVDRipper : null;
+    if (dvdRipper != null) {
+      final flagged = dvdRipper.reports.where((r) => r.hasWarnings).toList();
+      if (flagged.isNotEmpty) {
+        stderr.writeln('');
+        stderr.writeln('Read problems on this disc:');
+        for (final r in flagged) {
+          stderr.writeln('  ${r.describe()}');
+        }
+        stderr.writeln('');
+      }
+    }
+
     final outDir = Directory(p.join(opts.outputDir, sanitizeFilename(discTitle)));
     await resolveSubtitlesAndNames(
       opts, outDir, discTitle,
