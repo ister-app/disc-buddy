@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:args/args.dart';
@@ -25,16 +26,25 @@ void _trackFfmpeg(Process p) => _activeFfmpeg = p;
 
 /// On Ctrl+C: SIGTERM ffmpeg so the ripper's `.part` cleanup runs, then exit.
 /// Watching SIGINT disables the VM's default handler, hence the explicit exit.
-void _installSigintHandler() {
-  ProcessSignal.sigint.watch().listen((_) {
-    stderr.writeln('\nInterrupted — stopping ffmpeg and cleaning up...');
-    _activeFfmpeg?.kill(ProcessSignal.sigterm);
-    Future.delayed(const Duration(seconds: 3), () => exit(130));
-  });
-}
+/// The subscription keeps the event loop alive, so [main] cancels it when the
+/// work is done — otherwise the process would never exit on its own.
+StreamSubscription<ProcessSignal> _installSigintHandler() =>
+    ProcessSignal.sigint.watch().listen((_) {
+      stderr.writeln('\nInterrupted — stopping ffmpeg and cleaning up...');
+      _activeFfmpeg?.kill(ProcessSignal.sigterm);
+      Future.delayed(const Duration(seconds: 3), () => exit(130));
+    });
 
 Future<void> main(List<String> arguments) async {
-  _installSigintHandler();
+  final sigint = _installSigintHandler();
+  try {
+    await _run(arguments);
+  } finally {
+    await sigint.cancel();
+  }
+}
+
+Future<void> _run(List<String> arguments) async {
   final parser = buildArgParser();
 
   final ArgResults args;
