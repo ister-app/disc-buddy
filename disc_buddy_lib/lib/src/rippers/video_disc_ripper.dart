@@ -2,9 +2,7 @@ import 'package:path/path.dart' as p;
 import '../models/video_title.dart';
 import '../utils/sanitize.dart';
 
-/// Callback for log messages from rippers.
-/// [isError] is true for error/warning messages (stderr equivalent).
-typedef LogCallback = void Function(String message, {bool isError});
+export '../utils/log.dart' show LogCallback;
 
 /// Output path a video rip will write for [title]:
 /// `<outputDir>/<discTitle>/<discTitle>-<title.filename>`.

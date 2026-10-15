@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'log.dart';
 
 /// Returns the mount point of [device], or null if not mounted.
 Future<String?> findMountPoint(String device) async {
@@ -20,10 +21,12 @@ Future<T?> withMountedDisc<T>(
   String device,
   Future<T?> Function(String mountPath) action, {
   String errorContext = '',
+  LogCallback? onLog,
 }) async {
   if (await FileSystemEntity.type(device) == FileSystemEntityType.file) {
-    return _withMountedIso(device, action, errorContext: errorContext);
+    return _withMountedIso(device, action, errorContext: errorContext, onLog: onLog);
   }
+  void log(String msg) => emitLog(onLog, msg, isError: true);
 
   String? mountPath = await findMountPoint(device);
   var weDidMount = mountPath == null;
@@ -42,14 +45,14 @@ Future<T?> withMountedDisc<T>(
         weDidMount = false;
       } else {
         final ctx = errorContext.isNotEmpty ? '$errorContext-' : '';
-        stderr.writeln('Error: ${ctx}mount failed ($errStr)');
+        log('Error: ${ctx}mount failed ($errStr)');
         return null;
       }
     } else {
       final out   = (mount.stdout as String).trim();
       final atIdx = out.lastIndexOf(' at ');
       if (atIdx < 0) {
-        stderr.writeln('Error: mount point not found in: $out');
+        log('Error: mount point not found in: $out');
         return null;
       }
       mountPath = out.substring(atIdx + 4).replaceAll(RegExp(r'\.$'), '');
@@ -74,7 +77,9 @@ Future<T?> _withMountedIso<T>(
   String isoPath,
   Future<T?> Function(String mountPath) action, {
   String errorContext = '',
+  LogCallback? onLog,
 }) async {
+  void log(String msg) => emitLog(onLog, msg, isError: true);
   final ctx = errorContext.isNotEmpty ? '$errorContext-' : '';
 
   // Create a loop device for the ISO file.
@@ -82,7 +87,7 @@ Future<T?> _withMountedIso<T>(
     'udisksctl', ['loop-setup', '--file', isoPath, '--no-user-interaction'],
   );
   if (setup.exitCode != 0) {
-    stderr.writeln('Error: ${ctx}ISO loop-setup failed '
+    log('Error: ${ctx}ISO loop-setup failed '
         '(${(setup.stderr as String).trim()})');
     return null;
   }
@@ -91,7 +96,7 @@ Future<T?> _withMountedIso<T>(
   final loopMatch   = RegExp(r'(/dev/loop\d+)').firstMatch(setupOut);
   final loopDevice  = loopMatch?.group(1);
   if (loopDevice == null) {
-    stderr.writeln('Error: could not parse loop device from: $setupOut');
+    log('Error: could not parse loop device from: $setupOut');
     return null;
   }
 
@@ -117,7 +122,7 @@ Future<T?> _withMountedIso<T>(
         await Process.run(
           'udisksctl', ['loop-delete', '--block-device', loopDevice, '--no-user-interaction'],
         );
-        stderr.writeln('Error: ${ctx}ISO mount failed ($errStr)');
+        log('Error: ${ctx}ISO mount failed ($errStr)');
         return null;
       }
     } else {
@@ -126,7 +131,7 @@ Future<T?> _withMountedIso<T>(
       if (atIdx < 0) {
         await Process.run('udisksctl', ['unmount', '--block-device', loopDevice, '--no-user-interaction']);
         await Process.run('udisksctl', ['loop-delete', '--block-device', loopDevice, '--no-user-interaction']);
-        stderr.writeln('Error: mount point not found in: $mountOut');
+        log('Error: mount point not found in: $mountOut');
         return null;
       }
       mountPath = mountOut.substring(atIdx + 4).replaceAll(RegExp(r'\.$'), '');

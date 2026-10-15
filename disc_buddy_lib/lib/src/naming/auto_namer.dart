@@ -2,7 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import '../utils/tty.dart';
+import '../utils/log.dart';
+import '../utils/prompter.dart';
 import '../audio/transcriber.dart';
 import '../subtitles/subtitle_extractor.dart';
 import '../utils/sanitize.dart';
@@ -47,7 +48,11 @@ class AutoNamer {
   final bool force;
   /// null = ask interactively; true = always use; false = never use.
   final bool? batchAssign;
-  final void Function(String, {bool isError})? onLog;
+  final LogCallback? onLog;
+
+  /// Asks the user when the LLM cannot decide. `force` always wins: with it
+  /// set every question is answered with its default.
+  final Prompter _prompter;
 
   AutoNamer({
     required this.extractor,
@@ -57,17 +62,13 @@ class AutoNamer {
     this.force = false,
     this.batchAssign,
     this.onLog,
-  });
+    Prompter? prompter,
+  }) : _prompter = force
+            ? const NonInteractivePrompter()
+            : (prompter ?? const NonInteractivePrompter());
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else if (isError) {
-      stderr.writeln(msg);
-    } else {
-      stdout.writeln(msg);
-    }
-  }
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: isError);
 
   void close() {
     tmdb.close();
@@ -208,7 +209,7 @@ class AutoNamer {
     }
 
     // 4. Decide whether to use batch assignment.
-    final useBatch = _resolveBatchAssign(items.length);
+    final useBatch = await _resolveBatchAssign(items.length);
 
     // 5. Match episodes — batch or per-file.
     final picks = useBatch
@@ -561,18 +562,15 @@ class AutoNamer {
 
   /// Resolves whether to use batch assignment.
   /// - [batchAssign] == true/false → use that.
-  /// - null + force → false (safer default for unknown models).
+  /// - null + non-interactive (force) → false (safer default for unknown models).
   /// - null + interactive → ask the user.
-  bool _resolveBatchAssign(int fileCount) {
+  Future<bool> _resolveBatchAssign(int fileCount) async {
     if (batchAssign != null) return batchAssign!;
     if (fileCount <= 1) return false;
-    if (force) return false;
-    _log(
+    return _prompter.confirm(
       '   Use batch assignment? (sends all excerpts in one LLM call, '
       'works better with large models) [y/N] ',
     );
-    final input = ttyReadLine().trim().toLowerCase();
-    return input == 'y' || input == 'yes';
   }
 
   /// Per-file matching fallback: matches each subtitle independently.
@@ -1757,25 +1755,18 @@ class AutoNamer {
   Future<_EpisodePick?> _promptEpisodePick({
     required List<({int season, EpisodeInfo ep})> episodes,
   }) async {
-    if (force) {
-      _log('   AutoNamer[force]: LLM declined — skipping.', isError: true);
+    final labels = [
+      for (final c in episodes)
+        's${c.season.toString().padLeft(2, "0")}'
+        'e${c.ep.number.toString().padLeft(2, "0")} "${c.ep.title}"',
+    ];
+    final idx = await _prompter.choose(
+        '   LLM could not identify the episode. Pick manually:', labels);
+    if (idx == null) {
+      _log('   AutoNamer: LLM declined — skipping.', isError: true);
       return null;
     }
-
-    _log('   LLM could not identify the episode. Pick manually:');
-    for (var i = 0; i < episodes.length; i++) {
-      final c = episodes[i];
-      final label =
-          's${c.season.toString().padLeft(2, "0")}'
-          'e${c.ep.number.toString().padLeft(2, "0")}';
-      _log('     ${i + 1}. $label "${c.ep.title}"');
-    }
-    _log('   Pick 1-${episodes.length} (Enter = skip): ');
-    final input = ttyReadLine().trim();
-    if (input.isEmpty) return null;
-    final n = int.tryParse(input);
-    if (n == null || n < 1 || n > episodes.length) return null;
-    final chosen = episodes[n - 1];
+    final chosen = episodes[idx];
     final label =
         's${chosen.season.toString().padLeft(2, "0")}'
         'e${chosen.ep.number.toString().padLeft(2, "0")}';
@@ -1841,31 +1832,21 @@ class AutoNamer {
   }) async {
     if (options.isEmpty) return null;
 
-    if (force) {
-      final top = options.first;
-      _log(
-        '   AutoNamer[force]: tie on $kind — picked '
-        '"${top.label}" (score ${top.score.toStringAsFixed(1)}).',
-      );
-      return top;
-    }
-
-    _log('');
-    _log('   Multiple $kind candidates are close in score:');
-    for (var i = 0; i < options.length; i++) {
-      final o = options[i];
-      _log('     ${i + 1}. [${o.score.toStringAsFixed(1)}] ${o.label}');
-    }
-    _log('   Pick 1-${options.length} (Enter = 1, 0 = skip): ');
-    final input = ttyReadLine().trim();
-    if (input.isEmpty) return options.first;
-    final n = int.tryParse(input);
-    if (n == 0) return null;
-    if (n == null || n < 1 || n > options.length) {
-      _log('   Invalid choice — skipping.', isError: true);
+    final idx = await _prompter.choose(
+      '   Multiple $kind candidates are close in score:',
+      [for (final o in options) '[${o.score.toStringAsFixed(1)}] ${o.label}'],
+      defaultIndex: 0,
+    );
+    if (idx == null) {
+      _log('   AutoNamer: tie on $kind — skipped.', isError: true);
       return null;
     }
-    return options[n - 1];
+    final pick = options[idx];
+    _log(
+      '   AutoNamer: tie on $kind — picked '
+      '"${pick.label}" (score ${pick.score.toStringAsFixed(1)}).',
+    );
+    return pick;
   }
 
   // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/disc_metadata.dart';
+import '../utils/log.dart';
 
 /// CDDB/GnuDB lookup service — fallback when MusicBrainz finds nothing.
 ///
@@ -44,8 +44,10 @@ class Cddb {
   /// [leadOutTime] : lead-out time in seconds.
   static Future<DiscMetadata?> lookup(
     List<double> startTimes,
-    double leadOutTime,
-  ) async {
+    double leadOutTime, {
+    LogCallback? onLog,
+  }) async {
+    void log(String msg) => emitLog(onLog, msg, isError: true);
     // Compute LBA offsets (same as MusicBrainz lookup)
     final lbaOffsets = startTimes.map((t) => (t * 75).round() + 150).toList();
     final leadOutLba = (leadOutTime * 75).round() + 150;
@@ -55,7 +57,7 @@ class Cddb {
     final offsets = lbaOffsets.join('+');
     final nsecs   = leadOutLba ~/ 75 - lbaOffsets.first ~/ 75;
 
-    stderr.writeln('CDDB: looking up disc ID $discId...');
+    log('CDDB: looking up disc ID $discId...');
 
     final queryUri = Uri.parse(
       '$_baseUrl?cmd=cddb+query+$discId+$n+$offsets+$nsecs'
@@ -68,7 +70,7 @@ class Cddb {
           .timeout(_timeout);
 
       if (resp.statusCode != 200) {
-        stderr.writeln('CDDB: error ${resp.statusCode}.');
+        log('CDDB: error ${resp.statusCode}.');
         return null;
       }
 
@@ -78,7 +80,7 @@ class Cddb {
       final code = int.tryParse(lines[0].length >= 3 ? lines[0].substring(0, 3) : '') ?? 0;
 
       if (code == 202) {
-        stderr.writeln('CDDB: disc not found.');
+        log('CDDB: disc not found.');
         return null;
       }
 
@@ -100,12 +102,12 @@ class Cddb {
 
       // Awaited so a timeout or error inside _readEntry is caught below rather
       // than escaping this try block.
-      return await _readEntry(genre, cddbId, startTimes, leadOutTime);
+      return await _readEntry(genre, cddbId, startTimes, leadOutTime, onLog: onLog);
     } on TimeoutException {
-      stderr.writeln('CDDB: timeout (>${_timeout.inSeconds}s).');
+      log('CDDB: timeout (>${_timeout.inSeconds}s).');
       return null;
     } catch (e) {
-      stderr.writeln('CDDB: fetch error — $e');
+      log('CDDB: fetch error — $e');
       return null;
     }
   }
@@ -118,8 +120,10 @@ class Cddb {
     String genre,
     String cddbId,
     List<double> startTimes,
-    double leadOutTime,
-  ) async {
+    double leadOutTime, {
+    LogCallback? onLog,
+  }) async {
+    void log(String msg) => emitLog(onLog, msg, isError: true);
     final readUri = Uri.parse(
       '$_baseUrl?cmd=cddb+read+$genre+$cddbId'
       '&hello=$_hello&proto=6',
@@ -185,7 +189,7 @@ class Cddb {
 
       if (tracks.isEmpty) return null;
 
-      stderr.writeln('CDDB: found — $artist / $album');
+      log('CDDB: found — $artist / $album');
 
       return DiscMetadata(
         album:  album.isNotEmpty ? album : 'Unknown album',
@@ -194,10 +198,10 @@ class Cddb {
         tracks: tracks,
       );
     } on TimeoutException {
-      stderr.writeln('CDDB: timeout reading entry.');
+      log('CDDB: timeout reading entry.');
       return null;
     } catch (e) {
-      stderr.writeln('CDDB: read error — $e');
+      log('CDDB: read error — $e');
       return null;
     }
   }

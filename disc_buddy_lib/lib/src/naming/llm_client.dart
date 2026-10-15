@@ -1,13 +1,13 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:http/http.dart' as http;
+import '../utils/log.dart';
 
 class LlmClient {
   final String baseUrl;
   final String apiKey;
   final String model;
   final http.Client _http;
-  final void Function(String, {bool isError})? onLog;
+  final LogCallback? onLog;
 
   LlmClient({
     required String baseUrl,
@@ -18,15 +18,8 @@ class LlmClient {
   })  : baseUrl = _normalizeBaseUrl(baseUrl),
         _http = httpClient ?? http.Client();
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else if (isError) {
-      stderr.writeln(msg);
-    } else {
-      stdout.writeln(msg);
-    }
-  }
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: isError);
 
   /// Appends `/v1` when the URL has no meaningful path (e.g. bare Ollama host).
   static String _normalizeBaseUrl(String url) {

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../utils/xdg.dart';
+import '../utils/log.dart';
 
 /// Per-episode metadata returned by [TmdbClient.getSeasonEpisodes].
 typedef EpisodeInfo = ({
@@ -35,20 +36,15 @@ class TmdbClient {
 
   final String token;
   final http.Client _http;
-  final void Function(String, {bool isError})? onLog;
+  final LogCallback? onLog;
 
   TmdbClient({required this.token, http.Client? httpClient, this.onLog})
       : _http = httpClient ?? http.Client();
 
   void close() => _http.close();
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else {
-      stderr.writeln(msg);
-    }
-  }
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: true);
 
   // TMDB accepts two credential types: v4 read access tokens (long JWTs, which
   // contain '.') sent as a Bearer header, and v3 API keys (32-char hex) sent

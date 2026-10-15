@@ -6,6 +6,8 @@ import '../models/bluray_title.dart';
 import '../models/rip_options.dart';
 import 'video_disc_ripper.dart';
 import '../utils/file_utils.dart';
+import '../utils/log.dart';
+import '../utils/prompter.dart';
 import '../utils/languages.dart';
 import '../utils/mount.dart';
 import '../utils/xdg.dart';
@@ -18,8 +20,22 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   final LogCallback? onLog;
   final ProgressCallback? onProgress;
 
-  BlurayRipper(this.options, {this.onLog, this.onProgress, void Function(Process)? onFfmpegProcess})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess, onLog: onLog);
+  /// Asks about languages and overwrites. `force` always wins: with
+  /// `options.force` set every question is answered with its default.
+  final Prompter _prompter;
+
+  BlurayRipper(this.options,
+      {this.onLog,
+      this.onProgress,
+      Prompter? prompter,
+      void Function(Process)? onFfmpegProcess})
+      : _ffmpeg = FfmpegRunner(
+            executable: options.ffmpeg,
+            onProcessStarted: onFfmpegProcess,
+            onLog: onLog),
+        _prompter = options.force
+            ? const NonInteractivePrompter()
+            : (prompter ?? const NonInteractivePrompter());
 
   static Set<int>? _langsToIndices(List<String> trackLangs, Set<String>? filter) {
     if (filter == null || filter.isEmpty) return null;
@@ -32,15 +48,8 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     return indices.isEmpty ? null : indices; // null = keep all when nothing matches
   }
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else if (isError) {
-      stderr.writeln(msg);
-    } else {
-      stdout.writeln(msg);
-    }
-  }
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: isError);
 
   /// Scans the Blu-ray via MPLS and CLPI files (pure Dart).
   /// Returns null on error.
@@ -55,6 +64,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
       options.device!,
       (mp) => _scanMounted(mp),
       errorContext: 'Blu-ray',
+      onLog: onLog,
     );
   }
 
@@ -77,7 +87,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     } else {
       await withMountedDisc<Object?>(options.device!, (mp) =>
           _ripMounted(mp, discTitle, selected, outDir, hasLibbluray,
-              overwrite: overwrite));
+              overwrite: overwrite), onLog: onLog);
     }
   }
 
@@ -133,7 +143,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     final langsMap = <BlurayTitle, ({List<String> audioLangs, List<String> subLangs})>{};
     for (final title in selected) {
       _log('── Languages: playlist ${title.playlist} [${title.durationLabel}]');
-      langsMap[title] = _collectLanguages(title, force: options.force, onLog: onLog);
+      langsMap[title] = await _collectLanguages(title, prompter: _prompter, onLog: onLog);
     }
     if (!options.force) _log('');
 
@@ -473,7 +483,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     _log('── Ripping: playlist ${title.playlist} → ${outFile.path}');
 
     if (!await confirmOverwrite(outFile,
-        force: options.force, onLog: onLog, overwrite: overwrite)) {
+        force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
       return;
     }
 
@@ -755,16 +765,16 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   }
 
   /// Shows current languages (from CLPI) and optionally prompts for manual correction.
-  static ({List<String> audioLangs, List<String> subLangs}) _collectLanguages(
+  static Future<({List<String> audioLangs, List<String> subLangs})> _collectLanguages(
     BlurayTitle title, {
-    bool force = false,
+    required Prompter prompter,
     LogCallback? onLog,
   }) {
     return askLanguages(
       audioLabels:   const [],  // Blu-ray shows codec in audioTitles; no extra label needed
       audioCurrents: title.audioLangs,
       subCurrents:   title.subtitleLangs,
-      force:         force,
+      prompter:      prompter,
       onLog:         onLog,
     );
   }

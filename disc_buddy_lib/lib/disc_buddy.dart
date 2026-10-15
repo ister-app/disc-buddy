@@ -20,6 +20,8 @@ export 'src/device/disc_type_detector.dart';
 export 'src/device/disc_fingerprint.dart';
 export 'src/ffmpeg/ffmpeg_runner.dart' show FfmpegProgress, ProgressCallback;
 export 'src/utils/xdg.dart';
+export 'src/utils/log.dart';
+export 'src/utils/prompter.dart';
 export 'src/utils/config_loader.dart';
 export 'src/utils/mount.dart' show withMountedDisc;
 export 'src/utils/sanitize.dart' show sanitizeFilename;

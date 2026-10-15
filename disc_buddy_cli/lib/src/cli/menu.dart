@@ -153,6 +153,9 @@ class Menu {
         .toList();
   }
 
+  /// Prompter the CLI hands to the library for its own questions.
+  static const Prompter prompter = TtyPrompter();
+
   /// Reads a line from /dev/tty (for arbitrary input).
   static String readLine() => ttyReadLine();
 

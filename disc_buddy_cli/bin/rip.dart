@@ -249,7 +249,7 @@ Future<void> main(List<String> arguments) async {
         case DiscType.audioCD:
           await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
         case DiscType.dvd:
-          await _ripVideoDisc(DVDRipper(opts),
+          await _ripVideoDisc(DVDRipper(opts, prompter: const TtyPrompter()),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             mountPath:     mountPath,
@@ -257,7 +257,7 @@ Future<void> main(List<String> arguments) async {
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          await _ripVideoDisc(BlurayRipper(opts),
+          await _ripVideoDisc(BlurayRipper(opts, prompter: const TtyPrompter()),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             mountPath:    mountPath,
@@ -304,14 +304,14 @@ Future<void> main(List<String> arguments) async {
         case DiscType.audioCD:
           continueLoop = await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
         case DiscType.dvd:
-          continueLoop = await _ripVideoDisc(DVDRipper(opts),
+          continueLoop = await _ripVideoDisc(DVDRipper(opts, prompter: const TtyPrompter()),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             errorContext:  'DVD',
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          continueLoop = await _ripVideoDisc(BlurayRipper(opts),
+          continueLoop = await _ripVideoDisc(BlurayRipper(opts, prompter: const TtyPrompter()),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             errorContext: 'Blu-ray',
@@ -509,7 +509,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 // ---------------------------------------------------------------------------
 
 Future<bool> _ripAudioCD(RipOptions opts) async {
-  final ripper = AudioCDRipper(opts);
+  final ripper = AudioCDRipper(opts, prompter: const TtyPrompter());
 
   String? scanFp;
   if (opts.device?.startsWith('/dev/') ?? false) {
@@ -1014,6 +1014,7 @@ AutoNamer _buildAutoNamer(
       ),
       force: opts.force,
       batchAssign: batchAssign ?? opts.batchAssign,
+      prompter: const TtyPrompter(),
     );
 
 /// Asks the "Use batch assignment?" question upfront (before ripping starts)

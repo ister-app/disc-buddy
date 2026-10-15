@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'log.dart';
 import 'xdg.dart';
 
 class ConfigLoader {
@@ -7,23 +8,25 @@ class ConfigLoader {
 
   /// Loads the config from [path] or [defaultPath].
   /// Returns an empty map if the file does not exist.
-  /// Prints a warning to stderr and returns an empty map on parse errors.
-  static Future<Map<String, dynamic>> load({String? path}) async {
+  /// Logs a warning (via [onLog], else stderr) and returns an empty map on
+  /// parse errors.
+  static Future<Map<String, dynamic>> load({String? path, LogCallback? onLog}) async {
+    void warn(String msg) => emitLog(onLog, msg, isError: true);
     final file = File(path ?? defaultPath);
     if (!await file.exists()) return {};
     try {
       final content = await file.readAsString();
       final parsed  = jsonDecode(content);
       if (parsed is Map<String, dynamic>) return parsed;
-      stderr.writeln(
+      warn(
           'Warning: config file "${file.path}" must be a JSON object — ignored.');
       return {};
     } on FormatException catch (e) {
-      stderr.writeln(
+      warn(
           'Warning: config file "${file.path}" contains invalid JSON: ${e.message} — ignored.');
       return {};
     } catch (e) {
-      stderr.writeln('Warning: could not read config file "${file.path}": $e — ignored.');
+      warn('Warning: could not read config file "${file.path}": $e — ignored.');
       return {};
     }
   }

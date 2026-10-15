@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/disc_metadata.dart';
+import '../utils/log.dart';
 
 class MusicBrainz {
   static const _userAgent = 'DiscBuddy/1.0 (disc-buddy)';
@@ -13,9 +13,11 @@ class MusicBrainz {
   static Future<DiscMetadata?> lookup(
     String discId,
     List<double> startTimes,
-    double leadOutTime,
-  ) async {
-    stderr.writeln('MusicBrainz: looking up disc ID $discId...');
+    double leadOutTime, {
+    LogCallback? onLog,
+  }) async {
+    void log(String msg) => emitLog(onLog, msg, isError: true);
+    log('MusicBrainz: looking up disc ID $discId...');
     final uri = Uri.parse(
       'https://musicbrainz.org/ws/2/discid/$discId'
       '?fmt=json&inc=recordings+artist-credits+labels',
@@ -25,11 +27,11 @@ class MusicBrainz {
           .get(uri, headers: {'User-Agent': _userAgent})
           .timeout(_timeout);
       if (resp.statusCode == 404) {
-        stderr.writeln('MusicBrainz: disc not found (404).');
+        log('MusicBrainz: disc not found (404).');
         return null;
       }
       if (resp.statusCode != 200) {
-        stderr.writeln('MusicBrainz: error ${resp.statusCode}.');
+        log('MusicBrainz: error ${resp.statusCode}.');
         return null;
       }
       final Map<String, dynamic> data;
@@ -37,19 +39,19 @@ class MusicBrainz {
         data = jsonDecode(resp.body) as Map<String, dynamic>;
       } on FormatException {
         final snippet = resp.body.length > 200 ? resp.body.substring(0, 200) : resp.body;
-        stderr.writeln('MusicBrainz: invalid JSON — $snippet');
+        log('MusicBrainz: invalid JSON — $snippet');
         return null;
       }
       final result = _parseResponse(data, discId, startTimes.length);
       if (result == null) {
-        stderr.writeln('MusicBrainz: no usable release found.');
+        log('MusicBrainz: no usable release found.');
       }
       return result;
     } on TimeoutException {
-      stderr.writeln('MusicBrainz: timeout (>${_timeout.inSeconds}s).');
+      log('MusicBrainz: timeout (>${_timeout.inSeconds}s).');
       return null;
     } catch (e) {
-      stderr.writeln('MusicBrainz: fetch error — $e');
+      log('MusicBrainz: fetch error — $e');
       return null;
     }
   }

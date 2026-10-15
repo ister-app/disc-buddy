@@ -11,8 +11,9 @@ import '../metadata/disc_id.dart' show computeDiscId, computeDiscIdFromOffsets;
 import '../metadata/musicbrainz.dart';
 import '../models/disc_metadata.dart';
 import '../models/rip_options.dart';
-import 'video_disc_ripper.dart';
 import '../utils/file_utils.dart';
+import '../utils/log.dart';
+import '../utils/prompter.dart';
 import '../utils/progress.dart';
 import '../utils/sanitize.dart';
 import '../utils/udev.dart';
@@ -39,18 +40,18 @@ class AudioCDRipper {
   /// Enables the direct SG_IO rip path in [rip].
   ({List<int> offsets, int leadOut})? _fullToc;
 
-  AudioCDRipper(this.options, {this.onLog, this.onProgress})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onLog: onLog);
+  /// Asks about overwrites. `force` always wins: with `options.force` set
+  /// every question is answered with its default.
+  final Prompter _prompter;
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else if (isError) {
-      stderr.writeln(msg);
-    } else {
-      stdout.writeln(msg);
-    }
-  }
+  AudioCDRipper(this.options, {this.onLog, this.onProgress, Prompter? prompter})
+      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onLog: onLog),
+        _prompter = options.force
+            ? const NonInteractivePrompter()
+            : (prompter ?? const NonInteractivePrompter());
+
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: isError);
 
   /// Loads metadata from the disc (CD-TEXT + optionally MusicBrainz).
   Future<DiscMetadata?> loadMetadata() async {
@@ -128,8 +129,8 @@ class AudioCDRipper {
     final hasAlbum = albumCdText.isNotEmpty;
 
     // Try MusicBrainz first; fall back to CDDB/GnuDB on failure.
-    final mb = await MusicBrainz.lookup(discId, startTimes, leadOut)
-        ?? await Cddb.lookup(startTimes, leadOut);
+    final mb = await MusicBrainz.lookup(discId, startTimes, leadOut, onLog: onLog)
+        ?? await Cddb.lookup(startTimes, leadOut, onLog: onLog);
 
     if (mb != null) {
       // MusicBrainz takes priority; CD-TEXT is used as fallback for missing fields.
@@ -274,7 +275,7 @@ class AudioCDRipper {
         _log('── Ripping: track $nr → ${outFile.path}');
 
         if (!await confirmOverwrite(outFile,
-            force: options.force, onLog: onLog, overwrite: overwrite)) {
+            force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
           continue;
         }
 

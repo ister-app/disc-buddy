@@ -8,6 +8,8 @@ import '../models/dvd_title.dart';
 import '../models/rip_options.dart';
 import 'video_disc_ripper.dart';
 import '../utils/file_utils.dart';
+import '../utils/log.dart';
+import '../utils/prompter.dart';
 import '../utils/languages.dart';
 import '../utils/mount.dart';
 import '../utils/progress.dart';
@@ -25,8 +27,22 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// of this disc's titles skip straight to the proven two-pass scan.
   bool _singlePassDisabled = false;
 
-  DVDRipper(this.options, {this.onLog, this.onProgress, void Function(Process)? onFfmpegProcess})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onProcessStarted: onFfmpegProcess, onLog: onLog);
+  /// Asks about languages and overwrites. `force` always wins: with
+  /// `options.force` set every question is answered with its default.
+  final Prompter _prompter;
+
+  DVDRipper(this.options,
+      {this.onLog,
+      this.onProgress,
+      Prompter? prompter,
+      void Function(Process)? onFfmpegProcess})
+      : _ffmpeg = FfmpegRunner(
+            executable: options.ffmpeg,
+            onProcessStarted: onFfmpegProcess,
+            onLog: onLog),
+        _prompter = options.force
+            ? const NonInteractivePrompter()
+            : (prompter ?? const NonInteractivePrompter());
 
   static List<T> _filterByLang<T>(
       List<T> tracks, Set<String> langs, String Function(T) getLang) {
@@ -36,15 +52,8 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     return filtered.isEmpty ? tracks : filtered;
   }
 
-  void _log(String msg, {bool isError = false}) {
-    if (onLog != null) {
-      onLog!(msg, isError: isError);
-    } else if (isError) {
-      stderr.writeln(msg);
-    } else {
-      stdout.writeln(msg);
-    }
-  }
+  void _log(String msg, {bool isError = false}) =>
+      emitLog(onLog, msg, isError: isError);
 
   /// Scans the DVD via the IFO parser.
   /// Returns null on error.
@@ -60,6 +69,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       options.device!,
       (mp) => _scanMounted(mp, mp),
       errorContext: 'DVD',
+      onLog: onLog,
     );
   }
 
@@ -113,7 +123,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     final langsMap = <DvdTitle, ({List<String> audioLangs, List<String> subLangs})>{};
     for (final title in selected) {
       _log('── Languages: title ${title.displayKey} [${title.durationLabel}]');
-      langsMap[title] = _collectLanguages(title, force: options.force, onLog: onLog);
+      langsMap[title] = await _collectLanguages(title, prompter: _prompter, onLog: onLog);
     }
     if (!options.force) _log('');
 
@@ -155,7 +165,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
       if (!await confirmOverwrite(outFile,
-          force: options.force, onLog: onLog, overwrite: overwrite)) {
+          force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
         continue;
       }
 
@@ -346,7 +356,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         _log('── Ripping: ${title.displayKey} → ${outFile.path}');
 
         if (!await confirmOverwrite(outFile,
-            force: options.force, onLog: onLog, overwrite: overwrite)) {
+            force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
           continue;
         }
 
@@ -428,7 +438,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     if (mountPath != null) {
       await doRip(mountPath);
     } else {
-      await withMountedDisc<Object?>(device, doRip);
+      await withMountedDisc<Object?>(device, doRip, onLog: onLog);
     }
   }
 
@@ -950,9 +960,9 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   // Language collection (interactive)
   // ---------------------------------------------------------------------------
 
-  static ({List<String> audioLangs, List<String> subLangs}) _collectLanguages(
+  static Future<({List<String> audioLangs, List<String> subLangs})> _collectLanguages(
     DvdTitle title, {
-    bool force = false,
+    required Prompter prompter,
     LogCallback? onLog,
   }) {
     final audioLabels   = [
@@ -969,7 +979,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       audioLabels:   audioLabels,
       audioCurrents: audioCurrents,
       subCurrents:   subCurrents,
-      force:         force,
+      prompter:      prompter,
       onLog:         onLog,
     );
   }

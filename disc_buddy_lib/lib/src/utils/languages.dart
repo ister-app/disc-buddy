@@ -1,6 +1,5 @@
-import 'dart:io';
-import 'tty.dart';
-import '../rippers/video_disc_ripper.dart' show LogCallback;
+import 'log.dart';
+import 'prompter.dart';
 
 /// ISO 639-1 (2-letter) → ISO 639-2/B (3-letter bibliographic).
 const iso639_1to2B = {
@@ -65,21 +64,21 @@ String channelLabel(int ch) => channelLabels[ch] ?? '${ch}ch';
 /// [audioLabels]   — extra info per audio track, e.g. "AC3 5.1". Empty = no extra.
 /// [audioCurrents] — current language codes per audio track.
 /// [subCurrents]   — current language codes per subtitle track.
-/// [force]         — use current languages directly without asking.
-({List<String> audioLangs, List<String> subLangs}) askLanguages({
+/// [prompter]      — asks whether to correct languages manually and for each
+///                   missing language. A [NonInteractivePrompter] keeps the
+///                   current languages as they are.
+Future<({List<String> audioLangs, List<String> subLangs})> askLanguages({
   required List<String> audioLabels,
   required List<String> audioCurrents,
   required List<String> subCurrents,
-  required bool force,
+  required Prompter prompter,
   LogCallback? onLog,
-}) {
+}) async {
   if (audioCurrents.isEmpty && subCurrents.isEmpty) {
-    return (audioLangs: [], subLangs: []);
+    return (audioLangs: <String>[], subLangs: <String>[]);
   }
 
-  void emit(String msg) {
-    if (onLog != null) { onLog(msg); } else { stdout.writeln(msg); }
-  }
+  void emit(String msg) => emitLog(onLog, msg);
 
   emit('   Current languages:');
   for (var i = 0; i < audioCurrents.length; i++) {
@@ -93,37 +92,31 @@ String channelLabel(int ch) => channelLabels[ch] ?? '${ch}ch';
     emit('     Subtitle ${i + 1}: ${lang.isNotEmpty ? lang : "?"}');
   }
 
-  if (force || onLog != null) {
-    return (audioLangs: List.of(audioCurrents), subLangs: List.of(subCurrents));
-  }
-
-  final manual = ttyConfirm('   Set languages manually? [y/N] ');
+  final manual = await prompter.confirm('   Set languages manually? [y/N] ');
 
   // Returns [current] unchanged if not in manual mode and current is non-empty.
   // Otherwise prompts the user; a space-only reply clears the language.
-  String askLang(String current, String prompt) {
+  Future<String> askLang(String current, String prompt) async {
     if (!manual && current.isNotEmpty) return current;
-    stdout.write(prompt);
-    final input = ttyReadLine();
+    final input = await prompter.readLine(prompt, defaultValue: current);
     if (input.isEmpty) return current;
     if (input.replaceAll(' ', '').isEmpty) return '';
     return input.replaceAll(' ', '');
   }
 
-  return (
-    audioLangs: [
-      for (var i = 0; i < audioCurrents.length; i++) () {
-        final extra = i < audioLabels.length ? audioLabels[i] : '';
-        final e = extra.isNotEmpty ? ' ($extra)' : '';
-        final h = audioCurrents[i].isNotEmpty ? ' [current: ${audioCurrents[i]}]' : '';
-        return askLang(audioCurrents[i], '   Audio ${i + 1}$e language$h (space=empty): ');
-      }(),
-    ],
-    subLangs: [
-      for (var i = 0; i < subCurrents.length; i++) () {
-        final h = subCurrents[i].isNotEmpty ? ' [current: ${subCurrents[i]}]' : '';
-        return askLang(subCurrents[i], '   Subtitle ${i + 1} language$h (space=remove track): ');
-      }(),
-    ],
-  );
+  final audioLangs = <String>[];
+  for (var i = 0; i < audioCurrents.length; i++) {
+    final extra = i < audioLabels.length ? audioLabels[i] : '';
+    final e = extra.isNotEmpty ? ' ($extra)' : '';
+    final h = audioCurrents[i].isNotEmpty ? ' [current: ${audioCurrents[i]}]' : '';
+    audioLangs.add(await askLang(
+        audioCurrents[i], '   Audio ${i + 1}$e language$h (space=empty): '));
+  }
+  final subLangs = <String>[];
+  for (var i = 0; i < subCurrents.length; i++) {
+    final h = subCurrents[i].isNotEmpty ? ' [current: ${subCurrents[i]}]' : '';
+    subLangs.add(await askLang(
+        subCurrents[i], '   Subtitle ${i + 1} language$h (space=remove track): '));
+  }
+  return (audioLangs: audioLangs, subLangs: subLangs);
 }

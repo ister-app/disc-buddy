@@ -1,6 +1,6 @@
 import 'dart:io';
-import 'tty.dart';
-import '../rippers/video_disc_ripper.dart' show LogCallback;
+import 'log.dart';
+import 'prompter.dart';
 
 // Monotonic counter so two chapter files created in the same millisecond (and
 // process) don't collide on their temp-file names.
@@ -39,15 +39,22 @@ Future<File?> writeChapterMetadata(
 /// the set instead of prompting: paths in the set are deleted and re-ripped,
 /// other existing files are skipped. Used by UIs that ask up front which
 /// files to overwrite.
+///
+/// [prompter] — asked when neither [force] nor [overwrite] decides. The
+/// default [NonInteractivePrompter] answers "no", so an existing file is
+/// skipped unless the caller passes an interactive prompter.
 Future<bool> confirmOverwrite(File file,
-    {required bool force, LogCallback? onLog, Set<String>? overwrite}) async {
+    {required bool force,
+    LogCallback? onLog,
+    Set<String>? overwrite,
+    Prompter prompter = const NonInteractivePrompter()}) async {
   if (!await file.exists()) return true;
   if (overwrite != null && !force && !overwrite.contains(file.path)) {
-    if (onLog != null) { onLog('   Skipped.'); } else { stdout.writeln('   Skipped.'); }
+    emitLog(onLog, '   Skipped.');
     return false;
   }
   final shouldDelete = force || (overwrite != null) ||
-      (onLog == null && ttyConfirm('   File already exists — delete? [y/N] '));
+      await prompter.confirm('   File already exists — delete? [y/N] ');
   if (shouldDelete) {
     try {
       await file.delete();
@@ -55,11 +62,10 @@ Future<bool> confirmOverwrite(File file,
     } catch (e) {
       // The delete failed (e.g. permissions). Returning true here would let the
       // caller write over a file we couldn't remove, so report failure instead.
-      final msg = '   Cannot delete file: $e';
-      if (onLog != null) { onLog(msg, isError: true); } else { stderr.writeln(msg); }
+      emitLog(onLog, '   Cannot delete file: $e', isError: true);
       return false;
     }
   }
-  if (onLog != null) { onLog('   Skipped.'); } else { stdout.writeln('   Skipped.'); }
+  emitLog(onLog, '   Skipped.');
   return false;
 }
