@@ -60,7 +60,7 @@ class Transcriber {
 
   /// Transcribes sampled audio windows of [videoFile].
   ///
-  /// Returns `(text, language)` — the same shape `AutoNamer._loadSubtitle`
+  /// Returns `(text, language)` — the same shape `SubtitleSource.load`
   /// expects — or null when the file has no audio track or transcription
   /// produced (almost) nothing.
   Future<({String text, String language})?> transcribe(File videoFile) async {
