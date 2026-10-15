@@ -5,6 +5,7 @@ import '../ffmpeg/ffmpeg_runner.dart';
 import '../models/bluray_title.dart';
 import '../models/rip_options.dart';
 import 'video_disc_ripper.dart';
+import '../utils/atomic_output.dart';
 import '../utils/file_utils.dart';
 import '../utils/log.dart';
 import '../utils/prompter.dart';
@@ -504,6 +505,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         ?? _langsToIndices(langs.subLangs, options.subtitleMkvLangs);
     final dur          = title.duration.inSeconds;
 
+    final ok = await withPartFile<bool>(outFile, (part) async {
     List<String> args;
     if (useLibbluray) {
       args = _buildLibblurayArgs(
@@ -515,7 +517,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
         audioTitles:  audioTitles,
         chapterFile:  chapterFile,
-        outPath:      outFile.path,
+        outPath:      part.path,
         audioIndices: audioIndices,
         subIndices:   subIndices,
       );
@@ -527,7 +529,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
       if (m2tsFiles.isEmpty) {
         await chapterFile?.delete().catchError((_) => File(''));
         _log('   No M2TS files found for ${title.playlist}.', isError: true);
-        return;
+        return false;
       }
       args = _buildDirectArgs(
         m2tsFiles:   m2tsFiles,
@@ -537,7 +539,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
         lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
         audioTitles: audioTitles,
         chapterFile: chapterFile,
-        outPath:     outFile.path,
+        outPath:     part.path,
         audioIndices: audioIndices,
         subIndices:   subIndices,
       );
@@ -561,7 +563,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
           l.contains("can't decrypt") ||
           l.contains('Host key'));
       if (aacsError) {
-        await outFile.delete().catchError((_) => File(''));
+        await part.delete().catchError((_) => File(''));
         _log('   AACS decryption failed — trying direct M2TS fallback...', isError: true);
         final m2tsFiles = clipNames
             .map((c) => p.join(bdmvPath, 'STREAM', '$c.m2ts'))
@@ -576,7 +578,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
             lpcmCodec:   options.lpcmFlac ? 'flac' : 'pcm_s24le',
             audioTitles: audioTitles,
             chapterFile: chapterFile,
-            outPath:     outFile.path,
+            outPath:     part.path,
             audioIndices: audioIndices,
             subIndices:   subIndices,
           );
@@ -595,17 +597,16 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
 
     await chapterFile?.delete().catchError((_) => File(''));
 
-    final fileSize = await outFile.exists() ? await outFile.length() : 0;
-    if (exitCode == 0 && fileSize > 0) {
-      _log('   Done: ${outFile.path}');
+    final fileSize = await part.exists() ? await part.length() : 0;
+    if (exitCode == 0 && fileSize > 0) return true;
+    if (aacsError) {
+      _log('   AACS decryption failed. Update ${xdgConfigHome()}/aacs/KEYDB.cfg or use MakeMKV.', isError: true);
     } else {
-      if (aacsError) {
-        _log('   AACS decryption failed. Update ${xdgConfigHome()}/aacs/KEYDB.cfg or use MakeMKV.', isError: true);
-      } else {
-        _log('   Error ripping ${title.playlist} (exit code $exitCode).', isError: true);
-      }
-      await outFile.delete().catchError((_) => File(''));
+      _log('   Error ripping ${title.playlist} (exit code $exitCode).', isError: true);
     }
+    return false;
+    }, succeeded: (ok) => ok, onLog: onLog);
+    if (ok) _log('   Done: ${outFile.path}');
   }
 
   static List<String> _buildLibblurayArgs({

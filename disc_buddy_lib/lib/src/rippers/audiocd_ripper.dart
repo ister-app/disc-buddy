@@ -11,6 +11,7 @@ import '../metadata/disc_id.dart' show computeDiscId, computeDiscIdFromOffsets;
 import '../metadata/musicbrainz.dart';
 import '../models/disc_metadata.dart';
 import '../models/rip_options.dart';
+import '../utils/atomic_output.dart';
 import '../utils/file_utils.dart';
 import '../utils/log.dart';
 import '../utils/prompter.dart';
@@ -44,8 +45,15 @@ class AudioCDRipper {
   /// every question is answered with its default.
   final Prompter _prompter;
 
-  AudioCDRipper(this.options, {this.onLog, this.onProgress, Prompter? prompter})
-      : _ffmpeg = FfmpegRunner(executable: options.ffmpeg, onLog: onLog),
+  AudioCDRipper(this.options,
+      {this.onLog,
+      this.onProgress,
+      Prompter? prompter,
+      void Function(Process)? onFfmpegProcess})
+      : _ffmpeg = FfmpegRunner(
+            executable: options.ffmpeg,
+            onProcessStarted: onFfmpegProcess,
+            onLog: onLog),
         _prompter = options.force
             ? const NonInteractivePrompter()
             : (prompter ?? const NonInteractivePrompter());
@@ -310,15 +318,6 @@ class AudioCDRipper {
     if (track.artistMbid.isNotEmpty)   ...[ '-metadata', 'MUSICBRAINZ_ARTISTID=${track.artistMbid}' ],
   ];
 
-  Future<void> _deletePartial(File outFile) async {
-    if (await outFile.exists()) {
-      await outFile.delete().catchError((e) {
-        _log('   Cannot delete file: $e', isError: true);
-        return File('');
-      });
-    }
-  }
-
   /// Rips one track by reading its exact sector range via SG_IO and piping
   /// raw PCM into ffmpeg stdin. ffmpeg exits normally when the stream closes;
   /// success requires exit 0 and the full expected byte count.
@@ -374,26 +373,28 @@ class AudioCDRipper {
       }
     }
 
-    final args = [
-      '-loglevel', 'repeat+level+warning',
-      '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:0',
-      '-c:a', 'flac',
-      ..._metadataArgs(meta, track, trackArtist),
-      outFile.path,
-    ];
+    final ok = await withPartFile<bool>(outFile, (part) async {
+      final args = [
+        '-loglevel', 'repeat+level+warning',
+        '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', 'pipe:0',
+        '-c:a', 'flac',
+        ..._metadataArgs(meta, track, trackArtist),
+        part.path,
+      ];
 
-    final exitCode = await _ffmpeg.run(args, stdinData: producer());
-    emitProgress(bytesPiped, force: true);
-    _log('');
+      final exitCode = await _ffmpeg.run(args, stdinData: producer());
+      emitProgress(bytesPiped, force: true);
+      _log('');
 
-    if (exitCode == 0 && producerError == null && bytesPiped == expectedBytes) {
-      _log('   Done: ${outFile.path}');
-    } else {
+      if (exitCode == 0 && producerError == null && bytesPiped == expectedBytes) {
+        return true;
+      }
       final detail = producerError?.toString() ??
           'exit code $exitCode, piped $bytesPiped of $expectedBytes bytes';
       _log('   Error ripping track ${track.number} ($detail).', isError: true);
-      await _deletePartial(outFile);
-    }
+      return false;
+    }, succeeded: (ok) => ok, onLog: onLog);
+    if (ok) _log('   Done: ${outFile.path}');
   }
 
   /// Fallback rip via ffmpeg's libcdio input. libcdio hangs after the last
@@ -408,6 +409,8 @@ class AudioCDRipper {
     final dur = track.duration;
     final timeoutDur = Duration(seconds: dur.truncate().toInt() + 30);
 
+    final expectedDur = Duration(milliseconds: (dur * 1000).round());
+    final ok = await withPartFile<bool>(outFile, (part) async {
     final args = [
       '-loglevel', 'repeat+level+warning', '-stats',
       '-f', 'libcdio',
@@ -416,10 +419,8 @@ class AudioCDRipper {
       '-t', dur.toString(),
       '-c:a', 'flac',
       ..._metadataArgs(meta, track, trackArtist),
-      outFile.path,
+      part.path,
     ];
-
-    final expectedDur = Duration(milliseconds: (dur * 1000).round());
 
     // Track the furthest progress ffmpeg reported. The runner SIGTERMs ffmpeg
     // on purpose once all audio is written (to stop libcdio hanging), so a
@@ -441,13 +442,12 @@ class AudioCDRipper {
 
     // 98% tolerance covers the ~last-frame the completion-kill trims.
     final reachedEnd = lastElapsed.inMilliseconds >= expectedDur.inMilliseconds * 0.98;
-    if (exitCode == 0 || (await outFile.exists() && reachedEnd)) {
-      _log('   Done: ${outFile.path}');
-    } else {
-      _log('   Error ripping track ${track.number} (exit code $exitCode, '
-          'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
-      await _deletePartial(outFile);
-    }
+    if (exitCode == 0 || (await part.exists() && reachedEnd)) return true;
+    _log('   Error ripping track ${track.number} (exit code $exitCode, '
+        'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
+    return false;
+    }, succeeded: (ok) => ok, onLog: onLog);
+    if (ok) _log('   Done: ${outFile.path}');
   }
 
   /// Fetches disc ID and corrected lead-out as a (discId, leadOut) record.

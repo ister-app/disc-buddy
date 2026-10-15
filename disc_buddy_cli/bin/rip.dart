@@ -19,7 +19,22 @@ class _RipAborted implements Exception {
   const _RipAborted([this.message]);
 }
 
+/// ffmpeg process of the rip in progress, so Ctrl+C can stop it gracefully.
+Process? _activeFfmpeg;
+void _trackFfmpeg(Process p) => _activeFfmpeg = p;
+
+/// On Ctrl+C: SIGTERM ffmpeg so the ripper's `.part` cleanup runs, then exit.
+/// Watching SIGINT disables the VM's default handler, hence the explicit exit.
+void _installSigintHandler() {
+  ProcessSignal.sigint.watch().listen((_) {
+    stderr.writeln('\nInterrupted — stopping ffmpeg and cleaning up...');
+    _activeFfmpeg?.kill(ProcessSignal.sigterm);
+    Future.delayed(const Duration(seconds: 3), () => exit(130));
+  });
+}
+
 Future<void> main(List<String> arguments) async {
+  _installSigintHandler();
   final parser = buildArgParser();
 
   final ArgResults args;
@@ -83,7 +98,7 @@ Future<void> main(List<String> arguments) async {
         case DiscType.audioCD:
           await _ripAudioCD(opts.copyWithOutputDir(cli.musicOutputDir));
         case DiscType.dvd:
-          await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter),
+          await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter, onFfmpegProcess: _trackFfmpeg),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             mountPath:     mountPath,
@@ -91,7 +106,7 @@ Future<void> main(List<String> arguments) async {
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter),
+          await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter, onFfmpegProcess: _trackFfmpeg),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             mountPath:    mountPath,
@@ -133,14 +148,14 @@ Future<void> main(List<String> arguments) async {
         case DiscType.audioCD:
           continueLoop = await _ripAudioCD(opts.copyWithOutputDir(cli.musicOutputDir));
         case DiscType.dvd:
-          continueLoop = await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter),
+          continueLoop = await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter, onFfmpegProcess: _trackFfmpeg),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             errorContext:  'DVD',
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          continueLoop = await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter),
+          continueLoop = await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter, onFfmpegProcess: _trackFfmpeg),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             errorContext: 'Blu-ray',
@@ -344,7 +359,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 // ---------------------------------------------------------------------------
 
 Future<bool> _ripAudioCD(RipOptions opts) async {
-  final ripper = AudioCDRipper(opts, prompter: Menu.prompter);
+  final ripper = AudioCDRipper(opts, prompter: Menu.prompter, onFfmpegProcess: _trackFfmpeg);
 
   String? scanFp;
   if (opts.device?.startsWith('/dev/') ?? false) {

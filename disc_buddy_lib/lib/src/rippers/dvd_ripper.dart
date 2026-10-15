@@ -7,6 +7,7 @@ import '../ffmpeg/ffmpeg_runner.dart';
 import '../models/dvd_title.dart';
 import '../models/rip_options.dart';
 import 'video_disc_ripper.dart';
+import '../utils/atomic_output.dart';
 import '../utils/file_utils.dart';
 import '../utils/log.dart';
 import '../utils/prompter.dart';
@@ -200,13 +201,24 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           }
         }
 
-        final ripStream = session.stream(title.vtsNumber, cells: cells);
-
         // CC extraction tee (see _willExtractCc): fan the rip's MPEG-PS bytes
         // out to the CC scanner so the disc is read once. Bounded + fail-soft.
         final teeCc = _willExtractCc(title);
         Future<File?>? ccScanFuture;
         var ccTeeOk = teeCc;
+
+        Future<void> cleanupCcPartial() async {
+          if (!teeCc) return;
+          await ccScanFuture;
+          final partial =
+              File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
+          if (await partial.exists()) {
+            await partial.delete().catchError((_) => File(''));
+          }
+        }
+
+        final produced = await withPartFile<bool>(outFile, (part) async {
+        final ripStream = session.stream(title.vtsNumber, cells: cells);
         var ripInput = ripStream;
         if (teeCc) {
           final stem = outFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
@@ -237,16 +249,6 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           }();
         }
 
-        Future<void> cleanupCcPartial() async {
-          if (!teeCc) return;
-          await ccScanFuture;
-          final partial =
-              File('${outFile.path.replaceFirst(RegExp(r'\.mkv$'), '')}.en.srt');
-          if (await partial.exists()) {
-            await partial.delete().catchError((_) => File(''));
-          }
-        }
-
         final mapAndMetaArgs = singlePass
             ? _buildMapAndMetaArgsById(
                 title: title, audioLangs: langs.audioLangs, subLangs: langs.subLangs)
@@ -274,7 +276,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           '-i', 'pipe:0',
           if (chapterFile != null) ...['-i', chapterFile.path, '-map_chapters', '1'],
           ...mapAndMetaArgs,
-          outFile.path,
+          part.path,
         ];
 
         final dur      = title.duration.inSeconds;
@@ -288,26 +290,24 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         await chapterFile?.delete().catchError((_) => File(''));
         _log('');
 
-        final fileSize = await outFile.exists() ? await outFile.length() : 0;
+        final fileSize = await part.exists() ? await part.length() : 0;
         if (exitCode != 0 || fileSize == 0) {
           _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
           await cleanupCcPartial();
-          await outFile.delete().catchError((e) {
-            _log('   Cannot delete file: $e', isError: true);
-            return File('');
-          });
           return false;
         }
 
         // Single-pass guard: confirm every audio stream made it in. If the id
         // mapping didn't resolve them all, discard and let the caller fall back.
         if (singlePass &&
-            !await _verifyDvdAudioCount(outFile, title.audioTracks.length)) {
+            !await _verifyDvdAudioCount(part, title.audioTracks.length)) {
           _log('   Single-pass audio-stream check failed — discarding.', isError: true);
           await cleanupCcPartial();
-          await outFile.delete().catchError((_) => File(''));
           return false;
         }
+        return true;
+        }, succeeded: (ok) => ok, onLog: onLog);
+        if (!produced) return false;
 
         _log('   Done: ${outFile.path}');
         await _injectSubtitlePalette(outFile, title, langs.subLangs);
@@ -391,30 +391,36 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         final probeBytes   = scan.lastSidByteOffset + 16 * 1024 * 1024;
         final analyzeDurUs = title.duration.inMicroseconds + 60 * 1000000;
         final chapterFile  = await writeChapterMetadata(title.chapters, title.duration);
-        final args = [
-          '-loglevel', 'repeat+level+warning', '-stats',
-          '-fflags', '+genpts',
-          '-probesize', '$probeBytes',
-          '-analyzeduration', '$analyzeDurUs',
-          '-f', 'mpeg',
-          '-i', 'concat:$concatInput',
-          if (chapterFile != null) ...['-i', chapterFile.path, '-map_chapters', '1'],
-          ...mapAndMetaArgs,
-          outFile.path,
-        ];
+        final produced = await withPartFile<bool>(outFile, (part) async {
+          final args = [
+            '-loglevel', 'repeat+level+warning', '-stats',
+            '-fflags', '+genpts',
+            '-probesize', '$probeBytes',
+            '-analyzeduration', '$analyzeDurUs',
+            '-f', 'mpeg',
+            '-i', 'concat:$concatInput',
+            if (chapterFile != null) ...['-i', chapterFile.path, '-map_chapters', '1'],
+            ...mapAndMetaArgs,
+            part.path,
+          ];
 
-        final dur      = title.duration.inSeconds;
-        final exitCode = await _ffmpeg.run(
-          args,
-          timeout:          Duration(seconds: dur + 60),
-          expectedDuration: title.duration,
-          onProgress:       onProgress ?? logProgress,
-        );
-        await chapterFile?.delete().catchError((_) => File(''));
-        _log('');
+          final dur      = title.duration.inSeconds;
+          final exitCode = await _ffmpeg.run(
+            args,
+            timeout:          Duration(seconds: dur + 60),
+            expectedDuration: title.duration,
+            onProgress:       onProgress ?? logProgress,
+          );
+          await chapterFile?.delete().catchError((_) => File(''));
+          _log('');
 
-        final fileSize = await outFile.exists() ? await outFile.length() : 0;
-        if (exitCode == 0 && fileSize > 0) {
+          final fileSize = await part.exists() ? await part.length() : 0;
+          if (exitCode == 0 && fileSize > 0) return true;
+          _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
+          return false;
+        }, succeeded: (ok) => ok, onLog: onLog);
+
+        if (produced) {
           _log('   Done: ${outFile.path}');
           await _injectSubtitlePalette(outFile, title, langs.subLangs);
           await _extractClosedCaptions(
@@ -424,12 +430,6 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
               for (final path in vobFiles) { yield* File(path).openRead(); }
             },
           );
-        } else {
-          _log('   Error ripping ${title.displayKey} (exit code $exitCode).', isError: true);
-          await outFile.delete().catchError((e) {
-            _log('   Cannot delete file: $e', isError: true);
-            return File('');
-          });
         }
       }
       return null;
@@ -1303,6 +1303,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     final fixedPath = '${mkvFile.path}.tmp.mkv';
     bool ok = false;
 
+    try {
     final whichMerge = await Process.run('which', ['mkvmerge']);
     if (whichMerge.exitCode == 0) {
       final result = await Process.run('mkvmerge', [
@@ -1338,9 +1339,11 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       await srtFile.delete();
       await stripMkvCcUserData(mkvFile);
       _log('   CC subtitle embedded in MKV.');
-    } else {
+    }
+    } finally {
+      // Whether the merge failed or the rename threw, never leave the temp file.
       final fixed = File(fixedPath);
-      if (await fixed.exists()) await fixed.delete();
+      if (await fixed.exists()) await fixed.delete().catchError((_) => fixed);
     }
   }
 
@@ -1475,7 +1478,13 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       }
 
       // --- 5. Replace original with fixed file. ---
-      await File(fixedPath).rename(outFile.path);
+      try {
+        await File(fixedPath).rename(outFile.path);
+      } catch (e) {
+        _log('   Could not replace ${outFile.path} with remuxed file: $e',
+            isError: true);
+        await File(fixedPath).delete().catchError((_) => File(fixedPath));
+      }
     } finally {
       await tmpDir.delete(recursive: true);
     }
