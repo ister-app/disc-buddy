@@ -3,7 +3,12 @@ import 'dart:io';
 import 'package:args/args.dart';
 import 'package:path/path.dart' as p;
 import 'package:disc_buddy/disc_buddy.dart';
+import 'package:disc_buddy_cli/src/cli/directory_mode.dart';
 import 'package:disc_buddy_cli/src/cli/menu.dart';
+import 'package:disc_buddy_cli/src/cli/naming_flow.dart';
+import 'package:disc_buddy_cli/src/cli/options_builder.dart';
+import 'package:disc_buddy_cli/src/cli/rename.dart';
+import 'package:disc_buddy_cli/src/cli/version.dart';
 
 /// Thrown to abort the current rip from inside a `withMountedDisc` callback.
 /// Unlike `exit()` — which terminates the VM immediately and skips `finally`
@@ -15,47 +20,7 @@ class _RipAborted implements Exception {
 }
 
 Future<void> main(List<String> arguments) async {
-  final parser = ArgParser()
-    ..addOption('config',  abbr: 'c', help: 'Path to config file (default: ${ConfigLoader.defaultPath})')
-    ..addOption('input',   abbr: 'i',
-        help: 'Optical drive (e.g. /dev/sr0), ISO image, MKV file, or directory of video files',
-        defaultsTo: Platform.environment['DISC_ISO'] ?? Platform.environment['DISC_DEVICE'])
-    ..addOption('video-output', help: 'Output directory for video discs',
-        defaultsTo: null)
-    ..addOption('music-output', help: 'Output directory for audio CDs',
-        defaultsTo: null)
-    ..addOption('ffmpeg',       help: 'Path to ffmpeg',       defaultsTo: null)
-    ..addOption('ffprobe',      help: 'Path to ffprobe',      defaultsTo: null)
-    ..addOption('mkvextract',   help: 'Path to mkvextract')
-    ..addOption('subtile-ocr',  help: 'Path to subtile-ocr')
-    ..addOption('tmdb-token',   help: 'The Movie Database API read access token')
-    ..addOption('whisper',      help: 'Path to whisper-cli (whisper.cpp) — audio-transcription fallback for auto-naming titles without subtitles')
-    ..addOption('whisper-model', help: 'Path to the whisper.cpp ggml model file (e.g. ggml-base.en.bin)')
-    ..addOption('transcribe-lang', help: 'Spoken language for whisper transcription (ISO 639-1, e.g. nl). Default: the audio track\'s language tag, else auto-detect per window')
-    ..addOption('llm-url',      help: 'OpenAI-compatible LLM base URL (e.g. http://localhost:11434/v1)')
-    ..addOption('llm-key',      help: 'LLM API key (default: "ollama" for local)')
-    ..addOption('llm-model',    help: 'LLM model name (e.g. gpt-4o, llama3)')
-    ..addOption('name',    abbr: 'n', help: 'Film or series title hint for auto-naming')
-    ..addOption('season',             help: 'Season number hint for auto-naming (implies series)')
-    ..addFlag('force',        abbr: 'f', negatable: false,
-        help: 'Overwrite existing files; skip language prompts')
-    ..addFlag('auto-name',    abbr: 'a', negatable: false,
-        help: 'Automatically use LLM auto-naming for all titles or files (skips rename prompt)')
-    ..addFlag('batch-assign', defaultsTo: null,
-        help: 'Send all subtitle excerpts in one LLM call for episode matching '
-              '(better accuracy with large models; ask if omitted)')
-    ..addOption('subtitle-langs',
-        help: 'Comma-separated subtitle languages to extract (e.g. en,nl). '
-              'Omit to be asked interactively; use "all" or empty to extract everything.')
-    ..addFlag('lpcm-flac', negatable: false,
-        help: 'Re-encode Blu-ray LPCM audio to FLAC (smaller files, slower). '
-              'Default keeps LPCM as raw PCM, which is much faster.')
-    ..addFlag('dvd-single-pass', defaultsTo: false,
-        help: 'Map DVD streams by id in a single read instead of a pre-scan. '
-              'Mainly helps slow optical drives; uses more memory on fast media.')
-    ..addFlag('loop',         abbr: 'l', negatable: false,
-        help: 'After each rip, eject and wait for the next disc automatically')
-    ..addFlag('help',      abbr: 'h', negatable: false, help: 'Show help');
+  final parser = buildArgParser();
 
   final ArgResults args;
   try {
@@ -65,6 +30,10 @@ Future<void> main(List<String> arguments) async {
     exit(1);
   }
 
+  if (args['version'] as bool) {
+    stdout.writeln('disc-buddy $buildVersion');
+    exit(0);
+  }
   if (args['help'] as bool) {
     stdout.writeln('Usage: disc-buddy [options]');
     stdout.writeln('Config:    ${ConfigLoader.defaultPath}');
@@ -74,155 +43,26 @@ Future<void> main(List<String> arguments) async {
 
   final config = await ConfigLoader.load(path: args['config'] as String?);
 
-  String cfgStr(String key, String fallback) =>
-      (args[key] as String?) ?? (config[key] as String?) ?? fallback;
-  String? cfgOpt(String key) =>
-      (args[key] as String?) ?? (config[key] as String?);
-
-  // --- Verify ffmpeg binaries ---
-  final ffmpegBin  = cfgStr('ffmpeg',  'ffmpeg');
-  final ffprobeBin = cfgStr('ffprobe', 'ffprobe');
-  for (final bin in [ffmpegBin, ffprobeBin]) {
-    final which = await Process.run('which', [bin]);
-    if (which.exitCode != 0) {
-      stderr.writeln('Error: "$bin" not found in PATH.');
-      exit(1);
-    }
-  }
-
-  // --- Detect optional subtitle tools ---
-  String? mkvextractBin = cfgOpt('mkvextract');
-  if (mkvextractBin != null) {
-    if (!File(mkvextractBin).existsSync()) {
-      stderr.writeln('Error: mkvextract not found at "$mkvextractBin".');
-      exit(1);
-    }
-  } else if (File('/usr/bin/mkvextract').existsSync()) {
-    mkvextractBin = '/usr/bin/mkvextract';
-  }
-
-  String? subtileOcrBin = cfgOpt('subtile-ocr');
-  if (subtileOcrBin != null) {
-    if (!File(subtileOcrBin).existsSync()) {
-      stderr.writeln('Error: subtile-ocr not found at "$subtileOcrBin".');
-      exit(1);
-    }
-  } else if (File('/usr/bin/subtile-ocr').existsSync()) {
-    subtileOcrBin = '/usr/bin/subtile-ocr';
-  }
-
-  String? whisperBin = cfgOpt('whisper');
-  if (whisperBin != null) {
-    if (!File(whisperBin).existsSync()) {
-      stderr.writeln('Error: whisper-cli not found at "$whisperBin".');
-      exit(1);
-    }
-  } else if (File('/usr/bin/whisper-cli').existsSync()) {
-    whisperBin = '/usr/bin/whisper-cli';
-  }
-
-  // The ggml model has no conventional install location — explicit path only.
-  final whisperModelPath = cfgOpt('whisper-model');
-  if (whisperModelPath != null && !File(whisperModelPath).existsSync()) {
-    stderr.writeln('Error: whisper model not found at "$whisperModelPath".');
+  final CliOptions cli;
+  try {
+    cli = await resolveCliOptions(
+      args,
+      config,
+      selectDrive: () async => (await Menu.selectDrive()).device,
+    );
+  } on CliOptionsError catch (e) {
+    stderr.writeln(e.message);
     exit(1);
   }
+  final opts   = cli.rip;
+  final device = cli.device;
 
-  final rawInput = args['input'] as String? ?? '';
-
-  // Validate -i target before late-final declarations.
-  if (rawInput.isNotEmpty) {
-    if (_isBlockDevice(rawInput)) {
-      // Optical drives are block-device nodes; regular file checks don't apply.
-      // Fail fast if the drive node itself does not exist (e.g. /dev/sr2 on a
-      // machine with only two drives).
-      if (!File(rawInput).existsSync()) {
-        stderr.writeln('Error: drive not found: $rawInput');
-        exit(1);
-      }
-    } else if (!Directory(rawInput).existsSync() && !File(rawInput).existsSync()) {
-      stderr.writeln('Error: file or directory not found: $rawInput');
-      exit(1);
-    }
-  }
-
-  // --- Select source (drive, ISO image, MKV file, or video directory) ---
-  final bool isIso;
-  final bool isMkv;
-  final bool isDir;
-  final String device;
-
-  if (rawInput.isNotEmpty) {
-    if (Directory(rawInput).existsSync()) {
-      isDir  = true;
-      isMkv  = false;
-      isIso  = false;
-      device = rawInput;
-    } else if (_isBlockDevice(rawInput)) {
-      isDir  = false;
-      isMkv  = false;
-      isIso  = false;
-      device = rawInput;
-    } else {
-      isDir  = false;
-      isMkv  = rawInput.toLowerCase().endsWith('.mkv');
-      isIso  = !isMkv;
-      device = rawInput;
-    }
-  } else {
-    final drive = await Menu.selectDrive();
-    isDir  = false;
-    isMkv  = false;
-    isIso  = false;
-    device = drive.device;
-  }
-
-  // CLI flag is --video-output; config-file key is 'output' (shared with the UI).
-  final outputDir =
-      (args['video-output'] as String?) ??
-      (config['output'] as String?) ??
-      Platform.environment['OUTDIR'] ??
-      xdgUserDir('VIDEOS', fallback: r'$HOME/Videos');
-  final musicOutputDir =
-      (args['music-output'] as String?) ??
-      (config['music-output'] as String?) ??
-      xdgUserDir('MUSIC', fallback: r'$HOME/Music');
-  final opts = RipOptions(
-    device:     (isMkv || isDir) ? null : device,
-    outputDir:  outputDir,
-    ffmpeg:     ffmpegBin,
-    ffprobe:    ffprobeBin,
-    force:      args['force']     as bool,
-    autoName:   args['auto-name'] as bool,
-    loop:       args['loop']      as bool,
-    mkvextract: mkvextractBin,
-    subtileOcr: subtileOcrBin,
-    whisper:      whisperBin,
-    whisperModel: whisperModelPath,
-    transcribeLanguage: cfgOpt('transcribe-lang'),
-    tmdbToken:  cfgOpt('tmdb-token'),
-    llmUrl:     cfgOpt('llm-url'),
-    llmKey:     cfgOpt('llm-key'),
-    llmModel:   cfgOpt('llm-model'),
-    titleHint:   cfgOpt('name'),
-    seasonHint:  _parseSeasons(cfgOpt('season')),
-    batchAssign:    (args['batch-assign'] as bool?) ??
-        (config['batch-assign'] as bool?),
-    subtitleLangs:  _parseSubtitleLangs(cfgOpt('subtitle-langs')),
-    lpcmFlac:       args.wasParsed('lpcm-flac')
-        ? args['lpcm-flac'] as bool
-        : (config['lpcm-flac'] as bool?) ?? false,
-    dvdSinglePass:  args.wasParsed('dvd-single-pass')
-        ? args['dvd-single-pass'] as bool
-        : (config['dvd-single-pass'] as bool?) ?? false,
-  );
-
-  if (isMkv) {
-    await _processMkv(opts, device);
+  if (cli.isMkv) {
+    await processMkv(opts, device, prompter: Menu.prompter);
     return;
   }
-  if (isDir) {
-    await _processDirectory(opts, device);
+  if (cli.isDir) {
+    if (!await processDirectory(opts, device, prompter: Menu.prompter)) exit(1);
     return;
   }
 
@@ -230,26 +70,20 @@ Future<void> main(List<String> arguments) async {
   // try/catch so a _RipAborted thrown from inside withMountedDisc unwinds
   // through the mount cleanup (finally) before we exit.
   try {
-  if (isIso) {
+  if (cli.isIso) {
     // ISO: one mount cycle covers type detection + scan + rip.
     await withMountedDisc<void>(device, (mountPath) async {
       final discType = DiscTypeDetector.detectFromMountPoint(mountPath);
-      final discTypeStr = switch (discType) {
-        DiscType.audioCD => 'audiocd',
-        DiscType.dvd     => 'dvd',
-        DiscType.bluray  => 'bluray',
-        DiscType.unknown => 'unknown',
-      };
-      stdout.writeln('Disc type: $discTypeStr');
+      stdout.writeln('Disc type: ${_discTypeLabel(discType)}');
       stdout.writeln('ISO:       $device');
-      stdout.writeln('Output:    $outputDir');
-      stdout.writeln('ffmpeg:    $ffmpegBin');
+      stdout.writeln('Output:    ${cli.outputDir}');
+      stdout.writeln('ffmpeg:    ${opts.ffmpeg}');
       stdout.writeln('');
       switch (discType) {
         case DiscType.audioCD:
-          await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
+          await _ripAudioCD(opts.copyWithOutputDir(cli.musicOutputDir));
         case DiscType.dvd:
-          await _ripVideoDisc(DVDRipper(opts, prompter: const TtyPrompter()),
+          await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             mountPath:     mountPath,
@@ -257,7 +91,7 @@ Future<void> main(List<String> arguments) async {
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          await _ripVideoDisc(BlurayRipper(opts, prompter: const TtyPrompter()),
+          await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             mountPath:    mountPath,
@@ -277,41 +111,36 @@ Future<void> main(List<String> arguments) async {
   var looping  = false;
   var skipWait = false; // set after a disc-swap rescan: the new disc is present
   while (true) {
-    if (!skipWait && (rawInput.isNotEmpty || looping)) {
+    if (!skipWait && (cli.inputGiven || looping)) {
       await _waitForDisc(device, afterEject: looping);
     }
     skipWait = false;
 
     // Detect without mounting; one mount cycle covers scan + rip.
-    final discType    = await DiscTypeDetector.detect(device);
-    final discTypeStr = switch (discType) {
-      DiscType.audioCD => 'audiocd',
-      DiscType.dvd     => 'dvd',
-      DiscType.bluray  => 'bluray',
-      DiscType.unknown => 'unknown',
-    };
+    final discType = await DiscTypeDetector.detect(device);
 
-    final effectiveOutput = discType == DiscType.audioCD ? musicOutputDir : outputDir;
-    stdout.writeln('Disc type: $discTypeStr');
+    final effectiveOutput =
+        discType == DiscType.audioCD ? cli.musicOutputDir : cli.outputDir;
+    stdout.writeln('Disc type: ${_discTypeLabel(discType)}');
     stdout.writeln('Device:    $device');
     stdout.writeln('Output:    $effectiveOutput');
-    stdout.writeln('ffmpeg:    $ffmpegBin');
+    stdout.writeln('ffmpeg:    ${opts.ffmpeg}');
     stdout.writeln('');
 
     bool continueLoop;
     try {
       switch (discType) {
         case DiscType.audioCD:
-          continueLoop = await _ripAudioCD(opts.copyWithOutputDir(musicOutputDir));
+          continueLoop = await _ripAudioCD(opts.copyWithOutputDir(cli.musicOutputDir));
         case DiscType.dvd:
-          continueLoop = await _ripVideoDisc(DVDRipper(opts, prompter: const TtyPrompter()),
+          continueLoop = await _ripVideoDisc(DVDRipper(opts, prompter: Menu.prompter),
             autoSelect:    autoSelectDvd,
             opts:          opts,
             errorContext:  'DVD',
             prepareTitles: deduplicateDvdTitles,
           );
         case DiscType.bluray:
-          continueLoop = await _ripVideoDisc(BlurayRipper(opts, prompter: const TtyPrompter()),
+          continueLoop = await _ripVideoDisc(BlurayRipper(opts, prompter: Menu.prompter),
             autoSelect:   autoSelectBluray,
             opts:         opts,
             errorContext: 'Blu-ray',
@@ -338,6 +167,13 @@ Future<void> main(List<String> arguments) async {
     exit(1);
   }
 }
+
+String _discTypeLabel(DiscType t) => switch (t) {
+      DiscType.audioCD => 'audiocd',
+      DiscType.dvd     => 'dvd',
+      DiscType.bluray  => 'bluray',
+      DiscType.unknown => 'unknown',
+    };
 
 // ---------------------------------------------------------------------------
 // Generic video-disc ripper (DVD + Blu-ray)
@@ -444,28 +280,28 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
       }
     }
 
-    final namePrefs = _collectNamingPrefs(
+    final namePrefs = await collectNamingPrefs(
       opts,
-      discTitle,
       selected.map((t) => (
             filename:     t.filename,
             displayKey:   t.displayKey,
             hasSubtitles: t.hasSubtitles,
           )).toList(),
+      Menu.prompter,
+      defaultStemOf: (filename) => defaultStem(discTitle, filename),
     );
 
     final autoNameCount = namePrefs.values.where((v) => v == '?').length;
-    final resolvedBatchAssign = _promptBatchAssign(opts, autoNameCount);
+    final resolvedBatchAssign =
+        await promptBatchAssign(opts, autoNameCount, Menu.prompter);
 
-    final extractResult = opts.canOcrSubtitles && !opts.force
-        ? _promptExtractSubtitles(opts)
-        : (doExtract: false, langs: null as Set<String>?);
-    final doExtract = extractResult.doExtract;
-    final extractLangs = extractResult.langs;
+    final extractChoice = opts.canOcrSubtitles && !opts.force
+        ? await promptExtractSubtitles(opts, Menu.prompter)
+        : noExtract;
 
     // Ask naming hints upfront so no questions interrupt the rip.
     final namingHints = namePrefs.containsValue('?') && !opts.force
-        ? await _askNamingHints(opts)
+        ? await askNamingHints(opts, Menu.prompter)
         : null;
 
     // Guard: refuse if the disc was swapped during the prompts above.
@@ -474,21 +310,21 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     await ripper.rip(discTitle, selected, mountPath: mp);
 
     final outDir = Directory(p.join(opts.outputDir, sanitizeFilename(discTitle)));
-    await _resolveSubtitlesAndNames(
+    await resolveSubtitlesAndNames(
       opts, outDir, discTitle,
       selected.map((t) => (filename: t.filename, displayKey: t.displayKey)).toList(),
       namePrefs,
-      doExtract: doExtract,
-      extractLangs: extractLangs,
+      doExtract: extractChoice.doExtract,
+      extractLangs: extractChoice.langs,
       namingHints: namingHints,
       batchAssign: resolvedBatchAssign,
     );
 
-    await _applyRenames(outDir, discTitle,
+    await applyRenames(outDir, discTitle,
         selected.map((t) => t.filename).toList(), namePrefs);
 
     if (!isIso) {
-      final action = _promptEject(opts);
+      final action = await _promptEject(opts);
       if (action != _EjectAction.none) await Process.run('eject', [opts.device!]);
       return action == _EjectAction.ejectAndContinue;
     }
@@ -503,13 +339,12 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Audio CD
 // ---------------------------------------------------------------------------
 
 Future<bool> _ripAudioCD(RipOptions opts) async {
-  final ripper = AudioCDRipper(opts, prompter: const TtyPrompter());
+  final ripper = AudioCDRipper(opts, prompter: Menu.prompter);
 
   String? scanFp;
   if (opts.device?.startsWith('/dev/') ?? false) {
@@ -529,7 +364,7 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
   for (final track in meta.tracks) {
     final displayArtist = track.artist.isNotEmpty ? track.artist : meta.artist;
     final artistSuffix  =
-        displayArtist.isNotEmpty ? '  \u2014 $displayArtist' : '';
+        displayArtist.isNotEmpty ? '  — $displayArtist' : '';
     stdout.writeln(
         '  ${track.number.toString().padLeft(2)}: '
         '[${track.durationLabel}]  ${track.title}$artistSuffix');
@@ -544,628 +379,14 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
 
   await ripper.rip(meta, selected);
 
-  final action = _promptEject(opts);
+  final action = await _promptEject(opts);
   if (action != _EjectAction.none) await Process.run('eject', [opts.device!]);
   return action == _EjectAction.ejectAndContinue;
 }
 
 // ---------------------------------------------------------------------------
-// Directory of video files
+// Eject + disc waiting
 // ---------------------------------------------------------------------------
-
-const _videoExtensions = {
-  '.mkv', '.mp4', '.avi', '.m4v', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg',
-};
-
-/// Lists video files in [dirPath], lets the user choose, then offers subtitle
-/// extraction and renaming for each selected file.
-Future<void> _processDirectory(RipOptions opts, String dirPath) async {
-  final dir = Directory(dirPath);
-  final files = dir
-      .listSync()
-      .whereType<File>()
-      .where((f) => _videoExtensions.contains(p.extension(f.path).toLowerCase()))
-      .toList()
-    ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
-
-  if (files.isEmpty) {
-    stderr.writeln('No video files found in $dirPath');
-    exit(1);
-  }
-
-  stdout.writeln('Directory: $dirPath');
-  stdout.writeln('');
-  stdout.writeln('Available files:');
-  for (var i = 0; i < files.length; i++) {
-    stdout.writeln('  ${(i + 1).toString().padLeft(3)}: ${p.basename(files[i].path)}');
-  }
-  stdout.writeln('');
-
-  // --- Select files ---
-  final List<File> selected;
-  if (opts.force) {
-    selected = files;
-    stdout.writeln('→ Auto-selected all ${files.length} files.');
-  } else {
-    stdout.writeln('Enter file numbers (comma- or space-separated, e.g.: 1 3),');
-    stdout.writeln('or press Enter for all:');
-    final input = Menu.readLine();
-    if (input.trim().isEmpty) {
-      selected = files;
-      stdout.writeln('→ All ${files.length} files selected.');
-    } else {
-      selected = input
-          .split(RegExp(r'[,\s]+'))
-          .where((s) => s.isNotEmpty)
-          .map((s) => int.tryParse(s))
-          .where((n) => n != null && n >= 1 && n <= files.length)
-          .map((n) => files[n! - 1])
-          .toList();
-    }
-  }
-
-  if (selected.isEmpty) {
-    stdout.writeln('No files selected.');
-    return;
-  }
-
-  stdout.writeln('');
-
-  // --- Collect rename preferences (once for all files) ---
-  final namePrefs = <String, String>{}; // file path → new stem or '?'
-  if (opts.autoName && opts.canAutoName) {
-    for (final f in selected) {
-      namePrefs[f.path] = '?';
-    }
-  } else if (!opts.force) {
-    final canAuto  = opts.canAutoName;
-    final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
-    stdout.write('Rename items?$modeHint ');
-    final answer = Menu.readLine().trim().toLowerCase();
-
-    if (answer == 'y' || answer == 'j') {
-      stdout.writeln('Press Enter to keep the default name.');
-      for (final f in selected) {
-        final defaultStem = p.basenameWithoutExtension(f.path);
-        final autoHint    = canAuto ? ', ? for auto' : '';
-        stdout.write('  "${p.basename(f.path)}" [$defaultStem]$autoHint: ');
-        final input = Menu.readLine().trim();
-        if (input == '?' && canAuto) {
-          namePrefs[f.path] = '?';
-        } else if (input.isNotEmpty) {
-          namePrefs[f.path] = sanitizeFilename(input);
-        }
-      }
-    } else if (answer == '?' && canAuto) {
-      for (final f in selected) {
-        namePrefs[f.path] = '?';
-      }
-    }
-  }
-
-  final autoNameCount = namePrefs.values.where((v) => v == '?').length;
-  final resolvedBatchAssign = _promptBatchAssign(opts, autoNameCount);
-
-  // --- Subtitle extraction (once for all files) ---
-  final canExtract = opts.canOcrSubtitles;
-  final extractResult = canExtract && !opts.force
-      ? _promptExtractSubtitles(opts)
-      : (doExtract: false, langs: null as Set<String>?);
-  final doExtract   = extractResult.doExtract;
-  final extractLangs = extractResult.langs;
-
-  SubtitleExtractor? extractor;
-  if ((canExtract && doExtract) ||
-      (namePrefs.containsValue('?') && opts.canAutoName)) {
-    extractor = _buildExtractor(opts);
-  }
-
-  AutoNamer? autoNamer;
-  if (namePrefs.containsValue('?') && opts.canAutoName && extractor != null) {
-    autoNamer = _buildAutoNamer(opts, extractor, batchAssign: resolvedBatchAssign);
-  }
-
-  // Ask naming hints upfront so no questions interrupt processing.  With
-  // --force nothing may be asked: use whatever hints the CLI/config supplied.
-  final namingHints = !namePrefs.containsValue('?')
-      ? null
-      : opts.force
-          ? (title: opts.titleHint, season: opts.seasonHint)
-          : await _askNamingHints(opts);
-
-  try {
-  // --- Step 1: Extract subtitles for all selected files ---
-  if (doExtract && extractor != null) {
-    for (final file in selected) {
-      stdout.writeln('\n── Extracting subtitles: ${file.path}');
-      await extractor.extractAll(file, languages: extractLangs);
-    }
-  }
-
-  // --- Step 2: Batch auto-naming ---
-  final resolvedStems = <String, String?>{}; // file.path → resolved stem or null
-  if (namePrefs.containsValue('?') && autoNamer != null && extractor != null) {
-    final hints = namingHints!;
-    final batchItems = <({File file, String discName, List<File> srts})>[];
-    for (final file in selected) {
-      if (namePrefs[file.path] != '?') continue;
-      batchItems.add((
-        file:     file,
-        discName: p.basenameWithoutExtension(file.path),
-        srts:     extractor.findExistingSrts(file),
-      ));
-    }
-    if (batchItems.isNotEmpty) {
-      stdout.writeln('\n── Auto-naming ${batchItems.length} file(s)...');
-      final results = await autoNamer.nameFilesBatch(
-        batchItems,
-        titleHint:  hints.title,
-        seasonHint: hints.season,
-      );
-      for (final b in batchItems) {
-        resolvedStems[b.file.path] = results[b.file];
-      }
-    }
-  }
-
-  // --- Step 3: Apply renames ---
-  for (final file in selected) {
-    final discName = p.basenameWithoutExtension(file.path);
-    final ext      = p.extension(file.path);
-    final outDir   = file.parent;
-
-    var newStem = namePrefs[file.path];
-    if (newStem == '?') {
-      final resolved = resolvedStems[file.path];
-      if (resolved == null) {
-        stderr.writeln('   Auto-naming failed for ${file.path} — keeping original name.');
-        newStem = null;
-      } else {
-        newStem = resolved;
-      }
-    }
-
-    if (newStem != null && newStem != discName) {
-      final newFile = File(p.join(outDir.path, '$newStem$ext'));
-      if (await newFile.exists()) {
-        stderr.writeln('Rename skipped: "${p.basename(newFile.path)}" already exists.');
-      } else if (await _renameFile(file, newFile.path)) {
-        stdout.writeln('Renamed: ${file.path}\n      → ${newFile.path}');
-        await _renameAssociatedSidecars(outDir, discName, newStem);
-      }
-    }
-  }
-  } finally {
-    autoNamer?.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Standalone MKV
-// ---------------------------------------------------------------------------
-
-/// Processes a single MKV file: optional subtitle extraction and optional
-/// rename (manual or LLM-assisted auto-naming).
-Future<void> _processMkv(RipOptions opts, String mkvPath) async {
-  final mkvFile  = File(mkvPath);
-  final discName = p.basenameWithoutExtension(mkvPath);
-  final outDir   = mkvFile.parent;
-
-  stdout.writeln('File:   $mkvPath');
-  stdout.writeln('');
-
-  // --- Rename preference ---
-  String? newStem; // null = keep, '?' = auto-name, otherwise the new stem
-
-  if (opts.autoName && opts.canAutoName) {
-    newStem = '?';
-  } else if (!opts.force) {
-    final canAuto  = opts.canAutoName;
-    final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
-    stdout.write('Rename "$discName.mkv"?$modeHint ');
-    final answer = Menu.readLine().trim().toLowerCase();
-
-    if (answer == 'y' || answer == 'j') {
-      stdout.write('  New name [$discName]: ');
-      final input = Menu.readLine().trim();
-      if (input.isNotEmpty) newStem = sanitizeFilename(input);
-    } else if (answer == '?' && canAuto) {
-      newStem = '?';
-    }
-  }
-
-  // --- Subtitle extraction prompt ---
-  final canExtract = opts.canOcrSubtitles;
-  final extractResult = canExtract && !opts.force
-      ? _promptExtractSubtitles(opts)
-      : (doExtract: false, langs: null as Set<String>?);
-  final doExtract    = extractResult.doExtract;
-  final extractLangs = extractResult.langs;
-
-  // Ask naming hints before any processing starts.
-  final namingHints = newStem != '?'
-      ? null
-      : opts.force
-          ? (title: opts.titleHint, season: opts.seasonHint)
-          : await _askNamingHints(opts);
-
-  SubtitleExtractor? extractor;
-  if ((canExtract && doExtract) || (newStem == '?' && opts.canAutoName)) {
-    extractor = _buildExtractor(opts);
-  }
-
-  if (doExtract && extractor != null) {
-    stdout.writeln('\n── Extracting subtitles: $mkvPath');
-    await extractor.extractAll(mkvFile, languages: extractLangs);
-  }
-
-  // --- Resolve auto-name ---
-  if (newStem == '?' && extractor != null) {
-    final autoNamer = _buildAutoNamer(opts, extractor);
-    try {
-      stdout.writeln('\n── Auto-naming: $mkvPath');
-      final hints    = namingHints!;
-      final srts     = extractor.findExistingSrts(mkvFile);
-      final resolved = await autoNamer.nameFile(mkvFile, discName,
-          existingSrts: srts,
-          titleHint: hints.title,
-          seasonHint: hints.season);
-      if (resolved == null) {
-        stderr.writeln('   Auto-naming failed — keeping original name.');
-        newStem = null;
-      } else {
-        newStem = resolved;
-      }
-    } finally {
-      autoNamer.close();
-    }
-  }
-
-  // --- Apply rename ---
-  if (newStem != null && newStem != discName) {
-    final newMkv = File(p.join(outDir.path, '$newStem.mkv'));
-    if (await newMkv.exists()) {
-      stderr.writeln('Rename skipped: "$newStem.mkv" already exists.');
-    } else if (await _renameFile(mkvFile, newMkv.path)) {
-      stdout.writeln('Renamed: $mkvPath\n      → ${newMkv.path}');
-      await _renameAssociatedSidecars(outDir, discName, newStem);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Shared post-rip helpers
-// ---------------------------------------------------------------------------
-
-/// Asks "Extract subtitles to SRT?" and, on yes, which languages to extract.
-/// If [subtitleLangs] is already set (from CLI/config), skips the language
-/// question — but still asks whether to extract at all.
-/// Returns (doExtract: false, langs: null) when declined.
-({bool doExtract, Set<String>? langs}) _promptExtractSubtitles(
-    RipOptions opts) {
-  if (!Menu.confirm('Extract subtitles to SRT? [y/N] ')) {
-    return (doExtract: false, langs: null);
-  }
-  if (opts.subtitleLangs != null) {
-    final desc = opts.subtitleLangs!.isEmpty
-        ? 'all'
-        : opts.subtitleLangs!.join(', ');
-    stdout.writeln('   Languages: $desc (from --subtitle-langs)');
-    return (
-      doExtract: true,
-      langs: opts.subtitleLangs!.isEmpty ? null : opts.subtitleLangs,
-    );
-  }
-  stdout.write('   Languages? (e.g. en,fr — Enter for all): ');
-  final input = Menu.readLine().trim().toLowerCase();
-  if (input.isEmpty) return (doExtract: true, langs: null);
-  final langs = input
-      .split(RegExp(r'[,\s]+'))
-      .where((s) => s.isNotEmpty)
-      .toSet();
-  return (doExtract: true, langs: langs.isEmpty ? null : langs);
-}
-
-/// Asks the user for title/season hints when auto-naming is triggered,
-/// unless the hints were already provided via CLI args.
-///
-/// Returns a record with the resolved hints (either from CLI or from
-/// interactive input). Either field may be null, meaning "let the LLM decide".
-Future<({String? title, List<int>? season})> _askNamingHints(RipOptions opts) async {
-  final cliTitle  = opts.titleHint;
-  final cliSeason = opts.seasonHint;
-
-  // Both already known — nothing to ask.
-  if (cliTitle != null && cliSeason != null) {
-    return (title: cliTitle, season: cliSeason);
-  }
-
-  if (cliTitle != null) {
-    // Title known, season unknown.
-    stdout.write('   Season(s)? (e.g. 4 or 5,6 for series, Enter for movie, ? for auto): ');
-    final input = Menu.readLine().trim();
-    final seasons = _parseSeasons(input);
-    return (title: cliTitle, season: seasons);
-  }
-
-  if (cliSeason != null) {
-    // Season known, title unknown.
-    stdout.write('   Series name? (or ? for full auto): ');
-    final input = Menu.readLine().trim();
-    if (input.isEmpty || input == '?') return (title: null, season: cliSeason);
-    return (title: input, season: cliSeason);
-  }
-
-  // Nothing known — ask for title first, then optionally season(s).
-  stdout.write('   Film/series name? (or ? / Enter for full auto): ');
-  final nameInput = Menu.readLine().trim();
-  if (nameInput.isEmpty || nameInput == '?') {
-    return (title: null, season: null);
-  }
-
-  stdout.write('   Season(s)? (e.g. 4 or 5,6 for series, Enter for movie, ? for auto): ');
-  final seasonInput = Menu.readLine().trim();
-  final seasons = _parseSeasons(seasonInput);
-  return (title: nameInput, season: seasons);
-}
-
-/// Extracts subtitles and resolves `'?'` auto-name entries in [namePrefs]
-/// for disc-ripped titles. Modifies [namePrefs] in place.
-Future<void> _resolveSubtitlesAndNames(
-  RipOptions opts,
-  Directory outDir,
-  String discTitle,
-  List<({String filename, String displayKey})> titles,
-  Map<String, String> namePrefs, {
-  required bool doExtract,
-  Set<String>? extractLangs,
-  ({String? title, List<int>? season})? namingHints,
-  bool? batchAssign,
-}) async {
-  final wantExtract = doExtract && opts.canOcrSubtitles;
-  final wantNaming = namePrefs.containsValue('?') && opts.canAutoName;
-  if (!wantExtract && !wantNaming) return;
-
-  final extractor = _buildExtractor(opts);
-
-  if (wantExtract) {
-    for (final t in titles) {
-      final f = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${t.filename}'));
-      if (await f.exists()) {
-        stdout.writeln('\n── Extracting subtitles: ${f.path}');
-        await extractor.extractAll(f, languages: extractLangs);
-      }
-    }
-  }
-
-  if (wantNaming) {
-    final autoNamer = _buildAutoNamer(opts, extractor, batchAssign: batchAssign);
-    // Hints were collected before ripping started; non-null is an invariant here.
-    final hints = namingHints!;
-    try {
-      // Collect all titles that need auto-naming and batch them together.
-      final batchItems = <({String filename, String displayKey, File file, List<File> srts})>[];
-      for (final t in titles) {
-        if (namePrefs[t.filename] != '?') continue;
-        final f = File(p.join(outDir.path, '${sanitizeFilename(discTitle)}-${t.filename}'));
-        if (!await f.exists()) continue;
-        batchItems.add((
-          filename:   t.filename,
-          displayKey: t.displayKey,
-          file:       f,
-          srts:       extractor.findExistingSrts(f),
-        ));
-      }
-
-      if (batchItems.isNotEmpty) {
-        stdout.writeln('\n── Auto-naming ${batchItems.length} title(s)...');
-        final results = await autoNamer.nameFilesBatch(
-          batchItems.map((b) => (file: b.file, discName: discTitle, srts: b.srts)).toList(),
-          titleHint:  hints.title,
-          seasonHint: hints.season,
-        );
-        for (final b in batchItems) {
-          final resolved = results[b.file];
-          if (resolved == null) {
-            final fallback = _defaultStem(discTitle, b.filename);
-            stderr.writeln('   Auto-naming failed for ${b.displayKey} — keeping default: $fallback');
-            namePrefs[b.filename] = fallback;
-          } else {
-            namePrefs[b.filename] = resolved;
-          }
-        }
-      }
-    } finally {
-      autoNamer.close();
-    }
-  }
-}
-
-SubtitleExtractor _buildExtractor(RipOptions opts) => SubtitleExtractor(
-      ffmpeg:     opts.ffmpeg,
-      ffprobe:    opts.ffprobe,
-      // May be built without OCR tools (whisper-only auto-naming); extraction
-      // of image subtitles then fails gracefully via the ProcessException path.
-      mkvextract: opts.mkvextract ?? 'mkvextract',
-      subtileOcr: opts.subtileOcr ?? 'subtile-ocr',
-    );
-
-AutoNamer _buildAutoNamer(
-  RipOptions opts,
-  SubtitleExtractor extractor, {
-  bool? batchAssign,
-}) =>
-    AutoNamer(
-      extractor: extractor,
-      transcriber: opts.canTranscribe
-          ? Transcriber(
-              ffmpeg:       opts.ffmpeg,
-              ffprobe:      opts.ffprobe,
-              whisperCli:   opts.whisper!,
-              whisperModel: opts.whisperModel!,
-              language:     opts.transcribeLanguage,
-            )
-          : null,
-      tmdb: TmdbClient(token: opts.tmdbToken!),
-      llm: LlmClient(
-        baseUrl: opts.llmUrl!,
-        apiKey:  opts.llmKey ?? 'ollama',
-        model:   opts.llmModel!,
-      ),
-      force: opts.force,
-      batchAssign: batchAssign ?? opts.batchAssign,
-      prompter: const TtyPrompter(),
-    );
-
-/// Asks the "Use batch assignment?" question upfront (before ripping starts)
-/// so it doesn't interrupt processing later. Only asked when [autoNameCount]
-/// > 1 and no CLI override is set.
-bool? _promptBatchAssign(RipOptions opts, int autoNameCount) {
-  if (opts.batchAssign != null) return opts.batchAssign;
-  if (opts.force || autoNameCount <= 1) return opts.batchAssign;
-  stdout.write(
-    '   Use batch assignment? (sends all excerpts in one LLM call, '
-    'works better with large models) [y/N] ',
-  );
-  final input = Menu.readLine().trim().toLowerCase();
-  return input == 'y' || input == 'yes';
-}
-
-// ---------------------------------------------------------------------------
-// Naming helpers
-// ---------------------------------------------------------------------------
-
-/// Builds the default output file stem for a title.
-String _defaultStem(String discTitle, String titleFilename) {
-  final stem = titleFilename.replaceFirst(RegExp(r'\.mkv$'), '');
-  return '${sanitizeFilename(discTitle)}-$stem';
-}
-
-/// Asks the user how they want to name the selected titles and returns a map
-/// from [filename] → desired stem (or `'?'` for auto-naming).
-///
-/// An empty map means "use default names for all titles".
-Map<String, String> _collectNamingPrefs(
-  RipOptions opts,
-  String discTitle,
-  List<({String filename, String displayKey, bool hasSubtitles})> titles,
-) {
-  final prefs = <String, String>{};
-  if (opts.force || titles.isEmpty) return prefs;
-
-  // With the whisper fallback available, titles without subtitles are also
-  // auto-nameable (transcription kicks in when subtitle extraction fails).
-  bool nameable(({String filename, String displayKey, bool hasSubtitles}) t) =>
-      t.hasSubtitles || opts.canTranscribe;
-  final anyNameable = titles.any(nameable);
-  final canAuto = opts.canAutoName && anyNameable;
-
-  if (opts.autoName && canAuto) {
-    for (final t in titles) {
-      prefs[t.filename] = nameable(t) ? '?' : _defaultStem(discTitle, t.filename);
-    }
-    return prefs;
-  }
-
-  final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
-  stdout.write('\nRename items?$modeHint ');
-  final answer = Menu.readLine().trim().toLowerCase();
-
-  if (answer == 'y' || answer == 'j') {
-    stdout.writeln('Press Enter to keep the default name.');
-    for (final t in titles) {
-      final defaultStem = _defaultStem(discTitle, t.filename);
-      final autoHint    =
-          (opts.canAutoName && nameable(t)) ? ', ? for auto' : '';
-      stdout.write('  "${t.displayKey}" [$defaultStem]$autoHint: ');
-      final input = Menu.readLine().trim();
-      if (input.isEmpty) {
-        // keep default — no entry needed
-      } else if (input == '?' && opts.canAutoName && nameable(t)) {
-        prefs[t.filename] = '?';
-      } else {
-        prefs[t.filename] = sanitizeFilename(input);
-      }
-    }
-  } else if (answer == '?' && canAuto) {
-    for (final t in titles) {
-      prefs[t.filename] = nameable(t) ? '?' : _defaultStem(discTitle, t.filename);
-    }
-  }
-
-  return prefs;
-}
-
-/// Renames MKV files (and associated SRT files) in [outDir] according to
-/// [namePrefs]. Entries whose value equals the default stem are skipped.
-Future<void> _applyRenames(
-  Directory outDir,
-  String discTitle,
-  List<String> filenames,
-  Map<String, String> namePrefs,
-) async {
-  for (final filename in filenames) {
-    final newStem = namePrefs[filename];
-    if (newStem == null || newStem == '?') continue;
-
-    final defaultStem = _defaultStem(discTitle, filename);
-    if (newStem == defaultStem) continue;
-
-    final oldMkv = File(p.join(outDir.path, '$defaultStem.mkv'));
-    final newMkv = File(p.join(outDir.path, '$newStem.mkv'));
-
-    if (!await oldMkv.exists()) continue;
-    if (await newMkv.exists()) {
-      stderr.writeln('   Rename skipped: "$newStem.mkv" already exists.');
-      continue;
-    }
-
-    if (await _renameFile(oldMkv, newMkv.path)) {
-      stdout.writeln('Renamed: ${oldMkv.path}\n      → ${newMkv.path}');
-      await _renameAssociatedSidecars(outDir, defaultStem, newStem);
-    }
-  }
-}
-
-/// Renames [src] to [destPath], returning whether it succeeded.
-///
-/// Falls back to copy+delete when the rename crosses a filesystem boundary
-/// (EXDEV — `rename(2)` cannot move between mounts), and logs + returns false
-/// on any other failure rather than throwing, so one bad file doesn't abort
-/// the whole batch.
-Future<bool> _renameFile(File src, String destPath) async {
-  try {
-    await src.rename(destPath);
-    return true;
-  } on FileSystemException catch (e) {
-    if (e.osError?.errorCode == 18) { // EXDEV: cross-device link
-      try {
-        await src.copy(destPath);
-        await src.delete();
-        return true;
-      } catch (e2) {
-        stderr.writeln('   Rename (copy fallback) failed for ${src.path}: $e2');
-        return false;
-      }
-    }
-    stderr.writeln('   Rename failed for ${src.path}: $e');
-    return false;
-  }
-}
-
-/// Renames every `<oldStem>.*.srt` and `<oldStem>.whisper.json` sidecar in
-/// [outDir] to use [newStem], so cached transcripts follow the renamed file.
-Future<void> _renameAssociatedSidecars(
-    Directory outDir, String oldStem, String newStem) async {
-  await for (final entry in outDir.list()) {
-    if (entry is! File) continue;
-    final base = p.basename(entry.path);
-    if (!base.startsWith('$oldStem.')) continue;
-    if (!base.endsWith('.srt') && !base.endsWith('.whisper.json')) continue;
-    final suffix = base.substring(oldStem.length);
-    await _renameFile(entry, p.join(outDir.path, '$newStem$suffix'));
-  }
-}
 
 enum _EjectAction { none, ejectOnly, ejectAndContinue }
 
@@ -1177,46 +398,21 @@ enum _EjectAction { none, ejectOnly, ejectAndContinue }
 ///
 /// When [opts.loop] is set the prompt is skipped and `ejectAndContinue` is
 /// returned automatically.
-_EjectAction _promptEject(RipOptions opts) {
+Future<_EjectAction> _promptEject(RipOptions opts) async {
   if (opts.loop) {
     stdout.writeln('\nEject disc? [y/r/N]  (r = load next disc): r');
     return _EjectAction.ejectAndContinue;
   }
-  stdout.write('\nEject disc? [y/r/N]  (r = load next disc): ');
-  final answer = Menu.readLine().trim().toLowerCase();
+  final answer = (await Menu.prompter
+          .readLine('\nEject disc? [y/r/N]  (r = load next disc): '))
+      .trim()
+      .toLowerCase();
   return switch (answer) {
     'y' || 'j' => _EjectAction.ejectOnly,
     'r'        => _EjectAction.ejectAndContinue,
     _          => _EjectAction.none,
   };
 }
-
-/// Parses a season string into a list of season numbers.
-///
-/// Accepts comma- or space-separated integers, e.g. `"5"`, `"5,6"`, `"5 6"`.
-/// Returns null when the input is empty, `?`, or contains no valid integers.
-/// Parses `--subtitle-langs` value. Returns null (ask) if omitted,
-/// empty set (all) for "all"/empty, or the set of 2-letter codes.
-Set<String>? _parseSubtitleLangs(String? input) {
-  if (input == null) return null;
-  final trimmed = input.trim().toLowerCase();
-  if (trimmed.isEmpty || trimmed == 'all') return const {};
-  return trimmed.split(RegExp(r'[,\s]+')).where((s) => s.isNotEmpty).toSet();
-}
-
-List<int>? _parseSeasons(String? input) {
-  if (input == null || input.trim().isEmpty || input.trim() == '?') return null;
-  final nums = input
-      .split(RegExp(r'[,\s]+'))
-      .map(int.tryParse)
-      .whereType<int>()
-      .toList();
-  return nums.isEmpty ? null : nums;
-}
-
-/// Returns true if [path] refers to a Linux block/character device.
-/// On this tool's target platform (Linux) all optical drives live under /dev/.
-bool _isBlockDevice(String path) => path.startsWith('/dev/');
 
 /// Waits until [device] contains a readable disc.
 ///
