@@ -393,6 +393,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     String? mountPath,
     Set<String>? overwrite,
   }) async {
+    final scanCache = <int, ({List<int> sidOrder, int lastSidByteOffset})>{};
     Future<Object?> doRip(String mp) async {
       for (final title in selected) {
         final outFile = File(videoTitleOutputPath(options.outputDir, discTitle, title));
@@ -418,10 +419,15 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         };
 
         // Scan all VOB files in concat order until all SIDs are found (or cap).
+        // Cached per VTS like the dvdread path: titles (angles) in one VTS
+        // share the stream layout, so the second title skips the scan.
         Stream<List<int>> vobsStream() async* {
           for (final path in vobFiles) { yield* File(path).openRead(); }
         }
-        final scan = await _scanVobSids(vobsStream(), wantedSids);
+        final cached = scanCache[title.vtsNumber];
+        if (cached != null) _log('   (stream scan cached for VTS ${title.vtsNumber})');
+        final scan = cached ?? await _scanVobSids(vobsStream(), wantedSids);
+        scanCache[title.vtsNumber] = scan;
 
         final mapAndMetaArgs = _buildMapAndMetaArgs(
           title:      title,

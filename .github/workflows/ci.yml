@@ -19,6 +19,10 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
+      - name: Format check
+        run: dart format --output=none --set-exit-if-changed disc_buddy_lib/lib disc_buddy_cli/lib disc_buddy_cli/bin
+        continue-on-error: true
+
       - name: Analyze lib
         run: dart analyze --fatal-infos
         working-directory: disc_buddy_lib
@@ -27,12 +31,20 @@ jobs:
         run: dart analyze --fatal-infos
         working-directory: disc_buddy_cli
 
-      - name: Test
+      - name: Test lib
         run: dart test
         working-directory: disc_buddy_lib
 
+      - name: Test CLI
+        run: dart test
+        working-directory: disc_buddy_cli
+
       - name: Compile
-        run: dart compile exe bin/rip.dart -o ../disc-buddy-cli-linux-x64
+        # Tags become the --version string; other builds report the short SHA.
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) VERSION="${GITHUB_SHA::7}";; esac
+          dart compile exe bin/rip.dart -DDISC_BUDDY_VERSION="$VERSION" -o ../disc-buddy-cli-linux-x64
         working-directory: disc_buddy_cli
 
       - name: Upload artifact
@@ -48,6 +60,26 @@ jobs:
         with:
           files: disc-buddy-cli-linux-x64
           generate_release_notes: true
+
+  # Early warning for the next SDK: analyze + test on the stable channel.
+  # Failures here never block a push or release.
+  build-stable:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - run: dart pub get
+      - run: dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
+      - run: dart test
+        working-directory: disc_buddy_lib
+      - run: dart test
+        working-directory: disc_buddy_cli
 
   build-ui:
     runs-on: ubuntu-latest
@@ -71,6 +103,10 @@ jobs:
 
       - name: Analyze
         run: flutter analyze --fatal-infos
+        working-directory: disc_buddy_ui
+
+      - name: Test
+        run: flutter test
         working-directory: disc_buddy_ui
 
       - name: Build Linux

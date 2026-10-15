@@ -28,6 +28,7 @@ dart compile exe disc_buddy_cli/bin/rip.dart -o disc-buddy
 
 # Run tests
 dart test disc_buddy_lib/
+dart test disc_buddy_cli/
 
 # Analyze (CI uses --fatal-infos)
 dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
@@ -45,7 +46,7 @@ dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
 
 ### Flow
 
-1. `disc_buddy_cli/bin/rip.dart` parses CLI args and selects the input source. A `.mkv` path via `-i` is handled as a standalone MKV; anything else goes through disc-type detection.
+1. `disc_buddy_cli/bin/rip.dart` parses CLI args (`lib/src/cli/options_builder.dart`) and selects the input source. A `.mkv` path via `-i` is handled as a standalone MKV, a directory via `directory_mode.dart`; anything else goes through disc-type detection. Prompt logic lives in `lib/src/cli/naming_flow.dart` so it can be tested with a fake `Prompter`.
 2. Each disc ripper has two phases: `loadTitles()` (scan/parse disc metadata) then `rip()` (invoke ffmpeg).
 3. After ripping, `_resolveSubtitlesAndNames` handles optional subtitle extraction and LLM-based auto-naming for all disc types (DVD, Blu-ray).
 4. `--force` flag skips all interactive prompts and auto-selects titles.
@@ -56,13 +57,17 @@ dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
 - **DVD**: Parses `VIDEO_TS.IFO` and `VTS_XX_0.IFO` files directly in Dart (no external tool). Two-pass VOB scan: first pass finds MPEG-PS private stream sub-IDs (`_scanVobSids`) to determine correct ffmpeg `-map` ordering; second pass rips. Prefers `libdvdread` FFI for CSS; falls back to VOB concat.
 - **Blu-ray**: Parses MPLS playlist and CLPI stream info files. Rips via libbluray (through ffmpeg's `bluray:` protocol) or M2TS concat fallback. LPCM audio is transcoded to FLAC; everything else is stream-copied.
 
-### Title auto-selection (`disc_buddy_lib/lib/src/cli/title_selector.dart`)
+### Title auto-selection (`disc_buddy_lib/lib/src/selection/title_selector.dart`)
 
 Shared logic for both DVD and Blu-ray: filters clips < 5 min, deduplicates by duration (±5 s keeping the track with most streams), detects series if ≥ 3 titles within ±30% of median duration, otherwise picks the longest title.
 
-### TTY input (`disc_buddy_lib/lib/src/utils/tty.dart`)
+### Logging and prompting (`disc_buddy_lib/lib/src/utils/log.dart`, `prompter.dart`)
 
-`ttyReadLine()` and `ttyConfirm()` are shared between lib and CLI. Exported via `package:disc_buddy/tty.dart`. The CLI's `Menu` class delegates to these functions.
+The library never writes to stdout/stderr or reads `/dev/tty` on its own. Every class takes an optional `LogCallback onLog` and logs through `emitLog(onLog, msg)` (falls back to stdout/stderr only when no callback is given). Questions go through the `Prompter` interface: rippers and `AutoNamer` take a `Prompter? prompter`; `force` always resolves to `NonInteractivePrompter` (defaults for every question). The CLI passes `TtyPrompter` (`Menu.prompter`); the UI relies on the non-interactive default. Add new prompts only via `Prompter`, never via `ttyReadLine()` directly. `utils/tty.dart` remains for the CLI's own menus.
+
+### Output files and damaged discs
+
+Every rip writes to `<stem>.part.<ext>` and is renamed into place by `withPartFile()` (`utils/atomic_output.dart`) only after the success checks; failures and exceptions delete the part file. The DVD dvdread path reads through `device/resilient_read.dart`: unreadable sectors are retried, bisected and zero-filled (cap `DVDRipper.kMaxBadSectorsPerTitle`), and `DVDRipper.reports` holds a `TitleRipReport` per title (read stats + ffprobe duration check).
 
 ### FFI usage
 
@@ -76,7 +81,7 @@ Shared logic for both DVD and Blu-ray: filters clips < 5 min, deduplicates by du
 
 ### Auto-naming (`disc_buddy_lib/lib/src/naming/`)
 
-Triggered by `'?'` in naming prefs (disc rippers) or the `?` answer in standalone MKV mode.
+Triggered by `'?'` in naming prefs (disc rippers) or the `?` answer in standalone MKV mode. `AutoNamer` orchestrates three collaborators: `SubtitleSource` (steps 1-2), `TitleResolver` (step 4), `EpisodeMatcher` (+ `episode_conflicts.dart`, step 5). Pure helpers live in `episode_math.dart`, `subtitle_text.dart`, `llm_json.dart`; prompts in `naming_prompts.dart`. The static `AutoNamer.*` helpers forward to those modules for tests.
 
 1. `AutoNamer.nameFile` extracts a subtitle excerpt (first 6 000 chars + 4 000 chars from the ⅓ mark) and asks the LLM to identify the content.
 2. For movies: `TmdbClient.searchMovie` → `"Title (Year)"` stem.
@@ -96,4 +101,4 @@ DVDs store audio at MPEG sub-stream IDs `0x80–0x8F` and subtitles at `0x20–0
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on every push: `dart pub get` (workspace root) → `dart analyze --fatal-infos` (lib + cli) → `dart test` (lib) → `dart compile exe`. Tags matching `v*` trigger a GitHub release with the compiled binary attached.
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push: `dart pub get` (workspace root) → format check (advisory) → `dart analyze --fatal-infos` (lib + cli) → `dart test` (lib + cli) → `dart compile exe -DDISC_BUDDY_VERSION=…`. A `build-stable` job repeats analyze/test on the `stable` SDK without blocking. Tags matching `v*` trigger a GitHub release with the compiled binary attached.

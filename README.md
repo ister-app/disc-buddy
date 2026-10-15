@@ -34,7 +34,8 @@ Drive detection updates in real time using `udevadm monitor` and the `CDROM_DRIV
 | `mkvextract` + `subtile-ocr` (optional) | subtitle extraction / OCR — feeds LLM auto-naming |
 | `whisper-cli` + ggml model (optional) | whisper.cpp audio-transcription fallback for auto-naming titles **without** subtitles (config keys `whisper` / `whisper-model`, CLI `--whisper` / `--whisper-model`; use a multilingual model such as `ggml-small.bin` for non-English discs) |
 
-**Build (CLI):** Dart SDK ≥ 3.13
+**Build (CLI):** Dart SDK ≥ 3.13. `disc-buddy --version` prints the version baked in at
+compile time (`dart compile exe -DDISC_BUDDY_VERSION=v1.2.3 …`; CI uses the git tag).
 
 **Build (UI):** Flutter ≥ 3.47 (stable channel)
 
@@ -171,7 +172,7 @@ final bytes = await CoverArt.fetchFront(releaseMbid);
 ```
 disc_buddy_lib/            Pure-Dart library (Dart workspace)
   lib/src/
-    cli/
+    selection/
       title_selector.dart  Auto-selection logic for DVD and Blu-ray titles
     device/
       drive_detector.dart  Lists optical drives via lsblk + udevadm
@@ -179,6 +180,7 @@ disc_buddy_lib/            Pure-Dart library (Dart workspace)
       disc_type_detector.dart  Detects Audio CD / DVD / Blu-ray via udevadm
       cdrom_toc.dart       SG_IO READ TOC for exact MusicBrainz disc ID
       dvdread.dart         libdvdread FFI for CSS-decrypted VOB streaming
+      resilient_read.dart  Retry / bisect / zero-fill of unreadable DVD sectors
     ffmpeg/
       ffmpeg_runner.dart   Runs ffmpeg with progress tracking
     metadata/
@@ -187,16 +189,32 @@ disc_buddy_lib/            Pure-Dart library (Dart workspace)
       disc_id.dart         MusicBrainz disc ID computation
       cover_art.dart       Cover Art Archive fetch
     models/                Data classes (DriveInfo, DvdTitle, BlurayTitle, …)
+    naming/
+      auto_namer.dart      Orchestrates LLM/TMDB auto-naming
+      subtitle_source.dart Subtitle / transcript loading + LLM summary
+      title_resolver.dart  TMDB title search and scoring
+      episode_matcher.dart Episode matching, verification, conflicts
+      episode_math.dart    Pure stem / multi-part / duration helpers
     rippers/
       audiocd_ripper.dart  Audio CD → FLAC
       dvd_ripper.dart      DVD → MKV (libdvdread + VOB concat fallback)
       bluray_ripper.dart   Blu-ray → MKV (libbluray + M2TS concat fallback)
-    utils/                 Shared utilities (mount, sanitize, languages, …)
+      rip_report.dart      Per-title read-error / duration report
+    utils/
+      log.dart             LogCallback + stdio/emit helpers (lib never prints itself)
+      prompter.dart        Prompter interface (TTY and non-interactive)
+      atomic_output.dart   .part file + atomic rename for every rip
+      …                    mount, sanitize, languages, …
 
 disc_buddy_cli/            CLI binary (Dart workspace)
-  bin/rip.dart             Entry point; CLI argument parsing and top-level flow
+  bin/rip.dart             Entry point: drive/ISO flow, eject, disc waiting
   lib/src/cli/
+    options_builder.dart   Argument parser + CLI/config resolution
+    naming_flow.dart       Rename / auto-name / subtitle prompts
+    directory_mode.dart    Directory and single-MKV modes
+    rename.dart            Renames with sidecar files
     menu.dart              Drive selection menu (real-time udevadm monitor)
+  test/                    CLI unit tests (no drive needed)
 
 disc_buddy_ui/             Flutter desktop GUI (outside workspace)
   lib/
