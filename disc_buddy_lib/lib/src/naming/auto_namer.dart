@@ -187,34 +187,13 @@ class AutoNamer {
 
     // 3. Fetch episodes once.
     final subLang = subs.values.first.language;
-    final seasons = <int>[];
-    if (seasonHint != null && seasonHint.isNotEmpty) {
-      seasons.addAll(seasonHint);
-    } else {
-      final n = await tmdb.getNumberOfSeasons(winner.id);
-      if (n == null || n == 0) {
-        _log(
-          '   AutoNamer: no seasons for "${winner.label}" — skipping.',
-          isError: true,
-        );
-        return {for (final it in items) it.file: null};
-      }
-      for (var s = 1; s <= n; s++) {
-        seasons.add(s);
-      }
-    }
-    final episodes = <SeasonEpisode>[];
-    for (final s in seasons) {
-      final eps = await tmdb.getSeasonEpisodes(winner.id, s, language: subLang);
-      for (final ep in eps) {
-        episodes.add((season: s, ep: ep));
-      }
-    }
-    if (episodes.isEmpty) {
-      _log(
-        '   AutoNamer: no episodes for "${winner.label}" — skipping.',
-        isError: true,
-      );
+    final episodes = await _episodes.fetchEpisodes(
+      seriesId: winner.id,
+      seriesName: winner.label,
+      subLang: subLang,
+      seasonHint: seasonHint,
+    );
+    if (episodes == null) {
       return {for (final it in items) it.file: null};
     }
 

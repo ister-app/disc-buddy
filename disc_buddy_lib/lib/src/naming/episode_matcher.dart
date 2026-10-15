@@ -31,6 +31,56 @@ class EpisodeMatcher {
   final NamingLog log;
 
   // ---------------------------------------------------------------------------
+  // TMDB episode lists
+  // ---------------------------------------------------------------------------
+
+  /// Episodes of [seasons] (or every season 1..n when null/empty) for
+  /// [seriesId], in season order. Returns null, after logging, when the
+  /// series has no seasons or the seasons have no episodes.
+  Future<List<SeasonEpisode>?> fetchEpisodes({
+    required int seriesId,
+    required String seriesName,
+    required String subLang,
+    List<int>? seasonHint,
+    String logTag = 'AutoNamer',
+  }) async {
+    final seasons = <int>[];
+    if (seasonHint != null && seasonHint.isNotEmpty) {
+      seasons.addAll(seasonHint);
+    } else {
+      final n = await tmdb.getNumberOfSeasons(seriesId);
+      if (n == null || n == 0) {
+        log('   $logTag: no seasons for "$seriesName" — skipping.',
+            isError: true);
+        return null;
+      }
+      for (var s = 1; s <= n; s++) {
+        seasons.add(s);
+      }
+    }
+
+    final episodes = <SeasonEpisode>[];
+    for (final s in seasons) {
+      final eps = await tmdb.getSeasonEpisodes(seriesId, s, language: subLang);
+      for (final ep in eps) {
+        episodes.add((season: s, ep: ep));
+      }
+    }
+    if (episodes.isEmpty) {
+      log('   $logTag: no episodes for "$seriesName" — skipping.',
+          isError: true);
+      return null;
+    }
+    return episodes;
+  }
+
+  /// TMDB season 0 (specials): DVD bonus content usually lives there.
+  Future<List<SeasonEpisode>> fetchSpecials(int seriesId, String subLang) async =>
+      (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
+          .map((ep) => (season: 0, ep: ep))
+          .toList();
+
+  // ---------------------------------------------------------------------------
   // Single file
   // ---------------------------------------------------------------------------
 
@@ -46,39 +96,14 @@ class EpisodeMatcher {
     List<int>? seasonHint,
     File? mediaFile,
   }) async {
-    // Determine seasons.
-    final seasons = <int>[];
-    if (seasonHint != null && seasonHint.isNotEmpty) {
-      seasons.addAll(seasonHint);
-    } else {
-      final n = await tmdb.getNumberOfSeasons(seriesId);
-      if (n == null || n == 0) {
-        log(
-          '   AutoNamer[step 5b]: no seasons for "$seriesName" — skipping.',
-          isError: true,
-        );
-        return null;
-      }
-      for (var s = 1; s <= n; s++) {
-        seasons.add(s);
-      }
-    }
-
-    // Gather all episodes.
-    final episodes = <SeasonEpisode>[];
-    for (final s in seasons) {
-      final eps = await tmdb.getSeasonEpisodes(seriesId, s, language: subLang);
-      for (final ep in eps) {
-        episodes.add((season: s, ep: ep));
-      }
-    }
-    if (episodes.isEmpty) {
-      log(
-        '   AutoNamer[step 5b]: no episodes for "$seriesName" — skipping.',
-        isError: true,
-      );
-      return null;
-    }
+    final episodes = await fetchEpisodes(
+      seriesId: seriesId,
+      seriesName: seriesName,
+      subLang: subLang,
+      seasonHint: seasonHint,
+      logTag: 'AutoNamer[step 5b]',
+    );
+    if (episodes == null) return null;
 
     // LLM matches subtitle excerpt to episode.
     var pick = await llmEpisodeMatch(
@@ -114,10 +139,7 @@ class EpisodeMatcher {
     }
 
     // Season-0 fallback: DVD bonus content lives in TMDB's specials.
-    final specials =
-        (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
-            .map((ep) => (season: 0, ep: ep))
-            .toList();
+    final specials = await fetchSpecials(seriesId, subLang);
     if (specials.isNotEmpty) {
       log('   No regular episode matched — trying season 0 (specials).');
       final spPick = await llmEpisodeMatch(
@@ -155,10 +177,7 @@ class EpisodeMatcher {
     // no regular episode: DVD bonus content usually lives there.
     List<SeasonEpisode>? specials;
     Future<List<SeasonEpisode>> loadSpecials() async =>
-        specials ??=
-            (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
-                .map((ep) => (season: 0, ep: ep))
-                .toList();
+        specials ??= await fetchSpecials(seriesId, subLang);
 
     // Probe real durations once; the median anchors multi-part and
     // play-all detection when TMDB runtimes are missing.
@@ -384,9 +403,7 @@ class EpisodeMatcher {
     final epBuf = StringBuffer();
     for (var i = 0; i < filteredEpisodes.length; i++) {
       final c = filteredEpisodes[i];
-      final label =
-          's${c.season.toString().padLeft(2, "0")}'
-          'e${c.ep.number.toString().padLeft(2, "0")}';
+      final label = episodeStem(c.season, c.ep.number);
       final entities = extractEntities(c.ep.overview);
       epBuf.write('(${i + 1}) $label "${c.ep.title}"');
       if (entities.isNotEmpty) {
@@ -581,9 +598,7 @@ class EpisodeMatcher {
     final epBuf = StringBuffer();
     for (var i = 0; i < episodes.length; i++) {
       final c = episodes[i];
-      final label =
-          's${c.season.toString().padLeft(2, "0")}'
-          'e${c.ep.number.toString().padLeft(2, "0")}';
+      final label = episodeStem(c.season, c.ep.number);
       epBuf.write('${i + 1}. $label "${c.ep.title}": ${c.ep.overview}');
       if (c.ep.guestStars.isNotEmpty) {
         epBuf.write(' [Guests: ${c.ep.guestStars}]');
@@ -632,17 +647,9 @@ class EpisodeMatcher {
       return null;
     }
 
-    final chosen = episodes[n - 1];
-    final label =
-        's${chosen.season.toString().padLeft(2, "0")}'
-        'e${chosen.ep.number.toString().padLeft(2, "0")}';
-    log('   LLM episode match: $label "${chosen.ep.title}"');
-    return EpisodePick(
-      stem: label,
-      title: chosen.ep.title,
-      season: chosen.season,
-      ep: chosen.ep.number,
-    );
+    final pick = pickFromEpisodeIndex(episodes, n);
+    log('   LLM episode match: ${pick.stem} "${pick.title}"');
+    return pick;
   }
 
   // ---------------------------------------------------------------------------
@@ -654,8 +661,7 @@ class EpisodeMatcher {
   }) async {
     final labels = [
       for (final c in episodes)
-        's${c.season.toString().padLeft(2, "0")}'
-        'e${c.ep.number.toString().padLeft(2, "0")} "${c.ep.title}"',
+        '${episodeStem(c.season, c.ep.number)} "${c.ep.title}"',
     ];
     final idx = await prompter.choose(
         '   LLM could not identify the episode. Pick manually:', labels);
@@ -663,16 +669,7 @@ class EpisodeMatcher {
       log('   AutoNamer: LLM declined — skipping.', isError: true);
       return null;
     }
-    final chosen = episodes[idx];
-    final label =
-        's${chosen.season.toString().padLeft(2, "0")}'
-        'e${chosen.ep.number.toString().padLeft(2, "0")}';
-    return EpisodePick(
-      stem: label,
-      title: chosen.ep.title,
-      season: chosen.season,
-      ep: chosen.ep.number,
-    );
+    return pickFromEpisodeIndex(episodes, idx + 1);
   }
 
   // ---------------------------------------------------------------------------
