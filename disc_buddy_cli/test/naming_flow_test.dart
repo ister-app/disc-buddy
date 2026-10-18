@@ -58,6 +58,14 @@ void main() {
       expect(p.asked, isEmpty);
     });
 
+    test('--force --auto-name → toch auto-namen, niets gevraagd', () async {
+      final p = FakePrompter();
+      final prefs = await collectNamingPrefs(
+          opts(force: true, autoName: true), titles, p, defaultStemOf: def);
+      expect(prefs, {'title_01.mkv': '?', 'title_02.mkv': 'DISC-title_02'});
+      expect(p.asked, isEmpty);
+    });
+
     test('--auto-name → "?" voor titels met ondertitels, default voor de rest', () async {
       final p = FakePrompter();
       final prefs = await collectNamingPrefs(opts(autoName: true), titles, p, defaultStemOf: def);

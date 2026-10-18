@@ -137,7 +137,7 @@ Future<Map<String, String>> collectNamingPrefs(
   LogCallback? onLog,
 }) async {
   final prefs = <String, String>{};
-  if (opts.force || titles.isEmpty) return prefs;
+  if (titles.isEmpty) return prefs;
 
   // With the whisper fallback available, titles without subtitles are also
   // auto-nameable (transcription kicks in when subtitle extraction fails).
@@ -151,10 +151,14 @@ Future<Map<String, String>> collectNamingPrefs(
     }
   }
 
+  // `--auto-name` is honoured even under `--force`: it is the documented
+  // non-interactive way to auto-name everything, so it must not be swallowed
+  // by the "no prompts" shortcut below.
   if (opts.autoName && canAuto) {
     autoAll();
     return prefs;
   }
+  if (opts.force) return prefs;
 
   final modeHint = canAuto ? ' [y/?/N]' : ' [y/N]';
   final answer =
