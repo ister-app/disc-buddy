@@ -37,6 +37,7 @@ List<Duration> ch(List<(int, int)> ms) => [for (final e in ms) d(e.$1, e.$2)];
 
 void main() {
   _fm20d3Tests();
+  _seinfeldS7D4Tests();
   group('deduplicateDvdTitles — cell overlap authoritative', () {
     // Real data from DVD_VVE4698_2_SAMANDCAT_D2: 7 episodes stored as 7 PGCs
     // in one VTS, chapters authored at fixed ~5-minute intervals so that four
@@ -344,6 +345,61 @@ void _fm20d3Tests() {
           cells: [(first: 0, last: 150000)]),
       ];
       expect(autoSelectDvd(withExtras).map((x) => x.displayKey), ['2', '3', '4']);
+    });
+  });
+}
+
+void _seinfeldS7D4Tests() {
+  group('extras VTS with a play-all PGC is not mistaken for episode angles', () {
+    // Real layout of SEINFELD_SEASON_7_DISC4: five episodes (one double) in
+    // VTS 1-5 with 4 audio + 19 subtitle streams, followed by bonus VTS
+    // sections (1 audio, 4 subs).  VTS 6 and 9 hold a "play all" pgc0 plus the
+    // individual featurettes as pgc1+, which is exactly the shape the
+    // compilation detector looks for.  It used to return those featurettes
+    // and never consider the far richer episodes; the fallback path then
+    // also re-admitted the two play-all extras on duration alone.
+    // Chapter positions are shifted per VTS: on the real disc they differ by
+    // minutes, and identical positions would make the cross-VTS dedup treat
+    // the equally long episodes as navigation duplicates.
+    DvdTitle ep(int vts, Duration dur, int sectors, {int chapters = 5}) => t(
+        vts: vts, pgc: 0, dur: dur, audio: 4, subs: 19,
+        chapters: [
+          Duration.zero,
+          for (var i = 1; i < chapters; i++)
+            dur * i ~/ chapters + Duration(seconds: 37 * vts),
+        ],
+        cells: [(first: 0, last: sectors - 1)]);
+    DvdTitle extra(int vts, int pgc, int pgcs, Duration dur, int first, int last,
+            {int chapters = 1}) =>
+        t(vts: vts, pgc: pgc, pgcs: pgcs, dur: dur, audio: 1, subs: 4,
+          chapters: [for (var i = 0; i < chapters; i++) dur * i ~/ chapters],
+          cells: [(first: first, last: last)]);
+
+    final seinfeldD4 = [
+      ep(1, d(21, 58), 386780),
+      ep(2, d(21, 57), 390945),
+      ep(3, d(40, 10), 705776, chapters: 7),
+      ep(4, d(21, 57), 385147),
+      ep(5, d(22, 36), 397307),
+      extra(6, 0, 5, d(18, 4), 0, 268439, chapters: 5),
+      extra(6, 1, 5, d(1, 58), 0, 28705),
+      extra(6, 2, 5, d(2, 9), 28706, 60274),
+      extra(6, 3, 5, d(5, 33), 60275, 142904),
+      extra(6, 4, 5, d(8, 24), 142905, 268266),
+      extra(7, 0, 3, d(6, 5), 0, 89524, chapters: 3),
+      extra(7, 1, 3, d(2, 28), 0, 35803),
+      extra(7, 2, 3, d(3, 37), 35804, 89524),
+      extra(8, 0, 1, d(8, 43), 173, 131420),
+      extra(9, 0, 4, d(21, 22), 0, 321738),
+      extra(9, 1, 4, d(16, 12), 321739, 562588),
+      extra(9, 2, 4, d(7, 52), 562589, 672092),
+      extra(9, 3, 4, d(7, 13), 672093, 780379),
+      t(vts: 10, pgc: 0, dur: d(0, 14), subs: 0, cells: [(first: 0, last: 4200)]),
+    ];
+
+    test('autoSelectDvd suggests the five episodes', () {
+      expect(autoSelectDvd(seinfeldD4).map((x) => x.displayKey),
+          ['1', '2', '3', '4', '5']);
     });
   });
 }

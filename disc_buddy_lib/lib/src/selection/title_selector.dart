@@ -94,12 +94,25 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
   // non-zero pgcIndex while pgcIndex 0 is itself an episode-length PGC,
   // include pgcIndex 0 among the returned episodes and discard the
   // non-primary compilation angle.
+  //
+  // Bonus-feature sections often have the very same shape (a "play all"
+  // pgc0 followed by the individual featurettes), so a group only qualifies
+  // when its streams are as rich as the disc's dominant long content.  Extras
+  // are authored with a fraction of the episodes' audio/subtitle tracks, while
+  // genuine episode angles carry the richest streams on the disc.
+  final dominantScore = _dominantStreamScore(dedupedTitles, minDur);
   final compilationEps = <DvdTitle>[];
   for (final group in byVts.values) {
     final others = group
         .where((t) => t.pgcIndex != 0 && t.duration >= minDur)
         .toList();
     if (others.length < 2) continue;
+
+    final groupScore = group
+        .where((t) => t.duration >= minDur)
+        .map(_streamScore)
+        .reduce((a, b) => a > b ? a : b);
+    if (dominantScore != null && groupScore < dominantScore) continue;
 
     final primary = group.firstWhere(
       (t) => t.pgcIndex == 0,
@@ -315,9 +328,11 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
       : byAudio;
 
   // Re-admit titles the stream-count filter dropped when their duration fits
-  // the surviving group (±30 % of its median, or a ≈ 2× double episode).  An
-  // episode that merely lacks a subtitle track on this disc is still an
-  // episode; the filter only has to keep out short, stripped-down extras.
+  // the surviving group (±30 % of its median, or a ≈ 2× double episode) and
+  // they carry at least the group's audio tracks.  An episode that merely
+  // lacks a subtitle track on this disc is still an episode; a "play all
+  // extras" PGC that happens to run as long as an episode but has a fraction
+  // of its audio tracks is not.
   final filtered = <DvdTitle>[...bySub];
   if (bySub.isNotEmpty) {
     final secs   = bySub.map((t) => t.duration.inSeconds).toList()..sort();
@@ -327,7 +342,10 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
       return (s - median).abs() <= median * 0.3 ||
              (s - 2 * median).abs() <= 2 * median * 0.3;
     }
-    filtered.addAll(angle1.where((t) => !bySub.contains(t) && fits(t)));
+    filtered.addAll(angle1.where((t) =>
+        !bySub.contains(t) &&
+        fits(t) &&
+        (targetAudio == null || t.audioTracks.length >= targetAudio)));
   }
 
   final selected = _autoSelect(
@@ -540,6 +558,27 @@ Set<String> minorTitleKeys(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Audio + subtitle track count: the richness of a DVD title's streams.
+int _streamScore(DvdTitle t) => t.audioTracks.length + t.subtitleTracks.length;
+
+/// The stream score that accounts for the most playing time among titles of
+/// at least [minDur], or null when there is no such title.  Weighting by
+/// duration rather than title count means a dozen short featurettes cannot
+/// outvote five episodes, and a lone long documentary cannot outvote the
+/// episode angles that make up the bulk of the disc.
+int? _dominantStreamScore(List<DvdTitle> titles, Duration minDur) {
+  final secsByScore = <int, int>{};
+  for (final t in titles) {
+    if (t.duration < minDur) continue;
+    final score = _streamScore(t);
+    secsByScore[score] = (secsByScore[score] ?? 0) + t.duration.inSeconds;
+  }
+  if (secsByScore.isEmpty) return null;
+  return secsByScore.entries
+      .reduce((a, b) => a.value >= b.value ? a : b)
+      .key;
+}
 
 /// Returns the most frequent integer in [values], or null if [values] is empty.
 /// On ties the first-encountered value wins (stable, unlike [_modeWeighted]).
