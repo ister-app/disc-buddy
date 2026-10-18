@@ -55,13 +55,29 @@ extension EpisodeConflicts on EpisodeMatcher {
       contested: pick,
       episodes: episodes,
     );
+
+    // Last resort for file [i]: let the LLM choose among the episodes no
+    // file has claimed. The earlier claimant keeps the contested stem.
+    Future<EpisodePick?> rematch() => rematchExcludingClaimed(
+      i: i,
+      fp: fps[i] ?? Fingerprint.empty,
+      subtitleText: textB,
+      episodes: episodes,
+      items: items,
+      picks: picks,
+      usedStems: usedStems,
+      exclude: pick,
+      durations: durations,
+      medianSecs: medianSecs,
+    );
+
     if (resolved == null) {
       log(
         '   Disambiguation failed — keeping ${items[dupIdx].file.path}, '
-        'leaving ${items[i].file.path} unnamed.',
+        're-matching ${items[i].file.path} among unclaimed episodes.',
         isError: true,
       );
-      return null;
+      return rematch();
     }
 
     // Reassign the earlier claimant when the LLM moved it elsewhere.
@@ -74,13 +90,23 @@ extension EpisodeConflicts on EpisodeMatcher {
         filePath: items[dupIdx].file.path,
       );
       if (newFirst != null && newFirst.stem != picks[dupIdx]?.stem) {
-        log(
-          '   Disambiguation: ${items[dupIdx].file.path} reassigned '
-          '→ ${newFirst.stem} "${newFirst.title}".',
-        );
-        usedStems.remove(picks[dupIdx]?.stem);
-        picks[dupIdx] = newFirst;
-        usedStems[newFirst.stem] = dupIdx;
+        final holder = usedStems[newFirst.stem];
+        if (holder != null && holder != dupIdx) {
+          log(
+            '   Disambiguation: ${newFirst.stem} already belongs to '
+            '${items[holder].file.path} — ${items[dupIdx].file.path} keeps '
+            '${picks[dupIdx]?.stem}.',
+            isError: true,
+          );
+        } else {
+          log(
+            '   Disambiguation: ${items[dupIdx].file.path} reassigned '
+            '→ ${newFirst.stem} "${newFirst.title}".',
+          );
+          usedStems.remove(picks[dupIdx]?.stem);
+          picks[dupIdx] = newFirst;
+          usedStems[newFirst.stem] = dupIdx;
+        }
       }
     } else {
       log(
@@ -95,10 +121,10 @@ extension EpisodeConflicts on EpisodeMatcher {
     if (resolved.second == 0) {
       log(
         '   Disambiguation: ${items[i].file.path} could not be placed '
-        '— leaving unnamed.',
+        '— re-matching among unclaimed episodes.',
         isError: true,
       );
-      return null;
+      return rematch();
     }
     final newPick = applyDurationRefinement(
       pick: pickFromEpisodeIndex(episodes, resolved.second),
@@ -110,11 +136,11 @@ extension EpisodeConflicts on EpisodeMatcher {
     if (newPick == null) return null;
     if (usedStems.containsKey(newPick.stem)) {
       log(
-        '   Disambiguation: ${newPick.stem} already taken — leaving '
-        '${items[i].file.path} unnamed.',
+        '   Disambiguation: ${newPick.stem} already taken — re-matching '
+        '${items[i].file.path} among unclaimed episodes.',
         isError: true,
       );
-      return null;
+      return rematch();
     }
     return newPick;
   }
@@ -158,9 +184,7 @@ extension EpisodeConflicts on EpisodeMatcher {
         return null;
       }
       final stem = uniqueExtendedStem(pick.stem, usedStems);
-      log(
-        '   Version: ${items[fileIdx].file.path} → "$stem" (longer cut).',
-      );
+      log('   Version: ${items[fileIdx].file.path} → "$stem" (longer cut).');
       return EpisodePick(
         stem: stem,
         title: pick.title,

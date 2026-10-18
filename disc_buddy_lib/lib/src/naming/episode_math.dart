@@ -114,9 +114,10 @@ String baseEpisodeTitle(String title) => title
     }
     // No usable runtimes: infer the part count from the median.
     if (medianSecs != null) {
-      final k = (durationSecs / medianSecs)
-          .round()
-          .clamp(1, group.end - group.start + 1);
+      final k = (durationSecs / medianSecs).round().clamp(
+        1,
+        group.end - group.start + 1,
+      );
       if (k >= 2) {
         return (
           epStart: group.start,
@@ -142,8 +143,7 @@ String baseEpisodeTitle(String title) => title
   if (startIdx >= 0) {
     var sumMins = 0.0;
     for (var i = startIdx; i < sorted.length && i < startIdx + 4; i++) {
-      if (i > startIdx &&
-          sorted[i].ep.number != sorted[i - 1].ep.number + 1) {
+      if (i > startIdx && sorted[i].ep.number != sorted[i - 1].ep.number + 1) {
         break;
       }
       final r = sorted[i].ep.runtime?.toDouble() ?? fallbackMins;
@@ -194,10 +194,10 @@ List<VersionRole> classifyVersions({
       i == best
           ? VersionRole.primary
           : (expectedSecs == null ||
-                  durationsSecs[i] == null ||
-                  durationsSecs[i]! <= expectedSecs * 1.5)
-              ? VersionRole.extended
-              : VersionRole.leaveUnnamed,
+                durationsSecs[i] == null ||
+                durationsSecs[i]! <= expectedSecs * 1.5)
+          ? VersionRole.extended
+          : VersionRole.leaveUnnamed,
   ];
 }
 
@@ -220,8 +220,7 @@ List<SeasonEpisode> filterEpisodesBySimilarity(
       if (s > best) best = s;
     }
     return (entry: e, score: best);
-  }).toList()
-    ..sort((a, b) => b.score.compareTo(a.score));
+  }).toList()..sort((a, b) => b.score.compareTo(a.score));
 
   return scored.take(maxEpisodes).map((s) => s.entry).toList();
 }
@@ -278,4 +277,74 @@ EpisodePick pickFromEpisodeIndex(List<SeasonEpisode> episodes, int oneBased) {
     season: c.season,
     ep: c.ep.number,
   );
+}
+
+/// Episodes already covered by [picks], as (season, number) pairs — ranges
+/// count every episode they span.
+Set<({int season, int ep})> claimedEpisodes(Iterable<EpisodePick?> picks) {
+  final claimed = <({int season, int ep})>{};
+  for (final p in picks) {
+    if (p == null) continue;
+    for (var n = p.ep; n <= p.epEnd; n++) {
+      claimed.add((season: p.season, ep: n));
+    }
+  }
+  return claimed;
+}
+
+/// [episodes] minus those in [claimed].
+List<SeasonEpisode> unclaimedEpisodes(
+  List<SeasonEpisode> episodes,
+  Set<({int season, int ep})> claimed,
+) => episodes
+    .where((e) => !claimed.contains((season: e.season, ep: e.ep.number)))
+    .toList();
+
+/// Fills single gaps by file order: an unnamed file whose immediate
+/// neighbours are named exactly two episodes apart (e.g. s07e01 before,
+/// s07e03 after) gets the episode in between, provided that episode exists,
+/// is not claimed by any other file, and the file's duration is not more
+/// than 1.5× the expected single-episode length (so play-all and
+/// two-parter titles never fill a gap by accident).
+///
+/// Only this strict case is used: file order alone says nothing about
+/// episode numbers across discs, but one hole between two consecutive
+/// neighbours does. [eligible] restricts which unnamed indexes may be
+/// filled (callers exclude duplicate copies). Returns index → pick.
+Map<int, EpisodePick> fillSingleGaps({
+  required int count,
+  required Map<int, EpisodePick?> picks,
+  required Set<int> eligible,
+  required List<SeasonEpisode> episodes,
+  required Map<int, double> durations,
+  required double? medianSecs,
+}) {
+  final fills = <int, EpisodePick>{};
+  final claimed = claimedEpisodes(picks.values);
+  for (var i = 1; i < count - 1; i++) {
+    if (picks[i] != null || !eligible.contains(i)) continue;
+    final prev = picks[i - 1];
+    final next = picks[i + 1];
+    if (prev == null || next == null) continue;
+    if (prev.season != next.season || prev.epEnd + 2 != next.ep) continue;
+    final gap = (season: prev.season, ep: prev.epEnd + 1);
+    if (claimed.contains(gap)) continue;
+    final match = episodes
+        .where((e) => e.season == gap.season && e.ep.number == gap.ep)
+        .toList();
+    if (match.isEmpty) continue;
+    final c = match.first;
+    final pick = EpisodePick(
+      stem: episodeStem(c.season, c.ep.number),
+      title: c.ep.title,
+      season: c.season,
+      ep: c.ep.number,
+    );
+    final d = durations[i];
+    final expected = expectedSecsFor(pick, episodes, medianSecs);
+    if (d != null && expected != null && d > expected * 1.5) continue;
+    fills[i] = pick;
+    claimed.add(gap);
+  }
+  return fills;
 }

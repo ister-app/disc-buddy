@@ -50,8 +50,10 @@ class EpisodeMatcher {
     } else {
       final n = await tmdb.getNumberOfSeasons(seriesId);
       if (n == null || n == 0) {
-        log('   $logTag: no seasons for "$seriesName" — skipping.',
-            isError: true);
+        log(
+          '   $logTag: no seasons for "$seriesName" — skipping.',
+          isError: true,
+        );
         return null;
       }
       for (var s = 1; s <= n; s++) {
@@ -67,18 +69,24 @@ class EpisodeMatcher {
       }
     }
     if (episodes.isEmpty) {
-      log('   $logTag: no episodes for "$seriesName" — skipping.',
-          isError: true);
+      log(
+        '   $logTag: no episodes for "$seriesName" — skipping.',
+        isError: true,
+      );
       return null;
     }
     return episodes;
   }
 
   /// TMDB season 0 (specials): DVD bonus content usually lives there.
-  Future<List<SeasonEpisode>> fetchSpecials(int seriesId, String subLang) async =>
-      (await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang))
-          .map((ep) => (season: 0, ep: ep))
-          .toList();
+  Future<List<SeasonEpisode>> fetchSpecials(
+    int seriesId,
+    String subLang,
+  ) async => (await tmdb.getSeasonEpisodes(
+    seriesId,
+    0,
+    language: subLang,
+  )).map((ep) => (season: 0, ep: ep)).toList();
 
   // ---------------------------------------------------------------------------
   // Single file
@@ -201,6 +209,10 @@ class EpisodeMatcher {
       }
     }
 
+    // Files that must stay unnamed even when a gap in the sequence would
+    // fit them: duplicate copies and play-all titles.
+    final noGapFill = <int>{};
+
     for (var i = 0; i < items.length; i++) {
       final sub = subs[i];
       // Reuse the per-file summary computed earlier; it's the strongest signal.
@@ -214,11 +226,10 @@ class EpisodeMatcher {
           isError: true,
         );
         picks[i] = null;
+        noGapFill.add(i);
         continue;
       }
-      log(
-        '   [${i + 1}/${items.length}] Naming: ${items[i].file.path}',
-      );
+      log('   [${i + 1}/${items.length}] Naming: ${items[i].file.path}');
       var pick = await llmEpisodeMatch(
         fp: fp,
         episodes: episodes,
@@ -277,6 +288,7 @@ class EpisodeMatcher {
       );
       if (refined == null) {
         picks[i] = null; // play-all title
+        noGapFill.add(i);
         continue;
       }
       pick = refined;
@@ -302,14 +314,121 @@ class EpisodeMatcher {
         }
       }
 
-      if (!await verifyPick(fp: fp, pick: pick, episodes: episodes)) {
+      if (!await verifyPick(
+        fp: fp,
+        pick: pick,
+        episodes: episodes,
+        claimedBy: usedStems,
+      )) {
         picks[i] = null;
         continue;
       }
       usedStems[pick.stem] = i;
       picks[i] = pick;
     }
+
+    applyGapFills(
+      picks: picks,
+      eligible: {
+        for (final i in subs.keys)
+          if (!noGapFill.contains(i)) i,
+      },
+      episodes: episodes,
+      items: items,
+      durations: durations,
+      medianSecs: medianSecs,
+    );
     return picks;
+  }
+
+  /// Names unnamed files that sit in a single gap between two named
+  /// neighbours (see [fillSingleGaps]) and logs each fill.
+  void applyGapFills({
+    required Map<int, EpisodePick?> picks,
+    required Set<int> eligible,
+    required List<SeasonEpisode> episodes,
+    required List<NamingItem> items,
+    required Map<int, double> durations,
+    required double? medianSecs,
+  }) {
+    final fills = fillSingleGaps(
+      count: items.length,
+      picks: picks,
+      eligible: eligible,
+      episodes: episodes,
+      durations: durations,
+      medianSecs: medianSecs,
+    );
+    for (final entry in fills.entries) {
+      final i = entry.key;
+      final pick = entry.value;
+      log(
+        '   [${i + 1}/${items.length}] ${items[i].file.path} → ${pick.stem} '
+        '"${pick.title}" by elimination (neighbours '
+        '${picks[i - 1]!.stem} and ${picks[i + 1]!.stem}).',
+      );
+      picks[i] = pick;
+    }
+  }
+
+  /// Re-matches file [i] against only the episodes no file has claimed
+  /// (plus [exclude], the contested pick). Used when a stem conflict could
+  /// not be settled: the LLM then has to choose among what is still open.
+  /// Returns null when nothing is open, the LLM declines, or its pick
+  /// collides with an existing claim.
+  Future<EpisodePick?> rematchExcludingClaimed({
+    required int i,
+    required Fingerprint fp,
+    required String subtitleText,
+    required List<SeasonEpisode> episodes,
+    required List<NamingItem> items,
+    required Map<int, EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required EpisodePick exclude,
+    required Map<int, double> durations,
+    required double? medianSecs,
+  }) async {
+    final claimed = claimedEpisodes([...picks.values, exclude]);
+    final open = unclaimedEpisodes(episodes, claimed);
+    if (open.isEmpty || open.length == episodes.length) return null;
+    log(
+      '   Re-matching ${items[i].file.path} with '
+      '${episodes.length - open.length} claimed episode(s) excluded.',
+    );
+    var pick = await llmEpisodeMatch(
+      fp: fp,
+      episodes: open,
+      subtitleText: subtitleText,
+    );
+    pick ??= await llmEpisodeMatch(
+      fp: fp,
+      episodes: open,
+      subtitleText: entityDenseExcerpt(subtitleText),
+    );
+    if (pick == null) return null;
+    final refined = applyDurationRefinement(
+      pick: pick,
+      episodes: episodes,
+      durationSecs: durations[i],
+      medianSecs: medianSecs,
+      filePath: items[i].file.path,
+    );
+    if (refined == null) return null;
+    for (var n = refined.ep; n <= refined.epEnd; n++) {
+      if (claimed.contains((season: refined.season, ep: n)) ||
+          usedStems.containsKey(refined.stem)) {
+        log(
+          '   Re-match: ${refined.stem} overlaps an existing claim — leaving '
+          '${items[i].file.path} unnamed.',
+          isError: true,
+        );
+        return null;
+      }
+    }
+    log(
+      '   Re-match: ${items[i].file.path} → ${refined.stem} "${refined.title}".',
+    );
+    return refined;
   }
 
   // ---------------------------------------------------------------------------
@@ -367,7 +486,9 @@ class EpisodeMatcher {
       if (!isEnglish) {
         // Non-English: summary is the only usable signal.
         if (hasSummary) {
-          subBuf.writeln(' ⚠️ Non-English subtitle — summary only: ${fp.summary}');
+          subBuf.writeln(
+            ' ⚠️ Non-English subtitle — summary only: ${fp.summary}',
+          );
         } else {
           subBuf.writeln(
             ' ⚠️ Non-English subtitle with no summary — no reliable signal.',
@@ -378,10 +499,10 @@ class EpisodeMatcher {
         subBuf.writeln(' ⚠️ Weak summary — rely more on subtitle text:');
         subBuf.writeln('  Summary: ${fp.summary}');
         subBuf.writeln(
-          episodeExcerpt(sub.text, chunkSize: 1200)
-              .split('\n')
-              .map((l) => '  $l')
-              .join('\n'),
+          episodeExcerpt(
+            sub.text,
+            chunkSize: 1200,
+          ).split('\n').map((l) => '  $l').join('\n'),
         );
       } else if (hasSummary) {
         // Strong English summary: use it as the sole signal.
@@ -390,10 +511,10 @@ class EpisodeMatcher {
         // No summary: fall back to a compact excerpt.
         subBuf.writeln();
         subBuf.writeln(
-          episodeExcerpt(sub.text, chunkSize: 800)
-              .split('\n')
-              .map((l) => '  $l')
-              .join('\n'),
+          episodeExcerpt(
+            sub.text,
+            chunkSize: 800,
+          ).split('\n').map((l) => '  $l').join('\n'),
         );
       }
       subBuf.writeln();
@@ -459,8 +580,10 @@ class EpisodeMatcher {
 
     final rawAssignments = obj['assignments'];
     if (rawAssignments is! Map) {
-      log('   Batch assignment: "assignments" missing or wrong type.',
-          isError: true);
+      log(
+        '   Batch assignment: "assignments" missing or wrong type.',
+        isError: true,
+      );
       return {};
     }
 
@@ -577,6 +700,24 @@ class EpisodeMatcher {
       picks[fileIdx] = refined;
     }
 
+    // Files dropped as duplicates or low-confidence may still sit in a
+    // single gap between two placed neighbours; play-all titles never do.
+    final playAll = {
+      for (final e in picks.entries)
+        if (e.value == null) e.key,
+    };
+    applyGapFills(
+      picks: picks,
+      eligible: {
+        for (final i in subs.keys)
+          if (!playAll.contains(i)) i,
+      },
+      episodes: episodes,
+      items: items,
+      durations: durations,
+      medianSecs: medianSecs,
+    );
+
     return picks;
   }
 
@@ -611,8 +752,8 @@ class EpisodeMatcher {
     final hasSummary = fp.summary.isNotEmpty;
     final userContent = hasSummary
         ? 'Plot summary (primary signal):\n${fp.summary}\n\n'
-            'Subtitle excerpt (supporting evidence):\n$subtitleText\n\n'
-            'Episodes:\n${epBuf}JSON:'
+              'Subtitle excerpt (supporting evidence):\n$subtitleText\n\n'
+              'Episodes:\n${epBuf}JSON:'
         : 'Subtitle:\n$subtitleText\n\nEpisodes:\n${epBuf}JSON:';
 
     final response = await llm.chat(
@@ -624,10 +765,7 @@ class EpisodeMatcher {
           'role': 'system',
           'content': episodeMatchSystemPrompt(hasSummary: hasSummary),
         },
-        {
-          'role': 'user',
-          'content': userContent,
-        },
+        {'role': 'user', 'content': userContent},
       ],
     );
 
@@ -637,8 +775,10 @@ class EpisodeMatcher {
     }
     final obj = parseJsonObject(response);
     if (obj == null) {
-      log('   LLM episode match: JSON parse failed. Raw: $response',
-          isError: true);
+      log(
+        '   LLM episode match: JSON parse failed. Raw: $response',
+        isError: true,
+      );
       return null;
     }
     final n = jsonInt(obj['pick']);
@@ -664,7 +804,9 @@ class EpisodeMatcher {
         '${episodeStem(c.season, c.ep.number)} "${c.ep.title}"',
     ];
     final idx = await prompter.choose(
-        '   LLM could not identify the episode. Pick manually:', labels);
+      '   LLM could not identify the episode. Pick manually:',
+      labels,
+    );
     if (idx == null) {
       log('   AutoNamer: LLM declined — skipping.', isError: true);
       return null;
@@ -748,10 +890,16 @@ class EpisodeMatcher {
   /// an inconclusive answer (pick 0) accepts, so sparse evidence (short
   /// whisper transcripts, thin TMDB overviews) never blocks a rename that
   /// the primary match and the re-match agree on.
+  ///
+  /// [claimedBy] (stem → file index of other files' picks) makes a
+  /// contradiction that names an episode another file already holds count
+  /// as inconclusive: two files cannot both be that episode, and the
+  /// primary match already settled who is.
   Future<bool> verifyPick({
     required Fingerprint fp,
     required EpisodePick pick,
     required List<SeasonEpisode> episodes,
+    Map<String, int> claimedBy = const {},
   }) async {
     if (fp.summary.isEmpty) return true;
 
@@ -783,16 +931,27 @@ class EpisodeMatcher {
     if (n < 1 || n > episodes.length) return true; // inconclusive → accept
 
     final re = episodes[n - 1];
-    final samePick = re.season == pick.season &&
+    final samePick =
+        re.season == pick.season &&
         re.ep.number >= pick.ep &&
         re.ep.number <= pick.epEnd;
     // Same part group also counts: parts of one special are one story.
     final group = partGroup(episodes, pick.season, pick.ep);
-    final sameGroup = group != null &&
+    final sameGroup =
+        group != null &&
         re.season == pick.season &&
         re.ep.number >= group.start &&
         re.ep.number <= group.end;
     if (samePick || sameGroup) return true;
+
+    final reStem = episodeStem(re.season, re.ep.number);
+    if (claimedBy.containsKey(reStem)) {
+      log(
+        '   Verification: blind re-match says $reStem, but that episode is '
+        'already taken by another file — accepting ${pick.stem}.',
+      );
+      return true;
+    }
 
     log(
       '   ⚠ Verification: blind re-match says '
