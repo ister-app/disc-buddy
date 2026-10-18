@@ -56,6 +56,20 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
             ? const NonInteractivePrompter()
             : (prompter ?? const NonInteractivePrompter());
 
+  /// All IFO-declared audio and subtitle stream ids per title (keyed by
+  /// [DvdTitle.displayKey]), captured in [rip] before track filtering.
+  final Map<String, Set<int>> _scanSidsByTitle = {};
+
+  static Set<int> _declaredSids(DvdTitle t) => <int>{
+        ...t.audioTracks.map((a) => a.streamId),
+        ...t.subtitleTracks.map((s) => s.streamId),
+      };
+
+  /// Stream ids the SID pre-scan has to find for [title]: the full IFO set
+  /// when known, otherwise whatever the (possibly filtered) title lists.
+  Set<int> _scanSidsFor(DvdTitle title) =>
+      _scanSidsByTitle[title.displayKey] ?? _declaredSids(title);
+
   static List<T> _filterByLang<T>(
       List<T> tracks, Set<String> langs, String Function(T) getLang) {
     final filtered = tracks
@@ -96,6 +110,16 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   Future<void> rip(String discTitle, List<DvdTitle> selected,
       {String? mountPath, Set<String>? overwrite}) async {
     final device = options.device!;
+
+    // Remember every IFO-declared stream id per title BEFORE any track
+    // filtering.  The SID pre-scan must see all of them: ffmpeg numbers its
+    // audio/subtitle streams by discovery order over every stream in the VOB,
+    // so scanning only for the tracks the user kept yields wrong indices
+    // (e.g. keeping just the German 0x82 on a disc laid out 0x80 en, 0x81 fr,
+    // 0x82 de would map "-map 0:a:0", the English track, and tag it German).
+    _scanSidsByTitle
+      ..clear()
+      ..addEntries(selected.map((t) => MapEntry(t.displayKey, _declaredSids(t))));
 
     // Apply per-title track filtering (by index, then by language as fallback).
     final audioLangFilter = options.audioMkvLangs;
@@ -188,10 +212,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       // declares in the IFO. Scanning broader sets (all 0x80–0x8F) picks up
       // spurious SIDs from other angles in multi-angle VOBs, inflating the
       // audio index count and causing invalid -map arguments.
-      final wantedSids = <int>{
-        ...title.audioTracks.map((a) => a.streamId),
-        ...title.subtitleTracks.map((s) => s.streamId),
-      };
+      final wantedSids = _scanSidsFor(title);
 
       // Rips the title once. In single-pass mode streams are mapped by MPEG
       // stream id (-map 0:i:0x80) with NO pre-scan; otherwise a scan first
@@ -413,10 +434,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
         final concatInput = vobFiles.join('|');
         final langs = langsMap[title]!;
 
-        final wantedSids = <int>{
-          ...title.audioTracks.map((a) => a.streamId),
-          ...title.subtitleTracks.map((s) => s.streamId),
-        };
+        final wantedSids = _scanSidsFor(title);
 
         // Scan all VOB files in concat order until all SIDs are found (or cap).
         // Cached per VTS like the dvdread path: titles (angles) in one VTS
