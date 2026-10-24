@@ -108,8 +108,10 @@ List<DvdTitle> autoSelectDvd(List<DvdTitle> titles) {
         .toList();
     if (others.length < 2) continue;
 
-    final groupScore = group
-        .where((t) => t.duration >= minDur)
+    // Judge the candidate episodes themselves, not the play-all: a bonus
+    // "play all" PGC can declare the disc's full stream set while the
+    // featurettes it strings together carry only one audio track.
+    final groupScore = others
         .map(_streamScore)
         .reduce((a, b) => a > b ? a : b);
     if (dominantScore != null && groupScore < dominantScore) continue;
