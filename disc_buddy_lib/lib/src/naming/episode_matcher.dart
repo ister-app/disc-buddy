@@ -940,16 +940,7 @@ class EpisodeMatcher {
       '   Episode match: sending ${subtitleText.length} chars of subtitle text.',
     );
 
-    final epBuf = StringBuffer();
-    for (var i = 0; i < episodes.length; i++) {
-      final c = episodes[i];
-      final label = episodeStem(c.season, c.ep.number);
-      epBuf.write('${i + 1}. $label "${c.ep.title}": ${c.ep.overview}');
-      if (c.ep.guestStars.isNotEmpty) {
-        epBuf.write(' [Guests: ${c.ep.guestStars}]');
-      }
-      epBuf.writeln();
-    }
+    final epBuf = formatEpisodeList(episodes);
 
     // A pre-computed plot summary (when available) is a far stronger signal
     // than raw subtitle text, so surface it to the model as the primary cue.
@@ -1126,14 +1117,9 @@ class EpisodeMatcher {
       return false;
     }
 
-    final epBuf = StringBuffer();
-    for (var i = 0; i < episodes.length; i++) {
-      final c = episodes[i];
-      epBuf.writeln(
-        '${i + 1}. ${episodeStem(c.season, c.ep.number)} '
-        '"${c.ep.title}": ${c.ep.overview}',
-      );
-    }
+    // Guest stars (character names) are the strongest cue when TMDB
+    // overviews are one-liners — the same list the primary match sees.
+    final epBuf = formatEpisodeList(episodes);
 
     final response = await llm.chat(
       timeout: const Duration(minutes: 2),

@@ -13,6 +13,7 @@ EpisodeInfo _ep(int n, String title, String overview) => (
 );
 
 void main() {
+  _formatEpisodeListTests();
   group('bonusLayoutOutliers', () {
     const tagged = ['eng', 'fre', 'ger'];
     const commentary = ['eng', 'fre', 'ger', 'eng'];
@@ -163,6 +164,33 @@ void main() {
     test('keeps everything when all specials have overviews', () {
       final specials = [_ep(1, 'A', 'a'), _ep(2, 'B', 'b')];
       expect(verifiableSpecials(specials), specials);
+    });
+  });
+}
+
+void _formatEpisodeListTests() {
+  group('formatEpisodeList', () {
+    test('numbers entries and appends guest stars when present', () {
+      final eps = <SeasonEpisode>[
+        (season: 9, ep: _ep(2, 'The Voice', 'Kramer hires an assistant.')),
+        (
+          season: 9,
+          ep: (
+            number: 7,
+            title: 'The Slicer',
+            overview: 'George has a past with his new boss.',
+            guestStars: 'Dr. Sara Sitarides, Kruger',
+            airDate: '',
+            runtime: 23,
+          ),
+        ),
+      ];
+      expect(
+        formatEpisodeList(eps),
+        '1. s09e02 "The Voice": Kramer hires an assistant.\n'
+        '2. s09e07 "The Slicer": George has a past with his new boss. '
+        '[Guests: Dr. Sara Sitarides, Kruger]\n',
+      );
     });
   });
 }

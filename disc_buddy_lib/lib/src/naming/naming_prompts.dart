@@ -59,6 +59,7 @@ String episodeMatchSystemPrompt({
     '${hasSummary ? 'Use the plot summary as the primary signal and '
         'the subtitle excerpt as supporting evidence.\n' : 'Read the '
         'subtitle excerpt and match it to the episode description.\n'}'
+    '$concreteEvidenceRule\n'
     'Output STRICT JSON only: {"pick":N} (1-based).\n'
     '${bonus ? 'The candidates are DVD bonus features (featurettes, '
         'blooper reels, interviews, inside looks). Pick one only when its '
@@ -72,9 +73,18 @@ String titleFallbackSystemPrompt(String kind, int count) =>
     'Output STRICT JSON: {"pick":N} with N in 1..$count, '
     'or {"pick":0} if none clearly fit.';
 
+/// Shared matching rule. Thin episode overviews invite the model to latch
+/// onto a word shared with an episode title ("voice", "forced out"); on
+/// Seinfeld S9 that made the blind verifier name "The Voice" for two other
+/// episodes. Naming the real cues (events, characters, objects) fixed it.
+const String concreteEvidenceRule =
+    'Match on concrete plot events, named characters and objects; ignore '
+    'superficial word overlap with an episode title.';
+
 /// Blind re-match of a summary against the episode list.
 const String verifyPickSystemPrompt =
     'You identify which TV episode a plot summary describes.\n'
+    '$concreteEvidenceRule '
     'Output STRICT JSON: {"pick":N} (1-based index into the '
     'episode list), or {"pick":0} when unsure.';
 

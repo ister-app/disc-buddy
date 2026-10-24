@@ -454,3 +454,20 @@ Map<int, EpisodePick> fillSingleGaps({
   }
   return fills;
 }
+
+/// Numbered candidate list for the LLM prompts: `N. s##e## "Title": overview
+/// [Guests: …]`. Used by both the primary match and the blind verifier so
+/// they judge the same evidence.
+String formatEpisodeList(List<SeasonEpisode> episodes) {
+  final buf = StringBuffer();
+  for (var i = 0; i < episodes.length; i++) {
+    final c = episodes[i];
+    buf.write(
+      '${i + 1}. ${episodeStem(c.season, c.ep.number)} '
+      '"${c.ep.title}": ${c.ep.overview}',
+    );
+    if (c.ep.guestStars.isNotEmpty) buf.write(' [Guests: ${c.ep.guestStars}]');
+    buf.writeln();
+  }
+  return buf.toString();
+}
