@@ -14,6 +14,11 @@ const String summarySystemPrompt =
     'specific crimes or revelations, '
     'memorable dialogue quotes.\n'
     '- titleGuess: show or movie title if recognisable, else "".\n'
+    '- DVD bonus material: if the text is a blooper/outtake reel '
+    '(directions like "cut", "action", "take two", flubbed lines), a '
+    'featurette, interviews or commentary rather than an episode, say so '
+    'in the first sentence and describe the material; do NOT invent an '
+    'episode plot.\n'
     '- On failure return exactly: {}';
 
 /// One LLM call assigns [n] subtitle files to [m] episodes.
@@ -46,14 +51,20 @@ String batchAssignSystemPrompt(int n, int m) =>
     '"assignments":{"1":{"ep":N,"confidence":0.0},...}}';
 
 /// Single-file episode match; wording depends on whether a summary exists.
-String episodeMatchSystemPrompt({required bool hasSummary}) =>
+String episodeMatchSystemPrompt({
+  required bool hasSummary,
+  bool bonus = false,
+}) =>
     'You identify which TV episode a subtitle belongs to.\n'
     '${hasSummary ? 'Use the plot summary as the primary signal and '
         'the subtitle excerpt as supporting evidence.\n' : 'Read the '
         'subtitle excerpt and match it to the episode description.\n'}'
     'Output STRICT JSON only: {"pick":N} (1-based).\n'
-    'Always pick the closest match. '
-    'Use {"pick":0} only if completely unrecognisable.';
+    '${bonus ? 'The candidates are DVD bonus features (featurettes, '
+        'blooper reels, interviews, inside looks). Pick one only when its '
+        'description clearly fits the material; an inside look at '
+        'episode X is not episode X itself. Otherwise {"pick":0}.' : 'Always pick the closest match. '
+        'Use {"pick":0} only if completely unrecognisable.'}';
 
 /// Picks one of [count] title candidates when deterministic scoring is weak.
 String titleFallbackSystemPrompt(String kind, int count) =>

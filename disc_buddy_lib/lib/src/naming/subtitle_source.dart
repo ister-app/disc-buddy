@@ -71,11 +71,26 @@ class SubtitleSource {
     );
   }
 
+  /// Summarises [fullText] into a [Fingerprint]. The LLM occasionally
+  /// answers `{}` (its "failure" form) for a perfectly good subtitle; at
+  /// temperature 0 the same excerpt fails the same way again, so the retry
+  /// sends a different, name-dense excerpt instead.
   Future<Fingerprint> extractSummary(String fullText) async {
     if (fullText.isEmpty) return Fingerprint.empty;
     // Sample from beginning, middle and end so climax scenes are included.
-    final excerpt = episodeExcerpt(fullText, chunkSize: summaryMaxChars ~/ 3);
+    var fp = await _summariseOnce(
+      episodeExcerpt(fullText, chunkSize: summaryMaxChars ~/ 3),
+    );
+    if (fp.isEmpty) {
+      log('   Summary came back empty — retrying with a name-dense excerpt.');
+      fp = await _summariseOnce(
+        entityDenseExcerpt(fullText, maxChars: summaryMaxChars),
+      );
+    }
+    return fp;
+  }
 
+  Future<Fingerprint> _summariseOnce(String excerpt) async {
     log('   Summarising subtitle (${excerpt.length} chars)...');
     final raw = await llm.chat(
       [

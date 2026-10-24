@@ -82,11 +82,9 @@ class EpisodeMatcher {
   Future<List<SeasonEpisode>> fetchSpecials(
     int seriesId,
     String subLang,
-  ) async => (await tmdb.getSeasonEpisodes(
-    seriesId,
-    0,
-    language: subLang,
-  )).map((ep) => (season: 0, ep: ep)).toList();
+  ) async => verifiableSpecials(
+    await tmdb.getSeasonEpisodes(seriesId, 0, language: subLang),
+  ).map((ep) => (season: 0, ep: ep)).toList();
 
   // ---------------------------------------------------------------------------
   // Single file
@@ -154,9 +152,15 @@ class EpisodeMatcher {
         fp: fp,
         episodes: specials,
         subtitleText: subtitleText,
+        bonus: true,
       );
       if (spPick != null &&
-          await verifyPick(fp: fp, pick: spPick, episodes: specials)) {
+          await verifyPick(
+            fp: fp,
+            pick: spPick,
+            episodes: specials,
+            requireAgreement: true,
+          )) {
         return spPick;
       }
     }
@@ -195,6 +199,7 @@ class EpisodeMatcher {
       if (d != null) durations[i] = d;
     }
     final medianSecs = median(durations.values);
+    final bonus = await findBonusLayoutOutliers(items);
 
     // The same episode ripped from two discs: name the first copy only.
     final duplicateOf = <int, int>{};
@@ -212,6 +217,9 @@ class EpisodeMatcher {
     // Files that must stay unnamed even when a gap in the sequence would
     // fit them: duplicate copies and play-all titles.
     final noGapFill = <int>{};
+    // Files that matched no regular episode; they get a look at TMDB
+    // season 0 once every regular match is in (see [specialsPass]).
+    final specialsCandidates = <int>{};
 
     for (var i = 0; i < items.length; i++) {
       final sub = subs[i];
@@ -227,6 +235,12 @@ class EpisodeMatcher {
         );
         picks[i] = null;
         noGapFill.add(i);
+        continue;
+      }
+      if (bonus.contains(i)) {
+        picks[i] = null;
+        noGapFill.add(i);
+        specialsCandidates.add(i);
         continue;
       }
       log('   [${i + 1}/${items.length}] Naming: ${items[i].file.path}');
@@ -245,37 +259,8 @@ class EpisodeMatcher {
         );
       }
       if (pick == null) {
-        // Season-0 fallback: DVD bonus content lives in TMDB's specials.
-        final sp = await loadSpecials();
-        if (sp.isNotEmpty) {
-          log('   No regular episode matched — trying season 0 (specials).');
-          pick = await llmEpisodeMatch(
-            fp: fp,
-            episodes: sp,
-            subtitleText: sub.text,
-          );
-          if (pick != null &&
-              !await verifyPick(fp: fp, pick: pick, episodes: sp)) {
-            pick = null;
-          }
-        }
-        if (pick == null) {
-          picks[i] = await promptEpisodePick(episodes: episodes);
-          continue;
-        }
-        // Specials get no duration refinement (their runtimes vary wildly).
-        final dupSp = usedStems[pick.stem];
-        if (dupSp != null) {
-          log(
-            '   AutoNamer: ${items[i].file.path} duplicate special '
-            '${pick.stem}, kept ${items[dupSp].file.path} — skipping.',
-            isError: true,
-          );
-          picks[i] = null;
-        } else {
-          usedStems[pick.stem] = i;
-          picks[i] = pick;
-        }
+        picks[i] = null;
+        specialsCandidates.add(i);
         continue;
       }
 
@@ -310,6 +295,7 @@ class EpisodeMatcher {
         );
         if (pick == null) {
           picks[i] = null;
+          specialsCandidates.add(i);
           continue;
         }
       }
@@ -320,7 +306,10 @@ class EpisodeMatcher {
         episodes: episodes,
         claimedBy: usedStems,
       )) {
+        // The blind re-match disagreed; once every other file is placed the
+        // post-pass re-matches this one among what is still open.
         picks[i] = null;
+        specialsCandidates.add(i);
         continue;
       }
       usedStems[pick.stem] = i;
@@ -338,7 +327,218 @@ class EpisodeMatcher {
       durations: durations,
       medianSecs: medianSecs,
     );
+    await specialsPass(
+      candidates: specialsCandidates,
+      picks: picks,
+      usedStems: usedStems,
+      episodes: episodes,
+      items: items,
+      subs: subs,
+      fps: fps,
+      durations: durations,
+      medianSecs: medianSecs,
+      bonus: bonus,
+      loadSpecials: loadSpecials,
+    );
     return picks;
+  }
+
+  /// With exactly one regular episode still open, a fitting file the LLM
+  /// keeps declining gets that episode by elimination — but only when a
+  /// blind match of the file's summary against the whole season names the
+  /// same episode, so a stray bonus clip cannot inherit the last slot.
+  Future<EpisodePick?> claimLastOpenEpisode({
+    required int i,
+    required Fingerprint fp,
+    required List<SeasonEpisode> episodes,
+    required List<NamingItem> items,
+    required Map<int, EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required Map<int, double> durations,
+    required double? medianSecs,
+  }) async {
+    final open = unclaimedEpisodes(episodes, claimedEpisodes(picks.values));
+    if (open.length != 1 || fp.summary.isEmpty) return null;
+    final pick = pickFromEpisodeIndex(open, 1);
+    if (usedStems.containsKey(pick.stem)) return null;
+    final refined = applyDurationRefinement(
+      pick: pick,
+      episodes: episodes,
+      durationSecs: durations[i],
+      medianSecs: medianSecs,
+      filePath: items[i].file.path,
+    );
+    if (refined == null || refined.stem != pick.stem) return null;
+    log(
+      '   ${items[i].file.path}: only ${pick.stem} "${pick.title}" is still '
+      'open — checking it by a blind summary match.',
+    );
+    if (!await verifyPick(
+      fp: fp,
+      pick: pick,
+      episodes: episodes,
+      requireAgreement: true,
+    )) {
+      return null;
+    }
+    log(
+      '   ${items[i].file.path} → ${pick.stem} "${pick.title}" by '
+      'elimination, confirmed by the blind summary match.',
+    );
+    return pick;
+  }
+
+  /// Probes every file's audio layout and returns the indices that look like
+  /// bonus material (see [bonusLayoutOutliers]), logging each one.
+  Future<Set<int>> findBonusLayoutOutliers(List<NamingItem> items) async {
+    final layouts = <int, List<String>>{};
+    for (var i = 0; i < items.length; i++) {
+      layouts[i] = await probe.audioLanguagesOf(items[i].file);
+    }
+    final outliers = bonusLayoutOutliers(layouts);
+    if (outliers.isEmpty) return outliers;
+    final common = commonAudioLayout(layouts);
+    for (final i in outliers) {
+      log(
+        '   [${i + 1}/${items.length}] ${items[i].file.path}: audio layout '
+        '${describeAudioLayout(layouts[i]!)} differs from the other files '
+        '(${describeAudioLayout(common)}) — likely bonus material, '
+        'skipping episode matching.',
+      );
+    }
+    return outliers;
+  }
+
+  /// Second chance for files that matched no regular episode, run after all
+  /// regular matches and gap fills are in. A file that looks like bonus
+  /// content (see [shouldTrySpecials]) is offered TMDB season 0; one that
+  /// fits the season is re-matched among the still unclaimed episodes
+  /// instead. Falls back to the manual prompt when non-force.
+  Future<void> specialsPass({
+    required Set<int> candidates,
+    required Map<int, EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required List<SeasonEpisode> episodes,
+    required List<NamingItem> items,
+    required Map<int, SubtitleText> subs,
+    required Map<int, Fingerprint> fps,
+    required Map<int, double> durations,
+    required double? medianSecs,
+    required Set<int> bonus,
+    required Future<List<SeasonEpisode>> Function() loadSpecials,
+  }) async {
+    final claimed = picks.values.where((p) => p != null).length;
+    // Bonus content on a season's discs is about that season: when the
+    // batch covers one season, offer the specials that mention it first.
+    List<SeasonEpisode>? offered;
+    Future<List<SeasonEpisode>> loadOffered() async {
+      if (offered != null) return offered!;
+      final sp = await loadSpecials();
+      final seasons = episodes.map((e) => e.season).toSet();
+      if (seasons.length == 1 && sp.isNotEmpty) {
+        final focused = seasonSpecials(
+          sp,
+          seasons.single,
+          episodes.map((e) => e.ep.title),
+        );
+        if (focused.isNotEmpty) {
+          log(
+            '   Specials: ${focused.length} of ${sp.length} refer to season '
+            '${seasons.single} — offering only those.',
+          );
+          return offered = focused;
+        }
+      }
+      return offered = sp;
+    }
+
+    for (final i in candidates.toList()..sort()) {
+      if (picks[i] != null) continue; // placed by gap filling
+      final sub = subs[i];
+      if (sub == null) continue;
+      final fp = fps[i] ?? Fingerprint.empty;
+      final path = items[i].file.path;
+      EpisodePick? pick;
+      if (!shouldTrySpecials(
+        layoutOutlier: bonus.contains(i),
+        durationSecs: durations[i],
+        medianSecs: medianSecs,
+        claimedRegular: claimed,
+        totalRegular: episodes.length,
+      )) {
+        log(
+          '   $path fits the season by length and audio layout — not trying '
+          'specials; re-matching among the unclaimed episodes.',
+        );
+        pick = await rematchExcludingClaimed(
+          i: i,
+          fp: fp,
+          subtitleText: sub.text,
+          episodes: episodes,
+          items: items,
+          picks: picks,
+          usedStems: usedStems,
+          durations: durations,
+          medianSecs: medianSecs,
+        );
+        if (pick != null &&
+            !await verifyPick(
+              fp: fp,
+              pick: pick,
+              episodes: episodes,
+              claimedBy: usedStems,
+            )) {
+          pick = null;
+        }
+        pick ??= await claimLastOpenEpisode(
+          i: i,
+          fp: fp,
+          episodes: episodes,
+          items: items,
+          picks: picks,
+          usedStems: usedStems,
+          durations: durations,
+          medianSecs: medianSecs,
+        );
+      } else {
+        final sp = await loadOffered();
+        if (sp.isNotEmpty) {
+          log('   $path: no regular episode matched — trying season 0 (specials).');
+          pick = await llmEpisodeMatch(
+            fp: fp,
+            episodes: sp,
+            subtitleText: sub.text,
+            bonus: true,
+          );
+          if (pick != null &&
+              !await verifyPick(
+                fp: fp,
+                pick: pick,
+                episodes: sp,
+                requireAgreement: true,
+              )) {
+            pick = null;
+          }
+        }
+      }
+      if (pick == null) {
+        picks[i] = await promptEpisodePick(episodes: episodes);
+        continue;
+      }
+      // Specials get no duration refinement (their runtimes vary wildly).
+      final dupSp = usedStems[pick.stem];
+      if (dupSp != null) {
+        log(
+          '   AutoNamer: $path duplicate special ${pick.stem}, '
+          'kept ${items[dupSp].file.path} — skipping.',
+          isError: true,
+        );
+        picks[i] = null;
+      } else {
+        usedStems[pick.stem] = i;
+        picks[i] = pick;
+      }
+    }
   }
 
   /// Names unnamed files that sit in a single gap between two named
@@ -372,10 +572,11 @@ class EpisodeMatcher {
   }
 
   /// Re-matches file [i] against only the episodes no file has claimed
-  /// (plus [exclude], the contested pick). Used when a stem conflict could
-  /// not be settled: the LLM then has to choose among what is still open.
-  /// Returns null when nothing is open, the LLM declines, or its pick
-  /// collides with an existing claim.
+  /// (plus [exclude], a contested pick, when given). Used when a stem
+  /// conflict could not be settled, and for a file the LLM declined to
+  /// place although it fits the season: the LLM then has to choose among
+  /// what is still open. Returns null when nothing is open, the LLM
+  /// declines, or its pick collides with an existing claim.
   Future<EpisodePick?> rematchExcludingClaimed({
     required int i,
     required Fingerprint fp,
@@ -384,7 +585,7 @@ class EpisodeMatcher {
     required List<NamingItem> items,
     required Map<int, EpisodePick?> picks,
     required Map<String, int> usedStems,
-    required EpisodePick exclude,
+    EpisodePick? exclude,
     required Map<int, double> durations,
     required double? medianSecs,
   }) async {
@@ -458,11 +659,13 @@ class EpisodeMatcher {
       'after filter=${filteredEpisodes.length}.',
     );
 
+    final bonus = await findBonusLayoutOutliers(items);
+
     // Build subtitle block: summaries are primary; raw excerpts are fallback.
     final subBuf = StringBuffer();
     for (var i = 0; i < items.length; i++) {
       final sub = subs[i];
-      if (sub == null) continue;
+      if (sub == null || bonus.contains(i)) continue;
       final fp = fps[i];
       final hasSummary = fp != null && fp.summary.isNotEmpty;
       final isEnglish = looksEnglish(sub.text);
@@ -710,7 +913,7 @@ class EpisodeMatcher {
       picks: picks,
       eligible: {
         for (final i in subs.keys)
-          if (!playAll.contains(i)) i,
+          if (!playAll.contains(i) && !bonus.contains(i)) i,
       },
       episodes: episodes,
       items: items,
@@ -729,6 +932,7 @@ class EpisodeMatcher {
     required Fingerprint fp,
     required List<SeasonEpisode> episodes,
     required String subtitleText,
+    bool bonus = false,
   }) async {
     if (episodes.isEmpty) return null;
 
@@ -763,7 +967,10 @@ class EpisodeMatcher {
       [
         {
           'role': 'system',
-          'content': episodeMatchSystemPrompt(hasSummary: hasSummary),
+          'content': episodeMatchSystemPrompt(
+            hasSummary: hasSummary,
+            bonus: bonus,
+          ),
         },
         {'role': 'user', 'content': userContent},
       ],
@@ -783,7 +990,10 @@ class EpisodeMatcher {
     }
     final n = jsonInt(obj['pick']);
     if (n < 1 || n > episodes.length) {
-      log('   LLM episode match: pick=$n — declined or out of range.');
+      log(
+        '   LLM episode match: pick=$n — declined or out of range '
+        '(${episodes.length} candidate(s)). Raw: ${response.trim()}',
+      );
       return null;
     }
 
@@ -895,13 +1105,26 @@ class EpisodeMatcher {
   /// contradiction that names an episode another file already holds count
   /// as inconclusive: two files cannot both be that episode, and the
   /// primary match already settled who is.
+  /// With [requireAgreement] (used for specials) an inconclusive
+  /// verification counts as a rejection: a bonus feature needs positive
+  /// confirmation, a regular episode only needs no contradiction.
   Future<bool> verifyPick({
     required Fingerprint fp,
     required EpisodePick pick,
     required List<SeasonEpisode> episodes,
     Map<String, int> claimedBy = const {},
+    bool requireAgreement = false,
   }) async {
-    if (fp.summary.isEmpty) return true;
+    if (fp.summary.isEmpty) return !requireAgreement;
+    bool inconclusive() {
+      if (!requireAgreement) return true;
+      log(
+        '   Verification: blind re-match could not confirm ${pick.stem} '
+        '"${pick.title}" — leaving unnamed.',
+        isError: true,
+      );
+      return false;
+    }
 
     final epBuf = StringBuffer();
     for (var i = 0; i < episodes.length; i++) {
@@ -924,11 +1147,11 @@ class EpisodeMatcher {
         },
       ],
     );
-    if (response == null) return true;
+    if (response == null) return inconclusive();
     final obj = parseJsonObject(response);
-    if (obj == null) return true;
+    if (obj == null) return inconclusive();
     final n = jsonInt(obj['pick']);
-    if (n < 1 || n > episodes.length) return true; // inconclusive → accept
+    if (n < 1 || n > episodes.length) return inconclusive();
 
     final re = episodes[n - 1];
     final samePick =

@@ -166,6 +166,7 @@ class AutoNamer {
         '${items[entry.key].file.path}',
       );
       fps[entry.key] = await _subtitles.extractSummary(entry.value.text);
+      _subtitles.logFingerprint(fps[entry.key]!);
     }
 
     // 2. Resolve title once using the first file's fingerprint.

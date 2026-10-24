@@ -1,4 +1,5 @@
 import 'naming_types.dart';
+import 'tmdb_client.dart';
 import 'subtitle_text.dart';
 
 /// Pure episode arithmetic: stems, multi-part groups, duration-based
@@ -290,6 +291,111 @@ Set<({int season, int ep})> claimedEpisodes(Iterable<EpisodePick?> picks) {
     }
   }
   return claimed;
+}
+
+/// Specials the LLM can actually be checked against: TMDB season 0 holds
+/// many placeholder entries (no overview, no air date) and a bare title such
+/// as "Reunion Special" is unfalsifiable evidence for an unknown bonus clip.
+List<EpisodeInfo> verifiableSpecials(List<EpisodeInfo> specials) =>
+    specials.where((e) => e.overview.trim().isNotEmpty).toList();
+
+bool _untagged(String lang) => lang.isEmpty || lang == 'und';
+
+/// Files whose audio layout marks them as bonus material rather than an
+/// episode. DVD featurettes come with a single stereo track where the
+/// episodes carry several language-tagged ones, so a file is an outlier when
+/// it has fewer tracks than the layout most files share and either none of
+/// them is tagged, or it has at most half as many tracks, all in languages
+/// the common layout also has. More tracks (a commentary) never count.
+/// Needs at least three files on a tagged common layout; returns indices.
+Set<int> bonusLayoutOutliers(Map<int, List<String>> audioLangs) {
+  final mode = _modeLayout(audioLangs);
+  if (mode == null) return {};
+  final modeLangs = mode.langs;
+  if (mode.support < 3 || modeLangs.every(_untagged)) return {};
+  final modeSet = modeLangs.toSet();
+  bool isOutlier(List<String> langs) {
+    if (langs.length >= modeLangs.length) return false;
+    if (langs.every(_untagged)) return true;
+    return langs.length * 2 <= modeLangs.length &&
+        modeLangs.length >= 3 &&
+        langs.every(modeSet.contains);
+  }
+
+  return {
+    for (final e in audioLangs.entries)
+      if (isOutlier(e.value)) e.key,
+  };
+}
+
+/// The audio layout most files share (empty when there are no files).
+List<String> commonAudioLayout(Map<int, List<String>> audioLangs) =>
+    _modeLayout(audioLangs)?.langs ?? const [];
+
+({List<String> langs, int support})? _modeLayout(
+  Map<int, List<String>> audioLangs,
+) {
+  final layouts = <String, List<String>>{};
+  final support = <String, int>{};
+  for (final langs in audioLangs.values) {
+    final key = ([...langs]..sort()).join('|');
+    layouts[key] = langs;
+    support.update(key, (n) => n + 1, ifAbsent: () => 1);
+  }
+  if (support.isEmpty) return null;
+  final mode = support.entries.reduce((a, b) => b.value > a.value ? b : a);
+  return (langs: layouts[mode.key]!, support: mode.value);
+}
+
+/// Describes an audio layout for log lines: "1 untagged track", "3 tracks
+/// (eng, fre, ger)".
+String describeAudioLayout(List<String> langs) {
+  final n = langs.length;
+  final noun = n == 1 ? 'track' : 'tracks';
+  if (langs.every(_untagged)) return '$n untagged $noun';
+  return '$n $noun (${langs.map((l) => l.isEmpty ? '?' : l).join(', ')})';
+}
+
+/// Whether a file that matched no regular episode deserves a look at TMDB
+/// season 0. Bonus content shows itself by an odd audio layout or by a
+/// length more than [tolerance] away from the batch median; a file that fits
+/// the season by both measures is more likely a mis-match than a special,
+/// unless no regular episode was claimed at all (an all-bonus batch) or
+/// every regular episode already has a file.
+bool shouldTrySpecials({
+  required bool layoutOutlier,
+  required double? durationSecs,
+  required double? medianSecs,
+  required int claimedRegular,
+  required int totalRegular,
+  double tolerance = 0.25,
+}) {
+  if (layoutOutlier) return true;
+  if (claimedRegular == 0 || claimedRegular >= totalRegular) return true;
+  if (durationSecs == null || medianSecs == null || medianSecs <= 0) {
+    return false;
+  }
+  return (durationSecs - medianSecs).abs() / medianSecs > tolerance;
+}
+
+/// Specials that refer to [season]: "season N" in the title or overview,
+/// or one of that season's episode titles. Bonus content sits on the discs
+/// of its own season, so these are offered before the whole of season 0,
+/// whose 100+ look-alike featurettes invite wrong picks.
+List<SeasonEpisode> seasonSpecials(
+  List<SeasonEpisode> specials,
+  int season,
+  Iterable<String> episodeTitles,
+) {
+  final seasonRe = RegExp('\\bseason\\s*0*$season\\b', caseSensitive: false);
+  final titles = episodeTitles
+      .map((t) => t.trim().toLowerCase())
+      .where((t) => t.length >= 6)
+      .toList();
+  return specials.where((s) {
+    final text = '${s.ep.title}\n${s.ep.overview}'.toLowerCase();
+    return seasonRe.hasMatch(text) || titles.any(text.contains);
+  }).toList();
 }
 
 /// [episodes] minus those in [claimed].

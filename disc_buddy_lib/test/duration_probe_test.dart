@@ -2,6 +2,28 @@ import 'package:disc_buddy/src/naming/duration_probe.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('DurationProbe.parseProbeInfo', () {
+    test('lists audio language tags in stream order, blank when untagged', () {
+      const json = '''
+{"streams":[
+  {"codec_type":"video","tags":{"DURATION":"00:21:56.088000000"}},
+  {"codec_type":"audio","tags":{"language":"eng"}},
+  {"codec_type":"audio","tags":{"DURATION":"00:21:56.000000000"}},
+  {"codec_type":"audio","tags":{"language":"GER"}},
+  {"codec_type":"subtitle","tags":{"language":"dut"}}
+],"format":{"duration":"1316"}}''';
+      final info = DurationProbe.parseProbeInfo(json);
+      expect(info.audioLanguages, ['eng', '', 'ger']);
+      expect(info.seconds, closeTo(1316.088, 0.001));
+    });
+
+    test('garbage yields no duration and no audio streams', () {
+      final info = DurationProbe.parseProbeInfo('nope');
+      expect(info.seconds, isNull);
+      expect(info.audioLanguages, isEmpty);
+    });
+  });
+
   group('DurationProbe.parseProbeJson', () {
     test('prefers the video stream over an inflated container duration', () {
       const json = '''
