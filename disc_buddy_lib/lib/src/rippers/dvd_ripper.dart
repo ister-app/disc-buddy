@@ -548,7 +548,16 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     final titles = <DvdTitle>[];
     for (var i = 1; i <= numVts; i++) {
       final vts = await _scanVts(videoTs, i);
-      titles.addAll(vts);
+      final vobSectors = await _vtsVobSectors(videoTs, i);
+      final readable   = dropTitlesBeyondVob(vts, vobSectors);
+      if (readable.length < vts.length) {
+        final maxLast = vts
+            .expand((t) => t.cells)
+            .fold(0, (m, c) => c.last > m ? c.last : m);
+        _log('   VTS $i: ${vts.length - readable.length} PGC(s) ignored '
+             '(cells reach sector $maxLast, VOB set holds $vobSectors sectors)');
+      }
+      titles.addAll(readable);
     }
 
     if (titles.isEmpty) {
@@ -562,6 +571,38 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     });
 
     return (discTitle: discTitle, titles: _filterDecoyTitles(titles));
+  }
+
+  /// Total size in 2048-byte sectors of the title VOB set
+  /// (`VTS_XX_1.VOB` … `VTS_XX_9.VOB`) of VTS [vtsNum]; 0 when none exist.
+  static Future<int> _vtsVobSectors(String videoTs, int vtsNum) async {
+    final pad = vtsNum.toString().padLeft(2, '0');
+    var bytes = 0;
+    for (var i = 1; i <= 9; i++) {
+      final f = File(p.join(videoTs, 'VTS_${pad}_$i.VOB'));
+      if (!await f.exists()) break;
+      bytes += await f.length();
+    }
+    return bytes ~/ 2048;
+  }
+
+  /// Drops PGCs whose cells point past the end of the VTS title VOB set.
+  ///
+  /// Cell sector addresses in the IFO are relative to the start of
+  /// `VTS_XX_1.VOB`, so any cell with `last >= vobSectors` references data
+  /// that does not exist on the disc.  Copy-protection schemes author such
+  /// "mirror" VTS sections: IFOs that replicate the real episodes' durations,
+  /// stream layout and chapter counts, backed by a VOB of a few hundred
+  /// sectors.  They are unrippable and would otherwise be mistaken for extra
+  /// episode sets by the auto-selector.
+  ///
+  /// Titles without cell data are kept; when [vobSectors] is 0 (no VOB files
+  /// found, e.g. an incomplete image) nothing is filtered.
+  static List<DvdTitle> dropTitlesBeyondVob(List<DvdTitle> titles, int vobSectors) {
+    if (vobSectors <= 0) return titles;
+    return titles
+        .where((t) => !t.cells.any((c) => c.last >= vobSectors))
+        .toList();
   }
 
   /// Removes copy-protection decoy PGCs from [titles].

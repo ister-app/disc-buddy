@@ -38,6 +38,7 @@ List<Duration> ch(List<(int, int)> ms) => [for (final e in ms) d(e.$1, e.$2)];
 void main() {
   _fm20d3Tests();
   _seinfeldS7D4Tests();
+  _mirrorVtsDiscTests();
   group('deduplicateDvdTitles — cell overlap authoritative', () {
     // Real data from DVD_VVE4698_2_SAMANDCAT_D2: 7 episodes stored as 7 PGCs
     // in one VTS, chapters authored at fixed ~5-minute intervals so that four
@@ -306,9 +307,66 @@ void main() {
       expect(deduplicateDvdTitles([]), isEmpty);
     });
 
+    test('VTS without pgcIndex 0 keeps its stand-in primary', () {
+      // Disjoint cells, so no PGC is a camera-angle duplicate of another.
+      final group = [
+        t(pgc: 1, pgcs: 6, dur: d(22, 54), cells: [(first: 0,      last: 467302)]),
+        t(pgc: 2, pgcs: 6, dur: d(21, 59), cells: [(first: 467303, last: 909559)]),
+        t(pgc: 4, pgcs: 6, dur: d(21, 56), cells: [(first: 909560, last: 1356499)]),
+      ];
+      expect(deduplicateDvdTitles(group).map((x) => x.displayKey),
+          ['1.2', '1.3', '1.5']);
+    });
+
     test('single title passes through', () {
       final result = deduplicateDvdTitles([t(pgc: 0, dur: d(90, 0))]);
       expect(result.length, 1);
+    });
+  });
+}
+
+void _mirrorVtsDiscTests() {
+  group('six episodes as PGCs of one VTS next to single-audio extras', () {
+    // Real layout of a 6-episode disc (DVD_VIDEO1 in /dev/sr1) as the ripper
+    // delivers it after DVDRipper.dropTitlesBeyondVob has removed the
+    // copy-protection "mirror" VTS sections 9-17 (IFOs replicating VTS 6 on
+    // top of a 280-sector VOB).  Before that filter existed the selector saw
+    // three ~22-minute VTS groups and suggested 15 titles.  VTS 8 is a
+    // 23m47s featurette with the extras' stream layout (1 audio, 6 subs).
+    DvdTitle ep(int pgc, Duration dur, int first, int last, {int chapters = 4}) =>
+        t(vts: 6, pgc: pgc, pgcs: 6, dur: dur, audio: 5, subs: 24,
+          chapters: [for (var i = 0; i < chapters; i++) dur * i ~/ chapters],
+          cells: [(first: first, last: last)]);
+    DvdTitle extra(int vts, int pgc, int pgcs, Duration dur, int first, int last) =>
+        t(vts: vts, pgc: pgc, pgcs: pgcs, dur: dur, audio: 1, subs: 6,
+          chapters: [Duration.zero, dur ~/ 2],
+          cells: [(first: first, last: last)]);
+
+    final disc = [
+      t(vts: 1, pgc: 0, dur: d(0, 9),  audio: 5, subs: 24, cells: [(first: 0, last: 692)]),
+      t(vts: 2, pgc: 0, dur: d(0, 6),  audio: 1, subs: 24, cells: [(first: 0, last: 779)]),
+      t(vts: 3, pgc: 0, dur: d(0, 6),  audio: 6, subs: 24, cells: [(first: 0, last: 1269)]),
+      extra(4, 0, 5, d(6, 13), 0, 125772),
+      extra(4, 1, 5, d(2, 36), 0, 52314),
+      extra(4, 2, 5, d(1, 6),  52315, 73989),
+      extra(4, 3, 5, d(0, 52), 73990, 90458),
+      extra(4, 4, 5, d(1, 42), 90459, 125916),
+      extra(5, 0, 3, d(11, 0), 0, 217907),
+      extra(5, 1, 3, d(5, 42), 0, 117468),
+      extra(5, 2, 3, d(5, 19), 117469, 218118),
+      ep(0, d(22, 56), 0,       466453),
+      ep(1, d(22, 54), 466454,  933756, chapters: 3),
+      ep(2, d(21, 59), 933757,  1376013),
+      ep(3, d(21, 58), 1376014, 1824466),
+      ep(4, d(21, 56), 1824467, 2271406),
+      ep(5, d(21, 57), 2271407, 2716840),
+      extra(7, 0, 1, d(1, 49),  0, 33446),
+      extra(8, 0, 1, d(23, 47), 0, 463817),
+    ];
+
+    test('autoSelectDvd suggests exactly the six episodes', () {
+      expect(autoSelectDvd(disc).map((x) => x.displayKey),
+          ['6.1', '6.2', '6.3', '6.4', '6.5', '6.6']);
     });
   });
 }

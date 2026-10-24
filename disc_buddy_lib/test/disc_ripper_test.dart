@@ -59,6 +59,40 @@ void main() {
     });
   });
 
+  group('DVDRipper.dropTitlesBeyondVob', () {
+    DvdTitle title(int pgc, List<({int first, int last})> cells) => DvdTitle(
+          vtsNumber: 9, pgcIndex: pgc, pgcCount: 6,
+          duration: const Duration(minutes: 22),
+          audioTracks: const [], subtitleTracks: const [], cells: cells);
+
+    test('cellen binnen de VOB-set blijven staan', () {
+      final titles = [title(0, [(first: 0, last: 466453)])];
+      expect(DVDRipper.dropTitlesBeyondVob(titles, 3013829), titles);
+    });
+
+    test('cel die voorbij het einde van de VOB wijst → PGC gedropt', () {
+      final real  = title(0, [(first: 0, last: 466453)]);
+      final decoy = title(1, [(first: 0, last: 100), (first: 101, last: 2989046)]);
+      expect(DVDRipper.dropTitlesBeyondVob([real, decoy], 280), isEmpty);
+      expect(DVDRipper.dropTitlesBeyondVob([real, decoy], 500000), [real]);
+    });
+
+    test('last == vobSectors telt als voorbij het einde', () {
+      expect(DVDRipper.dropTitlesBeyondVob([title(0, [(first: 0, last: 280)])], 280), isEmpty);
+      expect(DVDRipper.dropTitlesBeyondVob([title(0, [(first: 0, last: 279)])], 280), hasLength(1));
+    });
+
+    test('titels zonder celdata blijven staan', () {
+      final t = title(0, const []);
+      expect(DVDRipper.dropTitlesBeyondVob([t], 280), [t]);
+    });
+
+    test('vobSectors == 0 (geen VOB gevonden) filtert niets', () {
+      final titles = [title(0, [(first: 0, last: 2989046)])];
+      expect(DVDRipper.dropTitlesBeyondVob(titles, 0), titles);
+    });
+  });
+
   group('DVDRipper._scanPgcCells stinger-cell filter', () {
     // Bouwt een synthetisch PGC-blok: header + PGMAP + C_PBIT.
     // [cells] is een lijst (secs, first, last); elk programma wijst naar

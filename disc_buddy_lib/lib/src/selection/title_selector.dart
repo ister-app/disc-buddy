@@ -525,8 +525,10 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
   return seen.expand((g) {
     g.sort((a, b) => a.pgcIndex.compareTo(b.pgcIndex));
     final primary = g.firstWhere((t) => t.pgcIndex == 0, orElse: () => g.first);
+    // The primary always survives — also when the VTS has no pgcIndex 0 and
+    // the first PGC stands in for it (it is trivially a "duplicate" of itself).
     return g.where(
-      (t) => t.pgcIndex == 0 || !isCameraAngleDuplicate(primary, t),
+      (t) => identical(t, primary) || !isCameraAngleDuplicate(primary, t),
     );
   }).toList();
 }
