@@ -95,9 +95,7 @@ Future<bool> processDirectory(
 
   // --- Subtitle extraction (once for all files) ---
   final canExtract = opts.canOcrSubtitles;
-  final extractChoice = canExtract && !opts.force
-      ? await promptExtractSubtitles(opts, prompter, onLog: onLog)
-      : noExtract;
+  final extractChoice = await resolveExtractChoice(opts, prompter, onLog: onLog);
 
   SubtitleExtractor? extractor;
   if ((canExtract && extractChoice.doExtract) ||
@@ -256,9 +254,7 @@ Future<void> processMkv(
 
   // --- Subtitle extraction prompt ---
   final canExtract = opts.canOcrSubtitles;
-  final extractChoice = canExtract && !opts.force
-      ? await promptExtractSubtitles(opts, prompter, onLog: onLog)
-      : noExtract;
+  final extractChoice = await resolveExtractChoice(opts, prompter, onLog: onLog);
 
   // Ask naming hints before any processing starts.
   final namingHints =

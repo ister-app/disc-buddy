@@ -20,9 +20,19 @@ class _RipAborted implements Exception {
   const _RipAborted([this.message]);
 }
 
+/// Set when a title or track did not produce its file; turns into exit
+/// code 1 once the run is over (a rip keeps going past a failed title).
+bool _ripFailed = false;
+
 /// ffmpeg process of the rip in progress, so Ctrl+C can stop it gracefully.
 Process? _activeFfmpeg;
-void _trackFfmpeg(Process p) => _activeFfmpeg = p;
+bool _interrupted = false;
+void _trackFfmpeg(Process p) {
+  _activeFfmpeg = p;
+  // After Ctrl+C the ripper moves on to the next title while the exit is
+  // pending; stop that one too instead of ripping for another few seconds.
+  if (_interrupted) p.kill(ProcessSignal.sigterm);
+}
 
 /// On Ctrl+C: SIGTERM ffmpeg so the ripper's `.part` cleanup runs, then exit.
 /// Watching SIGINT disables the VM's default handler, hence the explicit exit.
@@ -31,6 +41,7 @@ void _trackFfmpeg(Process p) => _activeFfmpeg = p;
 StreamSubscription<ProcessSignal> _installSigintHandler() =>
     ProcessSignal.sigint.watch().listen((_) {
       stderr.writeln('\nInterrupted — stopping ffmpeg and cleaning up...');
+      _interrupted = true;
       _activeFfmpeg?.kill(ProcessSignal.sigterm);
       Future.delayed(const Duration(seconds: 3), () => exit(130));
     });
@@ -42,6 +53,7 @@ Future<void> main(List<String> arguments) async {
   } finally {
     await sigint.cancel();
   }
+  if (_ripFailed) exitCode = 1;
 }
 
 Future<void> _run(List<String> arguments) async {
@@ -97,7 +109,7 @@ Future<void> _run(List<String> arguments) async {
   try {
   if (cli.isIso) {
     // ISO: one mount cycle covers type detection + scan + rip.
-    await withMountedDisc<void>(device, (mountPath) async {
+    final mounted = await withMountedDisc<bool>(device, (mountPath) async {
       final discType = DiscTypeDetector.detectFromMountPoint(mountPath);
       stdout.writeln('Disc type: ${_discTypeLabel(discType)}');
       stdout.writeln('ISO:       $device');
@@ -125,7 +137,10 @@ Future<void> _run(List<String> arguments) async {
         case DiscType.unknown:
           throw const _RipAborted('Unknown disc type — cannot rip.');
       }
+      return true;
     }, errorContext: 'disc');
+    // null: the image could not be mounted (already reported).
+    if (mounted == null) throw const _RipAborted();
     return;
   }
 
@@ -171,8 +186,7 @@ Future<void> _run(List<String> arguments) async {
             errorContext: 'Blu-ray',
           );
         case DiscType.unknown:
-          stderr.writeln('Unknown disc type — cannot rip.');
-          continueLoop = false;
+          throw const _RipAborted('Unknown disc type — cannot rip.');
       }
     } on DiscChangedException {
       // The exception unwound through withMountedDisc, so the stale mount is
@@ -320,9 +334,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     final resolvedBatchAssign =
         await promptBatchAssign(opts, autoNameCount, Menu.prompter);
 
-    final extractChoice = opts.canOcrSubtitles && !opts.force
-        ? await promptExtractSubtitles(opts, Menu.prompter)
-        : noExtract;
+    final extractChoice = await resolveExtractChoice(opts, Menu.prompter);
 
     // Ask naming hints upfront so no questions interrupt the rip.
     final namingHints = namePrefs.containsValue('?') && !opts.force
@@ -333,6 +345,21 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     if (scanFp != null) await verifyDiscUnchanged(opts.device!, scanFp);
 
     await ripper.rip(discTitle, selected, mountPath: mp);
+
+    // A failed title is only a log line inside rip(); what counts is whether
+    // its file is there (a title skipped because it already exists has one).
+    final failed = [
+      for (final t in selected)
+        if (!File(videoTitleOutputPath(opts.outputDir, discTitle, t))
+            .existsSync())
+          t.displayKey,
+    ];
+    if (failed.isNotEmpty) {
+      stderr.writeln('');
+      stderr.writeln('Error: ${failed.length} of ${selected.length} title(s) '
+          'were not ripped: ${failed.join(', ')}');
+      _ripFailed = true;
+    }
 
     // Damaged-disc summary: zero-filled sectors or a too-short output.
     final dvdRipper = ripper is DVDRipper ? ripper as DVDRipper : null;
@@ -363,6 +390,9 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
         selected.map((t) => t.filename).toList(), namePrefs);
 
     if (!isIso) {
+      // An unattended loop must not eject a disc that did not rip and carry
+      // on as if nothing happened: leave it in the drive and stop.
+      if (failed.isNotEmpty && opts.loop) return false;
       final action = await _promptEject(opts);
       if (action != _EjectAction.none) await Process.run('eject', [opts.device!]);
       return action == _EjectAction.ejectAndContinue;
@@ -373,8 +403,11 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
   if (mountPath != null) {
     return await doWork(mountPath);
   } else {
-    return await withMountedDisc<bool>(opts.device!, (mp) => doWork(mp),
-        errorContext: errorContext) ?? false;
+    final result = await withMountedDisc<bool>(opts.device!, (mp) => doWork(mp),
+        errorContext: errorContext);
+    // null: the disc could not be mounted (already reported).
+    if (result == null) throw const _RipAborted();
+    return result;
   }
 }
 
@@ -417,6 +450,22 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
   }
 
   await ripper.rip(meta, selected);
+
+  final failed = [
+    for (final nr in selected)
+      if (nr >= 1 &&
+          nr <= meta.tracks.length &&
+          !File(audioTrackOutputPath(opts.outputDir, meta, meta.tracks[nr - 1]))
+              .existsSync())
+        nr,
+  ];
+  if (failed.isNotEmpty) {
+    stderr.writeln('');
+    stderr.writeln('Error: ${failed.length} of ${selected.length} track(s) '
+        'were not ripped: ${failed.join(', ')}');
+    _ripFailed = true;
+    if (opts.loop) return false; // keep the disc in the drive, stop the loop
+  }
 
   final action = await _promptEject(opts);
   if (action != _EjectAction.none) await Process.run('eject', [opts.device!]);

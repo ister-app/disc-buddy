@@ -66,7 +66,9 @@ ArgParser buildArgParser() => ArgParser()
             'name both stories separately (cartoons with two 11-minute segments per file). '
             'The halves replace the original; a single long story keeps the file whole.')
   ..addFlag('force',        abbr: 'f', negatable: false,
-      help: 'Overwrite existing files; skip language prompts')
+      help: 'Overwrite existing files and ask nothing: titles are '
+            'auto-selected, names stay default unless --auto-name is given, '
+            'subtitles are extracted only with --subtitle-langs')
   ..addFlag('auto-name',    abbr: 'a', negatable: false,
       help: 'Automatically use LLM auto-naming for all titles or files (skips rename prompt)')
   ..addFlag('batch-assign', defaultsTo: null,
@@ -74,7 +76,8 @@ ArgParser buildArgParser() => ArgParser()
             '(better accuracy with large models; ask if omitted)')
   ..addOption('subtitle-langs',
       help: 'Comma-separated subtitle languages to extract (e.g. en,nl). '
-            'Omit to be asked interactively; use "all" or empty to extract everything.')
+            'Omit to be asked interactively; use "all" or empty to extract everything. '
+            'With --force this is what turns extraction on.')
   ..addFlag('lpcm-flac', negatable: false,
       help: 'Re-encode Blu-ray LPCM audio to FLAC (smaller files, slower). '
             'Default keeps LPCM as raw PCM, which is much faster.')

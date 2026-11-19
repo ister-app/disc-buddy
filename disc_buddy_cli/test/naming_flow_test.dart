@@ -186,4 +186,36 @@ void main() {
           extract(true, null));
     });
   });
+
+  group('resolveExtractChoice', () {
+    test('--force zonder talen → niets extraheren, niets gevraagd', () async {
+      final p = FakePrompter();
+      final c = await resolveExtractChoice(opts(force: true), p);
+      expect(c.doExtract, isFalse);
+      expect(p.asked, isEmpty);
+    });
+
+    test('--force met --subtitle-langs → extraheren zonder te vragen',
+        () async {
+      final p = FakePrompter();
+      final c = await resolveExtractChoice(
+          opts(force: true, subtitleLangs: {'en', 'nl'}), p);
+      expect(c.doExtract, isTrue);
+      expect(c.langs, {'en', 'nl'});
+      expect(p.asked, isEmpty);
+
+      final all =
+          await resolveExtractChoice(opts(force: true, subtitleLangs: {}), p);
+      expect(all.doExtract, isTrue);
+      expect(all.langs, isNull);
+    });
+
+    test('interactief → gewoon de vraag', () async {
+      final p = FakePrompter([false]);
+      final c =
+          await resolveExtractChoice(opts(subtitleLangs: {'en'}), p);
+      expect(c.doExtract, isFalse);
+      expect(p.asked, hasLength(1));
+    });
+  });
 }

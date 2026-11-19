@@ -90,7 +90,7 @@ Usage: disc-buddy [options]
 -o, --output    Output directory                  [env: OUTDIR, default: ./output]
     --ffmpeg    Path to ffmpeg binary             [default: ffmpeg]
     --ffprobe   Path to ffprobe binary            [default: ffprobe]
--f, --force     Overwrite existing files; skip language prompts
+-f, --force     Overwrite existing files and ask nothing (see --help)
 -h, --help      Show help
 ```
 

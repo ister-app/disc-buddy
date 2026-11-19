@@ -52,6 +52,27 @@ Future<ExtractChoice> promptExtractSubtitles(
   return (doExtract: true, langs: langs.isEmpty ? null : langs);
 }
 
+/// Decides whether (and in which languages) to extract subtitles.
+///
+/// Interactive runs are asked ([promptExtractSubtitles]). Under `--force`
+/// nobody can be asked, so a language list given with `--subtitle-langs`
+/// (or the config file) is what requests extraction there — the same way
+/// `--auto-name` requests naming; without one nothing is extracted.
+Future<ExtractChoice> resolveExtractChoice(
+  RipOptions opts,
+  Prompter prompter, {
+  LogCallback? onLog,
+}) async {
+  if (!opts.canOcrSubtitles) return noExtract;
+  if (!opts.force) return promptExtractSubtitles(opts, prompter, onLog: onLog);
+  final langs = opts.subtitleLangs;
+  if (langs == null) return noExtract;
+  emitLog(onLog, 'Subtitles: extracting '
+      '${langs.isEmpty ? 'all languages' : langs.join(', ')} '
+      '(from --subtitle-langs)');
+  return (doExtract: true, langs: langs.isEmpty ? null : langs);
+}
+
 /// Asks the user for title/season hints when auto-naming is triggered,
 /// unless the hints were already provided via CLI args.
 ///
