@@ -4,12 +4,7 @@ import 'package:disc_buddy/disc_buddy.dart';
 import 'package:path/path.dart' as p;
 
 import 'naming_flow.dart';
-import 'rename.dart';
 import 'tool_builders.dart';
-
-const videoExtensions = {
-  '.mkv', '.mp4', '.avi', '.m4v', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg',
-};
 
 /// Video files directly inside [dir], sorted by name.
 List<File> listVideoFiles(Directory dir) => dir

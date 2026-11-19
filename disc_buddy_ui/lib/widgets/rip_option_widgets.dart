@@ -11,6 +11,11 @@ class RipOptionsRow extends StatelessWidget {
   final bool batchAssign;
   final ValueChanged<bool> onBatchAssignChanged;
 
+  /// "Two stories per file" (directory mode only): shown next to the
+  /// auto-name options when [onSplitStoriesChanged] is given.
+  final bool splitStories;
+  final ValueChanged<bool>? onSplitStoriesChanged;
+
   const RipOptionsRow({
     super.key,
     required this.nameController,
@@ -19,6 +24,8 @@ class RipOptionsRow extends StatelessWidget {
     required this.onAutoNameChanged,
     required this.batchAssign,
     required this.onBatchAssignChanged,
+    this.splitStories = false,
+    this.onSplitStoriesChanged,
   });
 
   @override
@@ -50,6 +57,23 @@ class RipOptionsRow extends StatelessWidget {
                   onTap: () => onBatchAssignChanged(!batchAssign),
                   child: const Text('Batch'),
                 ),
+                if (onSplitStoriesChanged != null) ...[
+                  const SizedBox(width: 16),
+                  Checkbox(
+                    value: splitStories,
+                    onChanged: (v) => onSplitStoriesChanged!(v ?? false),
+                  ),
+                  const SizedBox(width: 4),
+                  Tooltip(
+                    message: 'Each file holds two stories that TMDB lists as '
+                        'separate episodes: cut it at the black frame nearest '
+                        'its middle and name both halves.',
+                    child: GestureDetector(
+                      onTap: () => onSplitStoriesChanged!(!splitStories),
+                      child: const Text('Two stories per file'),
+                    ),
+                  ),
+                ],
               ],
             ],
           ),

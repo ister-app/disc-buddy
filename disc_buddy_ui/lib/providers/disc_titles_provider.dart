@@ -162,15 +162,11 @@ VideoDiscContent _buildBlurayContent(String discTitle, List<BlurayTitle> raw,
   );
 }
 
-const _videoExtensions = {
-  '.mkv', '.mp4', '.avi', '.m4v', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg',
-};
-
 DiscContent? _loadDirectory(String dirPath) {
   final files = Directory(dirPath)
       .listSync()
       .whereType<File>()
-      .where((f) => _videoExtensions.contains(p.extension(f.path).toLowerCase()))
+      .where((f) => videoExtensions.contains(p.extension(f.path).toLowerCase()))
       .toList()
     ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
   if (files.isEmpty) return null;

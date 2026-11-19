@@ -29,6 +29,7 @@ class _DirPanelState extends ConsumerState<DirPanel> {
   final _seasonController = TextEditingController();
   late bool _autoName;
   late bool _batchAssign;
+  bool _splitStories = false;
   final Map<String, String?> _customNames = {};
 
   @override
@@ -66,6 +67,8 @@ class _DirPanelState extends ConsumerState<DirPanel> {
           onAutoNameChanged: (v) => setState(() => _autoName = v),
           batchAssign: _batchAssign,
           onBatchAssignChanged: (v) => setState(() => _batchAssign = v),
+          splitStories: _splitStories,
+          onSplitStoriesChanged: (v) => setState(() => _splitStories = v),
         ),
         const Divider(height: 1),
         const OutputDirRow(),
@@ -102,6 +105,7 @@ class _DirPanelState extends ConsumerState<DirPanel> {
           customNames: _customNames,
           autoName: _autoName,
           batchAssign: _batchAssign,
+          splitStories: _splitStories,
           nameController: _nameController,
           seasonController: _seasonController,
           onSelectAll: () => setState(() =>
@@ -314,6 +318,7 @@ class _DirFooter extends ConsumerStatefulWidget {
   final Map<String, String?> customNames;
   final bool autoName;
   final bool batchAssign;
+  final bool splitStories;
   final TextEditingController nameController;
   final TextEditingController seasonController;
   final VoidCallback onSelectAll;
@@ -326,6 +331,7 @@ class _DirFooter extends ConsumerStatefulWidget {
     required this.customNames,
     required this.autoName,
     required this.batchAssign,
+    required this.splitStories,
     required this.nameController,
     required this.seasonController,
     required this.onSelectAll,
@@ -415,6 +421,7 @@ class _DirFooterState extends ConsumerState<_DirFooter> {
       fileNames: fileNames,
       autoName: widget.autoName,
       batchAssign: widget.batchAssign,
+      splitStories: widget.autoName && widget.splitStories,
       nameHint: name,
       seasons: seasons,
     );

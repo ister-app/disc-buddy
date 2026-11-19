@@ -574,6 +574,7 @@ class RipStateNotifier extends Notifier<RipState> {
     Map<String, String> fileNames = const {},
     bool autoName = false,
     bool batchAssign = false,
+    bool splitStories = false,
     String? nameHint,
     List<int> seasons = const [],
   }) async {
@@ -598,6 +599,7 @@ class RipStateNotifier extends Notifier<RipState> {
         subtitleLangs: subtitleLangs,
         autoName: autoName,
         batchAssign: batchAssign,
+        splitStories: splitStories,
         nameHint: nameHint,
         seasons: seasons,
         stems: fileNames,
@@ -618,6 +620,11 @@ class RipStateNotifier extends Notifier<RipState> {
   /// falls back to as a title hint (defaults to each file's own stem).
   /// Subtitles are extracted first so the namer reuses them and the rename
   /// takes the SRT sidecars along. Returns the final paths in [files] order.
+  ///
+  /// With [splitStories] every file to auto-name is first cut in two at the
+  /// black frame nearest its middle (`StorySplitter`) and the halves are
+  /// named separately; `applySplitNames` then decides whether the halves
+  /// replace the file or it stays whole — the CLI's `--split-stories`.
   Future<List<String>> _postProcess({
     required List<String> files,
     required LogCallback log,
@@ -625,6 +632,7 @@ class RipStateNotifier extends Notifier<RipState> {
     required String subtitleLangs,
     required bool autoName,
     bool batchAssign = false,
+    bool splitStories = false,
     String? nameHint,
     List<int> seasons = const [],
     Map<String, String> stems = const {},
@@ -681,7 +689,22 @@ class RipStateNotifier extends Notifier<RipState> {
         ? files.where((f) => !resolved.containsKey(f)).toList()
         : const <String>[];
 
+    // source path → its two halves
+    final splits = <String, StorySplit>{};
+    // path of a half → the stem the namer gave it
+    final halfStems = <String, String?>{};
+
     if (wantExtract || toName.isNotEmpty) {
+      if (splitStories) {
+        final splitter = StorySplitter(
+            ffmpeg: options.ffmpeg, ffprobe: options.ffprobe, onLog: log);
+        for (final path in toName) {
+          log('Splitting stories: ${p.basename(path)}');
+          final split = await splitter.split(File(path));
+          if (split != null) splits[path] = split;
+        }
+      }
+
       final extractor = SubtitleExtractor(
         ffmpeg: options.ffmpeg,
         ffprobe: options.ffprobe,
@@ -730,20 +753,33 @@ class RipStateNotifier extends Notifier<RipState> {
           final results = await namer.nameFilesBatch(
             [
               for (final path in toName)
-                (
-                  file: File(path),
-                  discName: nameHint ??
-                      discName ??
-                      p.basenameWithoutExtension(path),
-                  srts: extractor.findExistingSrts(File(path)),
-                ),
+                for (final f in splits[path] == null
+                    ? [File(path)]
+                    : [splits[path]!.first, splits[path]!.second])
+                  (
+                    file: f,
+                    discName: nameHint ??
+                        discName ??
+                        p.basenameWithoutExtension(path),
+                    srts: extractor.findExistingSrts(f),
+                  ),
             ],
             titleHint: nameHint,
             seasonHint: seasons.isNotEmpty ? seasons : null,
+            splitFrom: {
+              for (final split in splits.values) ...{
+                split.first: split.source,
+                split.second: split.source,
+              },
+            },
           );
           for (final e in results.entries) {
             final stem = e.value;
-            if (stem != null) resolved[e.key.path] = stem;
+            if (!toName.contains(e.key.path)) {
+              halfStems[e.key.path] = stem; // one half of a split file
+            } else if (stem != null) {
+              resolved[e.key.path] = stem;
+            }
           }
         } catch (e) {
           log('Auto-naming failed: $e', isError: true);
@@ -753,8 +789,33 @@ class RipStateNotifier extends Notifier<RipState> {
       }
     }
 
+    // Park every split source first: a story's new name may be the current
+    // name of another source that is still waiting its turn.
+    for (final path in splits.keys.toList()) {
+      splits[path] = await parkSource(splits[path]!);
+    }
+    final unsettled = <String>[];
+
     final out = <String>[];
     for (final path in files) {
+      final split = splits[path];
+      if (split != null) {
+        final first = halfStems[split.first.path];
+        final second = halfStems[split.second.path];
+        final settled = await applySplitNames(split, first, second,
+            originalStem: p.basenameWithoutExtension(path), onLog: log);
+        if (!settled) {
+          unsettled.add(path);
+          out.add(path);
+        } else {
+          final ext = p.extension(path);
+          out.addAll({
+            p.join(p.dirname(path), '$first$ext'),
+            p.join(p.dirname(path), '$second$ext'),
+          });
+        }
+        continue;
+      }
       final stem = resolved[path];
       if (stem != null && replaceExisting.contains(path)) {
         final target =
@@ -771,6 +832,12 @@ class RipStateNotifier extends Notifier<RipState> {
       out.add(renamed
           ? p.join(p.dirname(path), '$stem${p.extension(path)}')
           : path);
+    }
+    // Only now give unsettled sources their own name back, so it could not
+    // block a story that wanted it.
+    for (final path in unsettled) {
+      await unparkSource(splits[path]!,
+          originalStem: p.basenameWithoutExtension(path), onLog: log);
     }
     return out;
   }
