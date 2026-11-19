@@ -183,7 +183,8 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
 
     final titles = <BlurayTitle>[];
     for (var i = 0; i < mplsFiles.length; i++) {
-      final title = await _parseMpls(mplsFiles[i], bdmvPath, i + 1);
+      final title =
+          await _parseMpls(mplsFiles[i], bdmvPath, i + 1, onLog: onLog);
       if (title != null) titles.add(title);
     }
 
@@ -236,12 +237,14 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   static Future<BlurayTitle?> _parseMpls(
     File mplsFile,
     String bdmvPath,
-    int index,
-  ) async {
+    int index, {
+    LogCallback? onLog,
+  }) async {
     final Uint8List data;
     try {
       data = await mplsFile.readAsBytes();
-    } catch (_) {
+    } catch (e) {
+      emitLog(onLog, '   Could not read ${mplsFile.path}: $e', isError: true);
       return null;
     }
 

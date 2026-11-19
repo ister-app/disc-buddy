@@ -665,7 +665,10 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     try {
       data = await ifoFile.readAsBytes();
       bd   = ByteData.sublistView(data);
-    } catch (_) {
+    } catch (e) {
+      // A damaged disc often fails right here; without this line the scan
+      // just reports fewer (or no) titles.
+      _log('   Could not read ${ifoFile.path}: $e', isError: true);
       return [];
     }
 

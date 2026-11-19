@@ -196,7 +196,9 @@ class SubtitleExtractor {
     } on TimeoutException {
       _log('timed out.', isError: true);
       return false;
-    } catch (_) {
+    } catch (e) {
+      // Typically a ProcessException: mkvextract or subtile-ocr is missing.
+      _log('failed: $e', isError: true);
       return false;
     } finally {
       await tmpDir.delete(recursive: true).catchError((_) => Directory(''));
