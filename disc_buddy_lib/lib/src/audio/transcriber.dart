@@ -16,6 +16,12 @@ import '../utils/languages.dart' show convertIso2to1;
 class Transcriber {
   static const _windowLen = 180.0; // seconds per sampled window
   static const _introSkip = 90.0;  // skip cold-open/theme at the start
+  /// Intro skip for a title of at most [_shortTitle] seconds — one story of
+  /// a split cartoon episode has no theme to skip, and its setup (the part
+  /// TMDB's overview describes) sits in the first minutes.
+  static const _shortIntroSkip = 30.0;
+  static const _shortTitle = 900.0;
+  static const _minWindowLen = 60.0;
   static const _minTranscriptChars = 200;
 
   // Whisper non-speech markers to strip from transcripts.
@@ -332,7 +338,10 @@ class Transcriber {
   /// - Unknown duration → one safe window of 5 minutes from the start.
   /// - Short title → one window covering most of it (skipping the intro).
   /// - Otherwise three windows at ~10% / 50% / 85%, [_windowLen] each, the
-  ///   first at least [_introSkip] in, the last clamped to the end.
+  ///   first at least [_introSkip] in (exactly [_shortIntroSkip] up to
+  ///   [_shortTitle]), the last clamped to the end. A window that would
+  ///   overlap the previous one starts where that one ends instead, and is
+  ///   dropped only when less than [_minWindowLen] remains.
   static List<({double start, double len})> windowOffsets(
       double? durationSecs) {
     if (durationSecs == null || durationSecs <= 0) {
@@ -344,7 +353,10 @@ class Transcriber {
       return [(start: start, len: dur - start)];
     }
     final offsets = [
-      _introSkip > dur * 0.10 ? _introSkip : dur * 0.10,
+      if (dur <= _shortTitle)
+        _shortIntroSkip
+      else
+        _introSkip > dur * 0.10 ? _introSkip : dur * 0.10,
       dur * 0.50,
       dur * 0.85,
     ];
@@ -353,12 +365,14 @@ class Transcriber {
       var start = rawStart;
       if (start + _windowLen > dur) start = dur - _windowLen;
       if (start < 0) start = 0;
-      // Skip windows that overlap the previous one.
-      if (windows.isNotEmpty &&
-          start < windows.last.start + windows.last.len) {
-        continue;
+      // Start an overlapping window where the previous one ends.
+      if (windows.isNotEmpty) {
+        final prevEnd = windows.last.start + windows.last.len;
+        if (start < prevEnd) start = prevEnd;
       }
-      windows.add((start: start, len: _windowLen));
+      final len = dur - start < _windowLen ? dur - start : _windowLen;
+      if (len < _minWindowLen) continue;
+      windows.add((start: start, len: len));
     }
     return windows;
   }

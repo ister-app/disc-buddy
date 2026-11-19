@@ -123,10 +123,14 @@ class AutoNamer {
     );
   }
 
+  /// Names [items] together. [splitFrom] maps each half written by
+  /// `StorySplitter` to its source file; the two halves of one source may
+  /// then both claim the same episode (one story filling the whole file).
   Future<Map<File, String?>> nameFilesBatch(
     List<NamingItem> items, {
     String? titleHint,
     List<int>? seasonHint,
+    Map<File, File> splitFrom = const {},
   }) async {
     if (items.isEmpty) return {};
 
@@ -216,6 +220,7 @@ class AutoNamer {
             fps: fps,
             seriesId: winner.id,
             subLang: subLang,
+            siblingOf: _siblings(items, splitFrom),
           );
 
     final results = <File, String?>{};
@@ -227,6 +232,29 @@ class AutoNamer {
       }
     }
     return results;
+  }
+
+  /// Item index → index of the other half of the same split source.
+  static Map<int, int> _siblings(
+    List<NamingItem> items,
+    Map<File, File> splitFrom,
+  ) {
+    // By path: File has identity equality.
+    final sourceOf = {
+      for (final e in splitFrom.entries) e.key.path: e.value.path,
+    };
+    final bySource = <String, List<int>>{};
+    for (var i = 0; i < items.length; i++) {
+      final source = sourceOf[items[i].file.path];
+      if (source != null) (bySource[source] ??= []).add(i);
+    }
+    return {
+      for (final halves in bySource.values)
+        if (halves.length == 2) ...{
+          halves[0]: halves[1],
+          halves[1]: halves[0],
+        },
+    };
   }
 
   // ---------------------------------------------------------------------------

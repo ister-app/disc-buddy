@@ -94,6 +94,12 @@ Usage: disc-buddy [options]
 -h, --help      Show help
 ```
 
+`disc-buddy --help` lists everything else, including auto-naming (`-a`, `--name`, `--season`)
+and `--split-stories`: for a directory of cartoon episodes that each hold two ~11-minute stories
+(TMDB lists the stories separately), every file is cut at the black frame nearest its middle and
+both stories are named on their own; the halves replace the original file, and a file that turns
+out to hold one long story keeps its full length.
+
 When `--device` is omitted, an interactive drive selection menu is shown. The menu updates in real time as discs are inserted or removed.
 
 ---

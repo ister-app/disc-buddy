@@ -3,6 +3,7 @@ import 'package:disc_buddy/disc_buddy.dart';
 /// Factories for the subtitle/naming tool chain, so flows can be tested with
 /// fakes by passing a different [ExtractorFactory]/[AutoNamerFactory].
 typedef ExtractorFactory = SubtitleExtractor Function(RipOptions opts);
+typedef SplitterFactory = StorySplitter Function(RipOptions opts, LogCallback? onLog);
 typedef AutoNamerFactory = AutoNamer Function(
   RipOptions opts,
   SubtitleExtractor extractor, {
@@ -17,6 +18,9 @@ SubtitleExtractor buildExtractor(RipOptions opts) => SubtitleExtractor(
       mkvextract: opts.mkvextract ?? 'mkvextract',
       subtileOcr: opts.subtileOcr ?? 'subtile-ocr',
     );
+
+StorySplitter buildSplitter(RipOptions opts, LogCallback? onLog) =>
+    StorySplitter(ffmpeg: opts.ffmpeg, ffprobe: opts.ffprobe, onLog: onLog);
 
 AutoNamer buildAutoNamer(
   RipOptions opts,

@@ -174,6 +174,10 @@ class EpisodeMatcher {
   // ---------------------------------------------------------------------------
 
   /// Per-file matching fallback: matches each subtitle independently.
+  ///
+  /// [siblingOf] pairs the two halves of a split file (see `StorySplitter`):
+  /// they may claim the same episode — one story that fills the whole
+  /// file — without that counting as a conflict.
   Future<Map<int, EpisodePick?>> matchEpisodesPerFile({
     required List<SeasonEpisode> episodes,
     required List<NamingItem> items,
@@ -181,6 +185,7 @@ class EpisodeMatcher {
     required Map<int, Fingerprint> fps,
     required int seriesId,
     required String subLang,
+    Map<int, int> siblingOf = const {},
   }) async {
     final picks = <int, EpisodePick?>{};
     final usedStems = <String, int>{};
@@ -279,6 +284,14 @@ class EpisodeMatcher {
       pick = refined;
 
       final dup = usedStems[pick.stem];
+      if (dup != null && siblingOf[i] == dup) {
+        log(
+          '   ${items[i].file.path}: same episode as its other half '
+          '${items[dup].file.path} — one story spanning the whole file.',
+        );
+        picks[i] = pick;
+        continue;
+      }
       if (dup != null) {
         pick = await handleStemConflict(
           i: i,
@@ -316,6 +329,15 @@ class EpisodeMatcher {
       picks[i] = pick;
     }
 
+    await siblingNeighbourPass(
+      siblingOf: siblingOf,
+      picks: picks,
+      usedStems: usedStems,
+      episodes: episodes,
+      items: items,
+      subs: subs,
+      fps: fps,
+    );
     applyGapFills(
       picks: picks,
       eligible: {
@@ -341,6 +363,55 @@ class EpisodeMatcher {
       loadSpecials: loadSpecials,
     );
     return picks;
+  }
+
+  /// A split half the LLM could not place, whose other half it did place:
+  /// stories sharing a file are often neighbours in TMDB's order, so the
+  /// episodes just before and after the placed half are offered on their
+  /// own, with a prompt that wants concrete evidence and may answer
+  /// "neither". Among a whole series a garbled summary loses to a word
+  /// overlap; against two candidates it rarely does.
+  Future<void> siblingNeighbourPass({
+    required Map<int, int> siblingOf,
+    required Map<int, EpisodePick?> picks,
+    required Map<String, int> usedStems,
+    required List<SeasonEpisode> episodes,
+    required List<NamingItem> items,
+    required Map<int, SubtitleText> subs,
+    required Map<int, Fingerprint> fps,
+  }) async {
+    for (final i in siblingOf.keys.toList()..sort()) {
+      if (picks[i] != null) continue;
+      final known = picks[siblingOf[i]!];
+      final sub = subs[i];
+      if (known == null || sub == null) continue;
+      final neighbours = [
+        for (final e in episodes)
+          if (e.season == known.season &&
+              (e.ep.number == known.ep - 1 ||
+                  e.ep.number == known.epEnd + 1) &&
+              !usedStems.containsKey(episodeStem(e.season, e.ep.number)))
+            e,
+      ];
+      if (neighbours.isEmpty) continue;
+      log(
+        '   ${items[i].file.path}: unplaced, its other half is ${known.stem} '
+        '— offering only that episode\'s neighbours.',
+      );
+      final pick = await llmEpisodeMatch(
+        fp: fps[i] ?? Fingerprint.empty,
+        episodes: neighbours,
+        subtitleText: sub.text,
+        neighbours: true,
+      );
+      if (pick == null) continue;
+      usedStems[pick.stem] = i;
+      picks[i] = pick;
+      log(
+        '   ${items[i].file.path} → ${pick.stem} "${pick.title}" '
+        '(neighbour of its other half).',
+      );
+    }
   }
 
   /// With exactly one regular episode still open, a fitting file the LLM
@@ -933,6 +1004,7 @@ class EpisodeMatcher {
     required List<SeasonEpisode> episodes,
     required String subtitleText,
     bool bonus = false,
+    bool neighbours = false,
   }) async {
     if (episodes.isEmpty) return null;
 
@@ -961,6 +1033,7 @@ class EpisodeMatcher {
           'content': episodeMatchSystemPrompt(
             hasSummary: hasSummary,
             bonus: bonus,
+            neighbours: neighbours,
           ),
         },
         {'role': 'user', 'content': userContent},

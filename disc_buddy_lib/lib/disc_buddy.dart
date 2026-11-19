@@ -33,5 +33,6 @@ export 'src/subtitles/cc_extractor.dart' show CcExtractor;
 export 'src/audio/transcriber.dart' show Transcriber;
 export 'src/selection/title_selector.dart';
 export 'src/naming/auto_namer.dart' show AutoNamer;
+export 'src/naming/story_splitter.dart' show StorySplitter, StorySplit;
 export 'src/naming/tmdb_client.dart' show TmdbClient;
 export 'src/naming/llm_client.dart' show LlmClient;

@@ -61,6 +61,10 @@ ArgParser buildArgParser() => ArgParser()
   ..addOption('llm-model',    help: 'LLM model name (e.g. gpt-4o, llama3)')
   ..addOption('name',    abbr: 'n', help: 'Film or series title hint for auto-naming')
   ..addOption('season',             help: 'Season number hint for auto-naming (implies series)')
+  ..addFlag('split-stories', negatable: false,
+      help: 'Directory mode: split each file at the black frame nearest its middle and '
+            'name both stories separately (cartoons with two 11-minute segments per file). '
+            'The halves replace the original; a single long story keeps the file whole.')
   ..addFlag('force',        abbr: 'f', negatable: false,
       help: 'Overwrite existing files; skip language prompts')
   ..addFlag('auto-name',    abbr: 'a', negatable: false,
@@ -228,6 +232,7 @@ Future<CliOptions> resolveCliOptions(
     dvdSinglePass:  args.wasParsed('dvd-single-pass')
         ? args['dvd-single-pass'] as bool
         : (config['dvd-single-pass'] as bool?) ?? false,
+    splitStories:   args['split-stories'] as bool,
   );
 
   return CliOptions(

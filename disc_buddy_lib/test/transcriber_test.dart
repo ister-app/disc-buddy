@@ -61,6 +61,15 @@ void main() {
       expect(windows.single.len, 200.0);
     });
 
+    test('one story of a split episode (~12 min) keeps three windows', () {
+      final windows = Transcriber.windowOffsets(708.0);
+      expect(windows, [
+        (start: 30.0, len: 180.0),
+        (start: 354.0, len: 180.0),
+        (start: 534.0, len: 174.0),
+      ]);
+    });
+
     test('long title gets three non-overlapping windows within bounds', () {
       const duration = 2700.0; // 45 min
       final windows = Transcriber.windowOffsets(duration);

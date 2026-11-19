@@ -599,4 +599,71 @@ void main() {
       (epStart: 13, epEnd: 13, playAll: false),
     );
   });
+
+  group('matchEpisodesPerFile split halves', () {
+    Future<Map<int, String?>> runSplit(
+      ({
+        TestMatcher matcher,
+        FakeLlm llm,
+        List<String> logs,
+        List<NamingItem> items,
+        Map<int, SubtitleText> subs,
+        Map<int, Fingerprint> fps,
+      })
+      s,
+      Map<int, int> siblingOf,
+    ) async {
+      final picks = await s.matcher.matchEpisodesPerFile(
+        episodes: episodes,
+        items: s.items,
+        subs: s.subs,
+        fps: s.fps,
+        seriesId: 1400,
+        subLang: 'de',
+        siblingOf: siblingOf,
+      );
+      return {for (final e in picks.entries) e.key: e.value?.stem};
+    }
+
+    test('both halves of one file may claim the same episode', () async {
+      final s = setup(3);
+      s.llm.match.addAll(['{"pick":1}', '{"pick":1}', '{"pick":3}']);
+      s.llm.verify.addAll(['{"pick":1}', '{"pick":3}']);
+
+      expect(await runSplit(s, {0: 1, 1: 0}),
+          {0: 's07e01', 1: 's07e01', 2: 's07e03'});
+      expect(s.logs, anyElement(contains('same episode as its other half')));
+    });
+
+    test('an unplaced half is offered only the neighbours of its other half',
+        () async {
+      final s = setup(3);
+      s.llm.match.addAll([
+        '{"pick":2}', // half 1 → s07e02
+        '{"pick":0}', '{"pick":0}', // half 2 declined twice
+        '{"pick":4}', // other file → s07e04
+        '{"pick":2}', // neighbours [s07e01, s07e03] → s07e03
+      ]);
+      s.llm.verify.addAll(['{"pick":2}', '{"pick":4}']);
+
+      expect(await runSplit(s, {0: 1, 1: 0}),
+          {0: 's07e02', 1: 's07e03', 2: 's07e04'});
+      final offered = s.llm.matchPrompts.last;
+      expect(offered, contains('s07e01'));
+      expect(offered, contains('s07e03'));
+      expect(offered, isNot(contains('s07e04')));
+      expect(s.llm.systemPrompts.last, contains('episodes next to the one'));
+    });
+
+    test('an unrelated file claiming the same episode is still a conflict',
+        () async {
+      final s = setup(3);
+      s.llm.match.addAll(['{"pick":1}', '{"pick":3}', '{"pick":1}']);
+      s.llm.verify.addAll(['{"pick":1}', '{"pick":3}']);
+
+      final picks = await runSplit(s, {0: 1, 1: 0});
+      expect(picks[0], 's07e01');
+      expect(picks[2], isNot('s07e01'));
+    });
+  });
 }

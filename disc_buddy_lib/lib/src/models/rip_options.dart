@@ -50,6 +50,11 @@ class RipOptions {
   /// drives — on fast media (SSD ISOs) the scan is cheap and the larger probe
   /// this needs costs more memory than it saves, so it's opt-in.
   final bool dvdSinglePass;
+  /// Directory mode: split each file at the black frame nearest its middle
+  /// and name both stories separately — for cartoons whose two 11-minute
+  /// segments were ripped as one episode. The halves replace the source;
+  /// when both halves turn out to be one story the source is kept whole.
+  final bool splitStories;
 
   const RipOptions({
     this.device,
@@ -78,6 +83,7 @@ class RipOptions {
     this.subtitleMkvLangs,
     this.lpcmFlac = false,
     this.dvdSinglePass = false,
+    this.splitStories = false,
   });
 
   /// True when the tools for subtitle extraction + OCR are available.
@@ -125,6 +131,7 @@ class RipOptions {
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
     dvdSinglePass: dvdSinglePass,
+    splitStories: splitStories,
   );
 
   RipOptions copyWithOutputDir(String newOutputDir) => RipOptions(
@@ -154,6 +161,7 @@ class RipOptions {
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
     dvdSinglePass: dvdSinglePass,
+    splitStories: splitStories,
   );
 
   RipOptions copyWithHints({String? titleHint, List<int>? seasonHint, bool? autoName, bool? batchAssign}) => RipOptions(
@@ -183,6 +191,7 @@ class RipOptions {
     subtitleMkvLangs: subtitleMkvLangs,
     lpcmFlac: lpcmFlac,
     dvdSinglePass: dvdSinglePass,
+    splitStories: splitStories,
   );
 }
 

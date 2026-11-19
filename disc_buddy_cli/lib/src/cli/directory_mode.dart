@@ -44,6 +44,7 @@ Future<bool> processDirectory(
   LogCallback? onLog,
   ExtractorFactory extractorFactory = buildExtractor,
   AutoNamerFactory autoNamerFactory = buildAutoNamer,
+  SplitterFactory splitterFactory = buildSplitter,
 }) async {
   void log(String m, {bool isError = false}) => emitLog(onLog, m, isError: isError);
 
@@ -120,6 +121,18 @@ Future<bool> processDirectory(
       anyAutoName: namePrefs.containsValue('?'));
 
   try {
+    // --- Step 0: Split two-story files (--split-stories) ---
+    final splits = <String, StorySplit>{}; // source path → its halves
+    if (opts.splitStories && autoNamer != null) {
+      final splitter = splitterFactory(opts, onLog);
+      for (final file in selected) {
+        if (namePrefs[file.path] != '?') continue;
+        log('\n── Splitting stories: ${file.path}');
+        final split = await splitter.split(file);
+        if (split != null) splits[file.path] = split;
+      }
+    }
+
     // --- Step 1: Extract subtitles for all selected files ---
     if (extractChoice.doExtract && extractor != null) {
       for (final file in selected) {
@@ -135,11 +148,14 @@ Future<bool> processDirectory(
       final batchItems = <({File file, String discName, List<File> srts})>[];
       for (final file in selected) {
         if (namePrefs[file.path] != '?') continue;
-        batchItems.add((
-          file:     file,
-          discName: p.basenameWithoutExtension(file.path),
-          srts:     extractor.findExistingSrts(file),
-        ));
+        final split = splits[file.path];
+        for (final f in split == null ? [file] : [split.first, split.second]) {
+          batchItems.add((
+            file:     f,
+            discName: p.basenameWithoutExtension(file.path),
+            srts:     extractor.findExistingSrts(f),
+          ));
+        }
       }
       if (batchItems.isNotEmpty) {
         log('\n── Auto-naming ${batchItems.length} file(s)...');
@@ -147,6 +163,12 @@ Future<bool> processDirectory(
           batchItems,
           titleHint:  hints.title,
           seasonHint: hints.season,
+          splitFrom: {
+            for (final split in splits.values) ...{
+              split.first:  split.source,
+              split.second: split.source,
+            },
+          },
         );
         for (final b in batchItems) {
           resolvedStems[b.file.path] = results[b.file];
@@ -155,7 +177,24 @@ Future<bool> processDirectory(
     }
 
     // --- Step 3: Apply renames ---
+    for (final path in splits.keys.toList()) {
+      splits[path] = await parkSource(splits[path]!);
+    }
+    final unsettled = <File>[];
     for (final file in selected) {
+      final split = splits[file.path];
+      if (split != null) {
+        if (!await applySplitNames(
+          split,
+          resolvedStems[split.first.path],
+          resolvedStems[split.second.path],
+          originalStem: p.basenameWithoutExtension(file.path),
+          onLog: onLog,
+        )) {
+          unsettled.add(file);
+        }
+        continue;
+      }
       var newStem = namePrefs[file.path];
       if (newStem == '?') {
         newStem = resolvedStems[file.path];
@@ -167,6 +206,10 @@ Future<bool> processDirectory(
       if (newStem != null) {
         await renameWithSidecars(file, newStem, onLog: onLog);
       }
+    }
+    for (final file in unsettled) {
+      await unparkSource(splits[file.path]!,
+          originalStem: p.basenameWithoutExtension(file.path), onLog: onLog);
     }
   } finally {
     autoNamer?.close();
@@ -188,6 +231,9 @@ Future<void> processMkv(
 
   final mkvFile  = File(mkvPath);
   final discName = p.basenameWithoutExtension(mkvPath);
+  if (opts.splitStories) {
+    log('--split-stories only applies to directory mode — ignored.', isError: true);
+  }
 
   log('File:   $mkvPath');
   log('');

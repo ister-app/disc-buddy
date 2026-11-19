@@ -88,14 +88,19 @@ class TitleResolver {
       }
     }
 
-    // Deterministic scoring based on titleGuess similarity.
+    // Deterministic scoring based on titleGuess similarity. A user hint
+    // names the show itself and outranks the LLM guess, which for an
+    // episode transcript is often the episode's title ("The Big Scoop").
+    final scoringFp = (titleHint != null && titleHint.isNotEmpty)
+        ? Fingerprint(summary: fp.summary, titleGuess: titleHint)
+        : fp;
     final scored = <ScoredCandidate>[];
     for (final m in movies) {
       scored.add(ScoredCandidate(
         id: m.id,
         type: 'movie',
         label: m.year != null ? '${m.title} (${m.year})' : m.title,
-        score: scoreTitleCandidate(fp, TitleCandidate.movie(m)),
+        score: scoreTitleCandidate(scoringFp, TitleCandidate.movie(m)),
         reason: '',
       ));
     }
@@ -106,7 +111,7 @@ class TitleResolver {
         label: t.firstAirYear != null
             ? '${t.name} (${t.firstAirYear})'
             : t.name,
-        score: scoreTitleCandidate(fp, TitleCandidate.tv(t)),
+        score: scoreTitleCandidate(scoringFp, TitleCandidate.tv(t)),
         reason: '',
       ));
     }

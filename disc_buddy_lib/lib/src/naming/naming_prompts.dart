@@ -54,6 +54,7 @@ String batchAssignSystemPrompt(int n, int m) =>
 String episodeMatchSystemPrompt({
   required bool hasSummary,
   bool bonus = false,
+  bool neighbours = false,
 }) =>
     'You identify which TV episode a subtitle belongs to.\n'
     '${hasSummary ? 'Use the plot summary as the primary signal and '
@@ -61,7 +62,10 @@ String episodeMatchSystemPrompt({
         'subtitle excerpt and match it to the episode description.\n'}'
     '$concreteEvidenceRule\n'
     'Output STRICT JSON only: {"pick":N} (1-based).\n'
-    '${bonus ? 'The candidates are DVD bonus features (featurettes, '
+    '${neighbours ? 'The candidates are only the episodes next to the '
+        'one that shares this file. Pick one only when the summary or '
+        'excerpt holds concrete evidence for its description (an event, '
+        'a character, an object). Otherwise {"pick":0}.' : bonus ? 'The candidates are DVD bonus features (featurettes, '
         'blooper reels, interviews, inside looks). Pick one only when its '
         'description clearly fits the material; an inside look at '
         'episode X is not episode X itself. Otherwise {"pick":0}.' : 'Always pick the closest match. '
