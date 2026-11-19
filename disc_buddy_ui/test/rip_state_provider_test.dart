@@ -37,6 +37,9 @@ void main() {
     tmp = Directory.systemTemp.createTempSync('rip_state_test_');
     container = ProviderContainer(overrides: [
       settingsProvider.overrideWith(_FixedSettings.new),
+      // Independent of what happens to be installed on this machine.
+      subtitleToolsAvailableProvider.overrideWithValue(false),
+      whisperAvailableProvider.overrideWithValue(false),
     ]);
   });
   tearDown(() {

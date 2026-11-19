@@ -546,20 +546,18 @@ class RipStateNotifier extends Notifier<RipState> {
         appendLog('Done.');
       }
 
-      if (extractSubtitles &&
-          (settings.mkvextract == null || settings.subtileOcr == null)) {
-        appendLog('Subtitle extraction skipped: set mkvextract and '
-            'subtile-ocr in Settings.', isError: true);
+      final ocrOk = ref.read(subtitleToolsAvailableProvider);
+      if (extractSubtitles && !ocrOk) {
+        appendLog('Subtitle extraction skipped: mkvextract and subtile-ocr '
+            'were not found (see Settings).', isError: true);
       }
-      if (extractSubtitles &&
-          settings.mkvextract != null &&
-          settings.subtileOcr != null) {
+      if (extractSubtitles && ocrOk) {
         appendLog('Extracting subtitles...');
         final extractor = SubtitleExtractor(
           ffmpeg: settings.ffmpeg ?? 'ffmpeg',
           ffprobe: settings.ffprobe ?? 'ffprobe',
-          mkvextract: settings.mkvextract!,
-          subtileOcr: settings.subtileOcr!,
+          mkvextract: settings.mkvextract ?? 'mkvextract',
+          subtileOcr: settings.subtileOcr ?? 'subtile-ocr',
           onLog: appendLog,
         );
         final langs = subtitleLangs.trim().isEmpty
@@ -656,12 +654,21 @@ class RipStateNotifier extends Notifier<RipState> {
         : DialogPrompter(ref.read(promptQueueProvider.notifier),
             context: () => List.of(recent));
 
-    final wantExtract = extractSubtitles && options.canOcrSubtitles;
+    // Availability as the panels show it: a configured path, or the default
+    // command on PATH. (RipOptions.canOcrSubtitles only knows configured
+    // paths, so tools found on PATH would be offered and then never run.)
+    final ocrOk = ref.read(subtitleToolsAvailableProvider);
+    final whisperOk = ref.read(whisperAvailableProvider);
+    final wantExtract = extractSubtitles && ocrOk;
     if (extractSubtitles && !wantExtract) {
-      log('Subtitle extraction skipped: set mkvextract and subtile-ocr in '
-          'Settings.', isError: true);
+      log('Subtitle extraction skipped: mkvextract and subtile-ocr were not '
+          'found (see Settings).', isError: true);
     }
-    final wantNaming = autoName && options.canAutoName;
+    final wantNaming = autoName &&
+        options.tmdbToken != null &&
+        options.llmUrl != null &&
+        options.llmModel != null &&
+        (ocrOk || whisperOk);
     if (autoName && !wantNaming) {
       log('Auto-naming skipped: it needs a TMDB token, an LLM URL and model, '
           'and either the subtitle OCR tools or whisper (see Settings).',
@@ -701,11 +708,11 @@ class RipStateNotifier extends Notifier<RipState> {
         log('Auto-naming ${toName.length} file(s)...');
         final namer = AutoNamer(
           extractor: extractor,
-          transcriber: options.canTranscribe
+          transcriber: whisperOk
               ? Transcriber(
                   ffmpeg: options.ffmpeg,
                   ffprobe: options.ffprobe,
-                  whisperCli: options.whisper!,
+                  whisperCli: options.whisper ?? 'whisper-cli',
                   whisperModel: options.whisperModel!,
                   language: options.transcribeLanguage,
                   onLog: log,
