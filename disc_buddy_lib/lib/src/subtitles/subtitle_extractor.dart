@@ -63,7 +63,9 @@ class SubtitleExtractor {
       return;
     }
 
-    final stem = mkvFile.path.replaceFirst(RegExp(r'\.mkv$'), '');
+    // Directory mode also hands in .mp4/.avi/…: strip whatever extension it
+    // has, or the sidecar becomes `<name>.mp4.en.srt`.
+    final stem = p.withoutExtension(mkvFile.path);
     int subIdx = 0;
     for (final stream in streams) {
       final codec   = stream['codec_name']!.toLowerCase();
