@@ -68,7 +68,7 @@ Shared logic for both DVD and Blu-ray: filters clips < 5 min, deduplicates by du
 
 ### Logging and prompting (`disc_buddy_lib/lib/src/utils/log.dart`, `prompter.dart`)
 
-The library never writes to stdout/stderr or reads `/dev/tty` on its own. Every class takes an optional `LogCallback onLog` and logs through `emitLog(onLog, msg)` (falls back to stdout/stderr only when no callback is given). Questions go through the `Prompter` interface: rippers and `AutoNamer` take a `Prompter? prompter`; `force` always resolves to `NonInteractivePrompter` (defaults for every question). The CLI passes `TtyPrompter` (`Menu.prompter`); the UI relies on the non-interactive default. Add new prompts only via `Prompter`, never via `ttyReadLine()` directly. `utils/tty.dart` remains for the CLI's own menus.
+The library never writes to stdout/stderr or reads `/dev/tty` on its own. Every class takes an optional `LogCallback onLog` and logs through `emitLog(onLog, msg)` (falls back to stdout/stderr only when no callback is given). Questions go through the `Prompter` interface: rippers and `AutoNamer` take a `Prompter? prompter`; `force` always resolves to `NonInteractivePrompter` (defaults for every question). The CLI passes `TtyPrompter` (`Menu.prompter`); the UI uses the non-interactive default for rips and a dialog-backed prompter for auto-naming (see UI flow). Add new prompts only via `Prompter`, never via `ttyReadLine()` directly. `utils/tty.dart` remains for the CLI's own menus.
 
 ### Output files and damaged discs
 
@@ -76,7 +76,7 @@ Every rip writes to `<stem>.part.<ext>` and is renamed into place by `withPartFi
 
 ### UI flow (`disc_buddy_ui/lib/providers/`)
 
-`disc_titles_provider.dart` scans in an `Isolate.run` and returns a `DiscContent` carrying its `scanLog`. `rip_state_provider.dart` drives the rip: video discs rip in a spawned isolate (`_ripIsolateMain`, cancel via a port plus a kill fallback), audio CDs in the main isolate (`AudioCDRipper.cancel()`). When the isolate reports its output files, `_postProcess` — shared with directory mode — extracts subtitles, auto-names and renames via `renameWithSidecars` (`utils/rename.dart`, also used by the CLI). The UI always passes `force: true`, so library prompts take their defaults.
+`disc_titles_provider.dart` scans in an `Isolate.run` and returns a `DiscContent` carrying its `scanLog`. `rip_state_provider.dart` drives the rip: video discs rip in a spawned isolate (`_ripIsolateMain`, cancel via a port plus a kill fallback), audio CDs in the main isolate (`AudioCDRipper.cancel()`). When the isolate reports its output files, `_postProcess` — shared with directory mode — extracts subtitles, auto-names and renames via `renameWithSidecars` (`utils/rename.dart`, also used by the CLI). The rippers get `force: true` (prompts take their defaults); the post-processing `AutoNamer` gets a `DialogPrompter` (`prompt_provider.dart`), whose questions `PromptHost` shows as dialogs — except in loop mode, which stays non-interactive.
 
 ### FFI usage
 

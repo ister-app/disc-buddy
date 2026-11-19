@@ -24,8 +24,10 @@ closed captions, Seinfeld S7 auto-selection) has been removed.
 
 ## UI
 
-- Interactive questions during a rip (language fixes, LLM tie-breaks) are
-  always answered with their default because the UI passes `force: true`.
-  A dialog-backed `Prompter` over the isolate `SendPort` would allow them.
+- Auto-naming questions (candidate ties, manual episode pick) now open a
+  dialog (`DialogPrompter`), except in loop mode. Not yet verified against
+  a real LLM tie. Questions asked inside the rip isolate (track-language
+  fixes) still take their default; the title panel's per-track language
+  overrides cover that case.
 - Rename individual audio/subtitle stream titles per title.
 - Disc-page skeleton should mirror the real page layout.

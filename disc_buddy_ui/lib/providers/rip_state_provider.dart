@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../models/rip_state.dart';
 import '../models/settings.dart';
 import 'disc_titles_provider.dart';
+import 'prompt_provider.dart';
 import 'settings_provider.dart';
 
 /// Runs the disc-swap check in a short-lived isolate (the audio path uses a
@@ -626,6 +627,24 @@ class RipStateNotifier extends Notifier<RipState> {
   }) async {
     final options = _settings.toRipOptions(device: devicePath);
 
+    // The namer's questions (a tie between candidates, an episode the LLM
+    // could not place) go to a dialog. A loop rip runs unattended and must
+    // not wait for one, so it keeps the defaults.
+    final recent = <String>[];
+    final userLog = log;
+    log = (String msg, {bool isError = false}) {
+      if (msg.trim().isNotEmpty) {
+        recent.add(msg.trim());
+        if (recent.length > 4) recent.removeAt(0);
+      }
+      userLog(msg, isError: isError);
+    };
+    final unattended = ref.read(loopEnabledProvider(devicePath));
+    final Prompter prompter = unattended
+        ? const NonInteractivePrompter()
+        : DialogPrompter(ref.read(promptQueueProvider.notifier),
+            context: () => List.of(recent));
+
     final wantExtract = extractSubtitles && options.canOcrSubtitles;
     if (extractSubtitles && !wantExtract) {
       log('Subtitle extraction skipped: set mkvextract and subtile-ocr in '
@@ -688,7 +707,7 @@ class RipStateNotifier extends Notifier<RipState> {
             model: options.llmModel!,
             onLog: log,
           ),
-          force: true,
+          prompter: prompter,
           batchAssign: batchAssign,
           onLog: log,
         );
