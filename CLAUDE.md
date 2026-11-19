@@ -32,7 +32,12 @@ dart test disc_buddy_cli/
 
 # Analyze (CI uses --fatal-infos)
 dart analyze --fatal-infos disc_buddy_lib disc_buddy_cli
+
+# UI (outside the workspace: its own pub get / lockfile; CI also uses --fatal-infos)
+cd disc_buddy_ui && flutter pub get && flutter analyze --fatal-infos && flutter test
 ```
+
+The UI imports `package:material_ui/material_ui.dart`, not `package:flutter/material.dart` (deprecated in current Flutter; an info is fatal in CI).
 
 ## Architecture
 
@@ -68,6 +73,10 @@ The library never writes to stdout/stderr or reads `/dev/tty` on its own. Every 
 ### Output files and damaged discs
 
 Every rip writes to `<stem>.part.<ext>` and is renamed into place by `withPartFile()` (`utils/atomic_output.dart`) only after the success checks; failures and exceptions delete the part file. The DVD dvdread path reads through `device/resilient_read.dart`: unreadable sectors are retried, bisected and zero-filled (cap `DVDRipper.kMaxBadSectorsPerTitle`), and `DVDRipper.reports` holds a `TitleRipReport` per title (read stats + ffprobe duration check).
+
+### UI flow (`disc_buddy_ui/lib/providers/`)
+
+`disc_titles_provider.dart` scans in an `Isolate.run` and returns a `DiscContent` carrying its `scanLog`. `rip_state_provider.dart` drives the rip: video discs rip in a spawned isolate (`_ripIsolateMain`, cancel via a port plus a kill fallback), audio CDs in the main isolate (`AudioCDRipper.cancel()`). When the isolate reports its output files, `_postProcess` — shared with directory mode — extracts subtitles, auto-names and renames via `renameWithSidecars` (`utils/rename.dart`, also used by the CLI). The UI always passes `force: true`, so library prompts take their defaults.
 
 ### FFI usage
 
@@ -105,4 +114,4 @@ DVDs store audio at MPEG sub-stream IDs `0x80–0x8F` and subtitles at `0x20–0
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on every push: `dart pub get` (workspace root) → format check (advisory) → `dart analyze --fatal-infos` (lib + cli) → `dart test` (lib + cli) → `dart compile exe -DDISC_BUDDY_VERSION=…`. A `build-stable` job repeats analyze/test on the `stable` SDK without blocking. Tags matching `v*` trigger a GitHub release with the compiled binary attached.
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push: `dart pub get` (workspace root) → format check (advisory; the code is hand-formatted) → `dart analyze --fatal-infos` (lib + cli) → `dart test` (lib + cli) → `dart compile exe -DDISC_BUDDY_VERSION=…`. A `build-stable` job repeats analyze/test on the `stable` SDK without blocking. A `build-ui` job (Flutter pinned in the workflow) runs `flutter analyze --fatal-infos`, `flutter test` and `flutter build linux` for `disc_buddy_ui` and does block. Tags matching `v*` trigger a GitHub release with the compiled binary attached.
