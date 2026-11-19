@@ -195,7 +195,11 @@ class MkvProcessing extends RipState {
 class RipCompleted extends RipState {
   final List<String> outputFiles;
   final List<String> log;
-  RipCompleted(this.outputFiles, {this.log = const []});
+
+  /// Titles or tracks that were attempted and produced nothing.
+  final List<String> failed;
+  RipCompleted(this.outputFiles,
+      {this.log = const [], this.failed = const []});
 }
 
 class RipError extends RipState {

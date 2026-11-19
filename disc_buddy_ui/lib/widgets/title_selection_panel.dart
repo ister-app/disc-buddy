@@ -663,8 +663,9 @@ class _FooterState extends ConsumerState<_Footer> {
       final ripPath = videoTitleOutputPath(
           settings.effectiveOutputDir, selState.discTitle, title);
       ripPhasePaths[title.displayKey] = ripPath;
-      final finalPath = cfg?.customName?.isNotEmpty == true
-          ? p.join(outDirPath, '${sanitizeFilename(cfg!.customName!)}.mkv')
+      final custom = cfg?.customName?.trim() ?? '';
+      final finalPath = custom.isNotEmpty
+          ? p.join(outDirPath, '${sanitizeFilename(custom)}.mkv')
           : ripPath;
       for (final path in {ripPath, finalPath}) {
         if (await File(path).exists()) conflictTitles[path] = title;
@@ -699,6 +700,12 @@ class _FooterState extends ConsumerState<_Footer> {
           overwrite.add(ripPhasePaths[key]!);
         }
       }
+      // Also the ticked files themselves: a custom-name target is replaced
+      // by the rename after the rip, and only if it is in this set.
+      overwrite.addAll([
+        for (final entry in conflictTitles.entries)
+          if (!declined.contains(entry.value.displayKey)) entry.key,
+      ]);
       if (remaining <= 0) return;
     }
 

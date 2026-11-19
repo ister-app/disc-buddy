@@ -52,7 +52,7 @@ class DriveDetailPanel extends ConsumerWidget {
           ref.invalidate(discTitlesProvider(next.id));
           final rip = ref.read(ripStateProvider(next.id));
           if (rip is! RipInProgress && rip is! RipAudioCdProgress &&
-              rip is! MkvProcessing && rip is! LoopWaiting) {
+              rip is! MkvProcessing) {
             ref.read(ripStateProvider(next.id).notifier).reset();
           }
         }
@@ -214,10 +214,22 @@ class _CompletedPanel extends ConsumerWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.check_circle_outline, size: 72,
-            color: Theme.of(context).colorScheme.primary),
-          const SizedBox(height: 16),
-          Text('Rip completed!', style: Theme.of(context).textTheme.headlineSmall),
+          if (state.failed.isEmpty) ...[
+            Icon(Icons.check_circle_outline, size: 72,
+              color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 16),
+            Text('Rip completed!', style: Theme.of(context).textTheme.headlineSmall),
+          ] else ...[
+            Icon(Icons.error_outline, size: 72,
+              color: Theme.of(context).colorScheme.error),
+            const SizedBox(height: 16),
+            Text('Rip finished with errors',
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 8),
+            Text('Not ripped: ${state.failed.join(', ')} — see the log.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          ],
           if (state.outputFiles.isNotEmpty) ...[
             const SizedBox(height: 8),
             ...state.outputFiles.map((f) => Text(f,

@@ -45,7 +45,8 @@ class _RipTitleIndex extends _RipMsg {
 
 class _RipDone extends _RipMsg {
   final List<String> files;
-  _RipDone(this.files);
+  final List<String> failed; // display keys of titles that did not rip
+  _RipDone(this.files, this.failed);
 }
 
 class _RipFail extends _RipMsg {
@@ -185,6 +186,10 @@ void _ripIsolateMain(_RipJob job) async {
   });
 
   void trackProcess(Process p) => currentProcess = p;
+  final failedKeys = <String>{};
+  // Left alone because the output exists and nobody agreed to replace it
+  // (loop mode: no overwrite dialog). Not this job's files either.
+  final skippedKeys = <String>{};
 
   try {
     for (int i = 0; i < job.selectedTitles.length; i++) {
@@ -216,12 +221,16 @@ void _ripIsolateMain(_RipJob job) async {
         final dvd = _applyDvdLangOverrides(title, aOver, sOver);
         await ripper.rip(job.discTitle, [dvd],
             mountPath: job.mountPath, overwrite: job.overwrite);
+        failedKeys.addAll(ripper.failedTitleKeys);
+        skippedKeys.addAll(ripper.skippedTitleKeys);
       } else if (job.discType == DiscType.bluray) {
         if (title is! BlurayTitle) throw StateError('Expected BlurayTitle but got ${title.runtimeType}');
         final ripper = BlurayRipper(titleOptions, onLog: log, onProgress: onProgress, onFfmpegProcess: trackProcess);
         final blu = _applyBlurayLangOverrides(title, aOver, sOver);
         await ripper.rip(job.discTitle, [blu],
             mountPath: job.mountPath, overwrite: job.overwrite);
+        failedKeys.addAll(ripper.failedTitleKeys);
+        skippedKeys.addAll(ripper.skippedTitleKeys);
       }
 
     }
@@ -229,14 +238,27 @@ void _ripIsolateMain(_RipJob job) async {
     // Report this job's own outputs (not every MKV that happens to be in the
     // directory): the main isolate extracts subtitles from, names and
     // renames exactly these.
+    // A failed re-rip leaves the previous file in place, so "exists" alone
+    // would hand that stale file to the post-processing as if it were new.
     final files = [
       for (final title in job.selectedTitles)
-        if (File(videoTitleOutputPath(job.options.outputDir, job.discTitle, title))
-            .existsSync())
+        if (!failedKeys.contains(title.displayKey) &&
+            !skippedKeys.contains(title.displayKey) &&
+            File(videoTitleOutputPath(job.options.outputDir, job.discTitle, title))
+                .existsSync())
           videoTitleOutputPath(job.options.outputDir, job.discTitle, title),
     ];
+    if (failedKeys.isNotEmpty) {
+      port.send(_RipLog(
+          '${failedKeys.length} of ${job.selectedTitles.length} title(s) were '
+          'not ripped: ${failedKeys.join(', ')}',
+          isError: true));
+    }
 
-    port.send(_RipDone(files));
+    port.send(_RipDone(files, [
+      ...failedKeys,
+      for (final k in skippedKeys) '$k (output already exists)',
+    ]));
   } catch (e) {
     port.send(_RipFail(e.toString()));
   }
@@ -492,15 +514,17 @@ class RipStateNotifier extends Notifier<RipState> {
     _audioRipper = ripper;
     try {
       await ripper.rip(metadata, tracks, overwrite: overwrite);
+      final failed = [for (final nr in ripper.failedTracks) 'track $nr'];
       if (ripper.cancelled) {
         // Finished tracks stay on disk; the interrupted one was cleaned up.
         if (state is RipAudioCdProgress) _emit(RipIdle());
-      } else if (ref.read(loopEnabledProvider(devicePath)) &&
+      } else if (failed.isEmpty &&
+          ref.read(loopEnabledProvider(devicePath)) &&
           devicePath.startsWith('/dev/')) {
         await Process.run('eject', [devicePath]);
         _emit(LoopWaiting(lastOutputFiles: [], log: List.from(logs)));
       } else {
-        _emit(RipCompleted([], log: List.from(logs)));
+        _emit(RipCompleted([], log: List.from(logs), failed: failed));
       }
     } catch (e) {
       _emit(RipError(e.toString()));
@@ -547,8 +571,17 @@ class RipStateNotifier extends Notifier<RipState> {
 
       if (!p.equals(mkvPath, destPath)) {
         // File.copy replaces an existing file without asking.
-        if (await destFile.exists()) {
-          _emit(RipError('$destPath already exists — choose another name.'));
+        final sameCopy = autoName &&
+            await destFile.exists() &&
+            await destFile.length() == await srcFile.length();
+        if (sameCopy) {
+          // Left by an earlier attempt whose naming did not succeed.
+          appendLog('Using the existing copy $destPath.');
+        } else if (await destFile.exists()) {
+          _emit(RipError(autoName
+              ? '$destPath already exists — remove it, or turn Auto name '
+                  'off and choose another name.'
+              : '$destPath already exists — choose another name.'));
           return;
         }
         await destFile.parent.create(recursive: true);
@@ -619,9 +652,10 @@ class RipStateNotifier extends Notifier<RipState> {
   /// already on disk — directory mode, and the tail of a disc rip.
   ///
   /// [stems] maps a path to the name the user typed for it; such a file is
-  /// renamed to that and never auto-named. A file in [replaceExisting] may
-  /// replace what already carries its new name (the user said so in the
-  /// overwrite dialog); any other rename onto an existing file is refused. [discName] is what the namer
+  /// renamed to that and never auto-named. A rename may replace an existing
+  /// file only when that file's path is in [replaceTargets] (the user ticked
+  /// it in the overwrite dialog) and this run did not just produce it; any
+  /// other rename onto an existing file is refused. [discName] is what the namer
   /// falls back to as a title hint (defaults to each file's own stem).
   /// Subtitles are extracted first so the namer reuses them and the rename
   /// takes the SRT sidecars along. Returns the final paths in [files] order.
@@ -641,7 +675,7 @@ class RipStateNotifier extends Notifier<RipState> {
     String? nameHint,
     List<int> seasons = const [],
     Map<String, String> stems = const {},
-    Set<String> replaceExisting = const {},
+    Set<String> replaceTargets = const {},
     String? discName,
   }) async {
     final options = _settings.toRipOptions(device: devicePath);
@@ -723,9 +757,16 @@ class RipStateNotifier extends Notifier<RipState> {
         final langs = subtitleLangs.trim().isEmpty
             ? null
             : subtitleLangs.trim().split(RegExp(r'[,\s]+')).toSet();
+        // A split file's subtitles are extracted per story: the stories
+        // are what remains when the split is kept.
         for (final path in files) {
-          log('Extracting subtitles: ${p.basename(path)}');
-          await extractor.extractAll(File(path), languages: langs);
+          final split = splits[path];
+          for (final f in split == null
+              ? [File(path)]
+              : [split.first, split.second]) {
+            log('Extracting subtitles: ${p.basename(f.path)}');
+            await extractor.extractAll(f, languages: langs);
+          }
         }
       }
 
@@ -822,10 +863,16 @@ class RipStateNotifier extends Notifier<RipState> {
         continue;
       }
       final stem = resolved[path];
-      if (stem != null && replaceExisting.contains(path)) {
+      if (stem != null) {
         final target =
             File(p.join(p.dirname(path), '$stem${p.extension(path)}'));
-        if (!p.equals(target.path, path) && await target.exists()) {
+        final approved =
+            replaceTargets.any((t) => p.equals(t, target.path));
+        final ours = out.any((o) => p.equals(o, target.path));
+        if (approved &&
+            !ours &&
+            !p.equals(target.path, path) &&
+            await target.exists()) {
           log('Replacing ${target.path}');
           await target.delete();
         }
@@ -927,6 +974,8 @@ class RipStateNotifier extends Notifier<RipState> {
     final receivePort = ReceivePort();
     _activeReceivePort = receivePort;
 
+    var failedTitles = const <String>[];
+
     // Completes with this job's output files, or null when it was cancelled.
     Future<List<String>?> runInIsolate(DiscType discType,
         {String? mountPath}) async {
@@ -972,7 +1021,8 @@ class RipStateNotifier extends Notifier<RipState> {
             if (s is RipInProgress) {
               _emit(s.copyWith(currentIndex: index, elapsed: Duration.zero, speed: 0));
             }
-          case _RipDone(:final files):
+          case _RipDone(:final files, :final failed):
+            failedTitles = failed;
             receivePort.close();
             return files;
           case _RipFail(:final error):
@@ -1037,13 +1087,10 @@ class RipStateNotifier extends Notifier<RipState> {
         nameHint: options.titleHint,
         seasons: options.seasonHint ?? const [],
         stems: customStems,
-        // The overwrite dialog lists a custom-named title under its final
-        // name and hands over the rip-phase path once the user agrees; an
-        // auto-chosen name was never shown there and must not replace a file.
-        replaceExisting: {
-          for (final path in customStems.keys)
-            if (overwrite?.contains(path) ?? false) path,
-        },
+        // The overwrite dialog adds every file the user ticked to the set,
+        // rip-phase paths and custom-name targets alike; only those may be
+        // replaced by a rename.
+        replaceTargets: overwrite ?? const {},
         discName: discTitle,
       );
     } catch (e) {
@@ -1051,12 +1098,20 @@ class RipStateNotifier extends Notifier<RipState> {
       appendLog('Post-processing failed: $e', isError: true);
     }
 
-    if (ref.read(loopEnabledProvider(devicePath)) &&
+    // A loop must not eject a disc that did not rip and carry on: it stops
+    // here, with the disc still in the drive and the failure on screen.
+    if (failedTitles.isEmpty &&
+        ref.read(loopEnabledProvider(devicePath)) &&
         devicePath.startsWith('/dev/')) {
-      await Process.run('eject', [devicePath]);
+      try {
+        await Process.run('eject', [devicePath]);
+      } catch (e) {
+        appendLog('Could not eject $devicePath: $e', isError: true);
+      }
       _emit(LoopWaiting(lastOutputFiles: outputs, log: List.from(logs)));
     } else {
-      _emit(RipCompleted(outputs, log: List.from(logs)));
+      _emit(RipCompleted(outputs,
+          log: List.from(logs), failed: failedTitles));
     }
   }
 
@@ -1124,6 +1179,9 @@ class RipStateNotifier extends Notifier<RipState> {
       ref.invalidate(discTitlesProvider(devicePath));
       final content = await ref.read(discTitlesProvider(devicePath).future);
       if (_disposed || state is! LoopWaiting) return;
+      // The scan is over: a disc mismatch found by the rip's own pre-check
+      // calls back into this method and must be able to scan again.
+      _loopScanRunning = false;
       if (content is VideoDiscContent) {
         startRipDirect(
           content.discTitle,

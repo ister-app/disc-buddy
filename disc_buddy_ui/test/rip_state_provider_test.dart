@@ -141,9 +141,34 @@ void main() {
       final state = c.read(ripStateProvider(src.path)) as RipCompleted;
       final dest = File(state.outputFiles.single);
       expect(p.dirname(dest.path), out);
-      expect(p.basename(dest.path), isNot(contains('/')));
+      expect(p.basename(dest.path), 'A_B_ Movie.mkv');
       expect(dest.readAsStringSync(), 'source.mkv');
       expect(src.existsSync(), isTrue);
+    });
+
+    test('auto name reuses the copy an earlier, unnamed attempt left behind',
+        () async {
+      final c = ProviderContainer(overrides: [
+        settingsProvider.overrideWith(() => _FixedSettings(tmp.path)),
+        subtitleToolsAvailableProvider.overrideWithValue(false),
+        whisperAvailableProvider.overrideWithValue(false),
+      ]);
+      addTearDown(c.dispose);
+      final src = File(p.join(tmp.path, 'in', 'source.mkv'))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('same bytes');
+      touch('source.mkv').writeAsStringSync('same bytes');
+
+      await c.read(ripStateProvider(src.path).notifier).startMkvProcess(
+          mkvPath: src.path,
+          extractSubtitles: false,
+          subtitleLangs: '',
+          autoName: true);
+
+      final state = c.read(ripStateProvider(src.path));
+      expect(state, isA<RipCompleted>());
+      expect((state as RipCompleted).log.join('\n'),
+          contains('Using the existing copy'));
     });
 
     test('refuses to replace an existing file', () async {
