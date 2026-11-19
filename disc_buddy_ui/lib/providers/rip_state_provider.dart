@@ -528,18 +528,29 @@ class RipStateNotifier extends Notifier<RipState> {
     try {
       final settings = _settings;
       final srcFile = File(mkvPath);
-      final stem = newName?.isNotEmpty == true
-          ? newName!
+      final stem = newName?.trim().isNotEmpty == true
+          ? sanitizeFilename(newName!.trim())
           : p.basenameWithoutExtension(mkvPath);
       final destPath = p.join(settings.effectiveOutputDir, '$stem.mkv');
       final destFile = File(destPath);
 
-      if (mkvPath != destPath) {
+      if (!p.equals(mkvPath, destPath)) {
+        // File.copy replaces an existing file without asking.
+        if (await destFile.exists()) {
+          _emit(RipError('$destPath already exists — choose another name.'));
+          return;
+        }
+        await destFile.parent.create(recursive: true);
         appendLog('Copying to $destPath...');
         await srcFile.copy(destPath);
         appendLog('Done.');
       }
 
+      if (extractSubtitles &&
+          (settings.mkvextract == null || settings.subtileOcr == null)) {
+        appendLog('Subtitle extraction skipped: set mkvextract and '
+            'subtile-ocr in Settings.', isError: true);
+      }
       if (extractSubtitles &&
           settings.mkvextract != null &&
           settings.subtileOcr != null) {

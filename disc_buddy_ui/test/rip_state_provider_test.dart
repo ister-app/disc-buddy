@@ -12,8 +12,11 @@ import 'package:path/path.dart' as p;
 
 /// Settings that never touch the user's config file.
 class _FixedSettings extends SettingsNotifier {
+  _FixedSettings([this.videoDir]);
+  final String? videoDir;
+
   @override
-  Settings build() => Settings.defaults();
+  Settings build() => Settings.defaults().copyWith(videoDir: videoDir);
 }
 
 BlurayTitle _title(int index) => BlurayTitle(
@@ -114,6 +117,50 @@ void main() {
       expect(step.seasons, [7]);
       expect(step.autoName, isTrue);
       expect(step.batchAssign, isFalse);
+    });
+  });
+
+  group('startMkvProcess', () {
+    test('copies into the video directory under the new name', () async {
+      final out = p.join(tmp.path, 'out', 'videos');
+      final c = ProviderContainer(overrides: [
+        settingsProvider.overrideWith(() => _FixedSettings(out)),
+      ]);
+      addTearDown(c.dispose);
+      final src = touch('source.mkv');
+
+      await c.read(ripStateProvider(src.path).notifier).startMkvProcess(
+          mkvPath: src.path,
+          newName: 'A/B: Movie',
+          extractSubtitles: false,
+          subtitleLangs: '');
+
+      final state = c.read(ripStateProvider(src.path)) as RipCompleted;
+      final dest = File(state.outputFiles.single);
+      expect(p.dirname(dest.path), out);
+      expect(p.basename(dest.path), isNot(contains('/')));
+      expect(dest.readAsStringSync(), 'source.mkv');
+      expect(src.existsSync(), isTrue);
+    });
+
+    test('refuses to replace an existing file', () async {
+      final c = ProviderContainer(overrides: [
+        settingsProvider.overrideWith(() => _FixedSettings(tmp.path)),
+      ]);
+      addTearDown(c.dispose);
+      final src = File(p.join(tmp.path, 'in', 'source.mkv'))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('new');
+      final taken = touch('Taken.mkv');
+
+      await c.read(ripStateProvider(src.path).notifier).startMkvProcess(
+          mkvPath: src.path,
+          newName: 'Taken',
+          extractSubtitles: false,
+          subtitleLangs: '');
+
+      expect(c.read(ripStateProvider(src.path)), isA<RipError>());
+      expect(taken.readAsStringSync(), 'Taken.mkv');
     });
   });
 
