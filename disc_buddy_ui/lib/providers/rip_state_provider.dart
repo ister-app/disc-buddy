@@ -248,6 +248,15 @@ class RipStateNotifier extends Notifier<RipState> {
   SendPort? _cancelPort;
   Isolate? _spawnedIsolate;
   ReceivePort? _activeReceivePort;
+
+  /// Video rips are numbered so a cancel can be tied to the rip it was meant
+  /// for: the Cancel button is live from the moment the state turns to
+  /// RipInProgress, well before the isolate (and its cancel port) exists.
+  int _jobSeq = 0;
+  int _cancelledJob = 0;
+
+  /// `.part` files the running video rip may leave behind when it is killed.
+  List<String> _jobParts = const [];
   AudioCDRipper? _audioRipper;
   _RipChoices? _lastChoices;
   bool _disposed = false;
@@ -904,12 +913,28 @@ class RipStateNotifier extends Notifier<RipState> {
       seasonHint: autoName != false && seasons.isNotEmpty ? seasons : null,
     );
 
+    final job = ++_jobSeq;
+    // True once this rip was cancelled, or replaced by a newer one.
+    bool abandoned() => _cancelledJob >= job || _jobSeq != job;
+    _cancelPort = null;
+    _spawnedIsolate = null;
+    _jobParts = [
+      for (final t in selectedTitles)
+        partPath(videoTitleOutputPath(options.outputDir, discTitle, t)),
+    ];
+
     final receivePort = ReceivePort();
     _activeReceivePort = receivePort;
 
     // Completes with this job's output files, or null when it was cancelled.
     Future<List<String>?> runInIsolate(DiscType discType,
         {String? mountPath}) async {
+      // Cancelled while the disc was still being detected, verified or
+      // mounted: do not start a rip nobody is watching.
+      if (abandoned()) {
+        receivePort.close();
+        return null;
+      }
       _spawnedIsolate = await Isolate.spawn(
         _ripIsolateMain,
         _RipJob(
@@ -928,10 +953,13 @@ class RipStateNotifier extends Notifier<RipState> {
         switch (msg) {
           case _RipCancelPort(:final port):
             _cancelPort = port;
+            // A cancel that arrived before the isolate could listen.
+            if (abandoned()) port.send(null);
           case _RipCancelled():
             // Isolate confirmed cancellation: close port and return to idle.
             receivePort.close();
-            if (state is RipInProgress) _emit(RipIdle());
+            await _deleteParts(_jobParts);
+            if (_jobSeq == job && state is RipInProgress) _emit(RipIdle());
             return null;
           case _RipLog(:final text, :final isError):
             appendLog(text, isError: isError);
@@ -971,7 +999,9 @@ class RipStateNotifier extends Notifier<RipState> {
             await _verifyDiscInIsolate(devicePath, scanFingerprint, discType);
           } on DiscChangedException catch (e) {
             receivePort.close();
-            _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
+            if (!abandoned()) {
+              _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
+            }
             return;
           }
         }
@@ -979,12 +1009,12 @@ class RipStateNotifier extends Notifier<RipState> {
       }
     } catch (e) {
       receivePort.close();
-      _emit(RipError(e.toString()));
+      if (!abandoned()) _emit(RipError(e.toString()));
       return;
     }
     // Cancelled — or the notifier moved on (reset, disposed) meanwhile.
     final ripped = state;
-    if (files == null || ripped is! RipInProgress) return;
+    if (files == null || abandoned() || ripped is! RipInProgress) return;
 
     // The disc is done; what follows only touches the files on disk, so the
     // drive is free and there is nothing left to cancel.
@@ -1042,25 +1072,43 @@ class RipStateNotifier extends Notifier<RipState> {
       return;
     }
     if (s is RipInProgress) {
+      if (s.finishing) return; // nothing left to cancel
       state = s.copyWith(cancelling: true);
+      final job = _jobSeq;
+      _cancelledJob = job;
+      // No port yet when the isolate has not started; _runRip then sees the
+      // cancelled job and either never spawns it or cancels it on arrival.
       _cancelPort?.send(null);
       // Fallback: if the isolate is blocked in synchronous FFI (e.g. DVDReadBlocks)
       // the cancel message can't be processed. Force-kill after 3 seconds.
-      final capturedPort = _activeReceivePort;
-      final capturedIsolate = _spawnedIsolate;
       Future.delayed(const Duration(seconds: 3), () {
         if (_disposed) return;
-        // Only force-kill if this is still the same job we captured. A new rip
-        // started within the 3 s window replaces these fields, and killing it
-        // (or resetting to idle) would clobber the new rip.
-        if (!identical(_spawnedIsolate, capturedIsolate)) return;
+        // Only for the job that was cancelled: a new rip started within the
+        // 3 s window must not be killed or reset to idle.
+        if (_jobSeq != job) return;
         final now = state;
         // Past the rip (post-processing) there is no isolate left to kill.
         if (now is! RipInProgress || now.finishing) return;
-        capturedIsolate?.kill(priority: Isolate.immediate);
-        capturedPort?.close();
+        _spawnedIsolate?.kill(priority: Isolate.immediate);
+        _activeReceivePort?.close();
+        // A killed isolate never runs the ripper's own part-file cleanup.
+        _deleteParts(_jobParts);
         _emit(RipIdle());
       });
+    }
+  }
+
+  /// Removes the half-written outputs of a cancelled rip. The isolate is
+  /// stopped with `Isolate.exit`/kill, which skips the `finally` that would
+  /// have deleted them — and a Blu-ray part file is tens of gigabytes.
+  Future<void> _deleteParts(List<String> paths) async {
+    for (final path in paths) {
+      try {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      } catch (_) {
+        // Best effort; the next rip of this title removes a stale part too.
+      }
     }
   }
 

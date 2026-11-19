@@ -27,6 +27,7 @@ export 'src/utils/prompter.dart';
 export 'src/utils/config_loader.dart';
 export 'src/utils/mount.dart' show withMountedDisc;
 export 'src/utils/sanitize.dart' show sanitizeFilename;
+export 'src/utils/atomic_output.dart' show partPath;
 export 'src/utils/rename.dart';
 export 'src/utils/video_files.dart';
 export 'src/utils/languages.dart' show langMatchesFilter, convertIso2to1;
