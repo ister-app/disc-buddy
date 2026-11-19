@@ -157,12 +157,6 @@ BlurayTitle _applyBlurayLangOverrides(
   );
 }
 
-/// Where the rippers write [title]: `<outputDir>/<disc>/<disc>-<title>.mkv`.
-String _ripOutputPath(String outputDir, String discTitle, VideoTitle title) {
-  final disc = sanitizeFilename(discTitle);
-  return p.join(outputDir, disc, '$disc-${title.filename}');
-}
-
 /// The choices of the naming and subtitle steps, kept so that loop mode rips
 /// the next disc of a set the same way as the one the user configured.
 typedef _RipChoices = ({
@@ -236,9 +230,9 @@ void _ripIsolateMain(_RipJob job) async {
     // renames exactly these.
     final files = [
       for (final title in job.selectedTitles)
-        if (File(_ripOutputPath(job.options.outputDir, job.discTitle, title))
+        if (File(videoTitleOutputPath(job.options.outputDir, job.discTitle, title))
             .existsSync())
-          _ripOutputPath(job.options.outputDir, job.discTitle, title),
+          videoTitleOutputPath(job.options.outputDir, job.discTitle, title),
     ];
 
     port.send(_RipDone(files));
@@ -618,7 +612,9 @@ class RipStateNotifier extends Notifier<RipState> {
   /// already on disk — directory mode, and the tail of a disc rip.
   ///
   /// [stems] maps a path to the name the user typed for it; such a file is
-  /// renamed to that and never auto-named. [discName] is what the namer
+  /// renamed to that and never auto-named. A file in [replaceExisting] may
+  /// replace what already carries its new name (the user said so in the
+  /// overwrite dialog); any other rename onto an existing file is refused. [discName] is what the namer
   /// falls back to as a title hint (defaults to each file's own stem).
   /// Subtitles are extracted first so the namer reuses them and the rename
   /// takes the SRT sidecars along. Returns the final paths in [files] order.
@@ -632,6 +628,7 @@ class RipStateNotifier extends Notifier<RipState> {
     String? nameHint,
     List<int> seasons = const [],
     Map<String, String> stems = const {},
+    Set<String> replaceExisting = const {},
     String? discName,
   }) async {
     final options = _settings.toRipOptions(device: devicePath);
@@ -759,6 +756,14 @@ class RipStateNotifier extends Notifier<RipState> {
     final out = <String>[];
     for (final path in files) {
       final stem = resolved[path];
+      if (stem != null && replaceExisting.contains(path)) {
+        final target =
+            File(p.join(p.dirname(path), '$stem${p.extension(path)}'));
+        if (!p.equals(target.path, path) && await target.exists()) {
+          log('Replacing ${target.path}');
+          await target.delete();
+        }
+      }
       // renameWithSidecars refuses to overwrite an existing file and keeps
       // the extension; the file stays where it is when the rename is refused.
       final renamed = stem != null &&
@@ -922,6 +927,13 @@ class RipStateNotifier extends Notifier<RipState> {
     // The disc is done; what follows only touches the files on disk, so the
     // drive is free and there is nothing left to cancel.
     _emit(ripped.copyWith(finishing: true, cancelling: false));
+    // rip-phase path → the name the user typed for that title
+    final customStems = <String, String>{
+      for (final t in selectedTitles)
+        if (configs[t.displayKey]?.customName?.trim().isNotEmpty == true)
+          videoTitleOutputPath(options.outputDir, discTitle, t):
+              configs[t.displayKey]!.customName!,
+    };
     var outputs = files;
     try {
       outputs = await _postProcess(
@@ -933,11 +945,13 @@ class RipStateNotifier extends Notifier<RipState> {
         batchAssign: batchAssign ?? false,
         nameHint: options.titleHint,
         seasons: options.seasonHint ?? const [],
-        stems: {
-          for (final t in selectedTitles)
-            if (configs[t.displayKey]?.customName?.trim().isNotEmpty == true)
-              _ripOutputPath(options.outputDir, discTitle, t):
-                  configs[t.displayKey]!.customName!,
+        stems: customStems,
+        // The overwrite dialog lists a custom-named title under its final
+        // name and hands over the rip-phase path once the user agrees; an
+        // auto-chosen name was never shown there and must not replace a file.
+        replaceExisting: {
+          for (final path in customStems.keys)
+            if (overwrite?.contains(path) ?? false) path,
         },
         discName: discTitle,
       );
