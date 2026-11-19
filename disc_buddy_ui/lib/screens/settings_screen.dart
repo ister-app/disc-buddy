@@ -3,7 +3,6 @@ import 'package:disc_buddy/disc_buddy.dart' show xdgUserDir;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/settings.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/pick_directory.dart';
 
@@ -166,8 +165,11 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     super.dispose();
   }
 
-  void _save() {
-    final s = Settings(
+  Future<void> _save() async {
+    // copyWith on the current settings: fields this screen does not edit
+    // (the whisper language, CLI-only config keys) must survive a save.
+    final s = ref.read(settingsProvider).copyWith(
+      isLoaded: true,
       videoDir:           _videoDir.text.trim().isEmpty           ? null : _videoDir.text.trim(),
       musicDir:           _musicDir.text.trim().isEmpty           ? null : _musicDir.text.trim(),
       ffmpeg:             _ffmpeg.text.trim().isEmpty             ? null : _ffmpeg.text.trim(),
@@ -187,11 +189,16 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       audioLangs:         _audioLangs.text.trim().isEmpty         ? null : _audioLangs.text.trim(),
       subtitleTrackLangs: _subtitleTrackLangs.text.trim().isEmpty ? null : _subtitleTrackLangs.text.trim(),
     );
-    ref.read(settingsProvider.notifier).save(s);
+    String message = 'Settings saved';
+    try {
+      await ref.read(settingsProvider.notifier).save(s);
+    } catch (e) {
+      message = 'Could not save settings: $e';
+    }
     _checkBinaries();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Settings saved')),
+        SnackBar(content: Text(message)),
       );
     }
   }

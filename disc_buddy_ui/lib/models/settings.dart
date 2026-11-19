@@ -32,6 +32,18 @@ class Settings {
   /// Null / empty = keep all.
   final String? subtitleTrackLangs;
 
+  /// Config keys this UI has no field for (the CLI's `subtitle-langs`,
+  /// `name`, `season`, … — both front ends share one config.json). Carried
+  /// through unchanged so that saving from the UI does not erase them.
+  final Map<String, dynamic> extra;
+
+  static const _knownKeys = {
+    'output', 'music-output', 'ffmpeg', 'ffprobe', 'mkvextract', 'subtile-ocr',
+    'whisper', 'whisper-model', 'transcribe-lang', 'tmdb-token', 'llm-url',
+    'llm-key', 'llm-model', 'auto-name', 'batch-assign', 'lpcm-flac',
+    'dvd-single-pass', 'audio-langs', 'subtitle-track-langs',
+  };
+
   const Settings({
     this.isLoaded = true,
     this.videoDir,
@@ -53,6 +65,7 @@ class Settings {
     this.dvdSinglePass = false,
     this.audioLangs,
     this.subtitleTrackLangs,
+    this.extra = const {},
   });
 
   /// The output directory to actually use for video: explicit setting or XDG_VIDEOS_DIR.
@@ -85,9 +98,14 @@ class Settings {
     dvdSinglePass: json['dvd-single-pass'] as bool? ?? false,
     audioLangs: json['audio-langs'] as String?,
     subtitleTrackLangs: json['subtitle-track-langs'] as String?,
+    extra: {
+      for (final e in json.entries)
+        if (!_knownKeys.contains(e.key)) e.key: e.value,
+    },
   );
 
   Map<String, dynamic> toJson() => {
+    ...extra,
     if (videoDir  != null) 'output': videoDir,
     if (musicDir  != null) 'music-output': musicDir,
     if (ffmpeg != null) 'ffmpeg': ffmpeg,
@@ -184,6 +202,7 @@ class Settings {
     dvdSinglePass: dvdSinglePass ?? this.dvdSinglePass,
     audioLangs: audioLangs == _sentinel ? this.audioLangs : audioLangs as String?,
     subtitleTrackLangs: subtitleTrackLangs == _sentinel ? this.subtitleTrackLangs : subtitleTrackLangs as String?,
+    extra: extra,
   );
 }
 
