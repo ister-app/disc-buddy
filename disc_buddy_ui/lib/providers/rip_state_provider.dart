@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'package:disc_buddy/disc_buddy.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
+import '../models/disc_content.dart';
 import '../models/rip_state.dart';
 import '../models/settings.dart';
 import 'disc_titles_provider.dart';
@@ -442,7 +443,7 @@ class RipStateNotifier extends Notifier<RipState> {
         await _verifyDiscInIsolate(
             devicePath, scanFingerprint, DiscType.audioCD);
       } on DiscChangedException catch (e) {
-        _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
+        _discMismatch(e);
         return;
       }
     }
@@ -999,9 +1000,7 @@ class RipStateNotifier extends Notifier<RipState> {
             await _verifyDiscInIsolate(devicePath, scanFingerprint, discType);
           } on DiscChangedException catch (e) {
             receivePort.close();
-            if (!abandoned()) {
-              _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
-            }
+            if (!abandoned()) _discMismatch(e);
             return;
           }
         }
@@ -1109,6 +1108,54 @@ class RipStateNotifier extends Notifier<RipState> {
       } catch (_) {
         // Best effort; the next rip of this title removes a stale part too.
       }
+    }
+  }
+
+  bool _loopScanRunning = false;
+
+  /// Loop mode: scans the disc now in the drive and rips it with the
+  /// suggested titles (video) or all tracks (audio). Lives here rather than
+  /// in the detail panel, so a loop keeps going while another drive is on
+  /// screen. No-op unless this drive is waiting for its next disc.
+  Future<void> startLoopDisc() async {
+    if (_loopScanRunning || state is! LoopWaiting) return;
+    _loopScanRunning = true;
+    try {
+      ref.invalidate(discTitlesProvider(devicePath));
+      final content = await ref.read(discTitlesProvider(devicePath).future);
+      if (_disposed || state is! LoopWaiting) return;
+      if (content is VideoDiscContent) {
+        startRipDirect(
+          content.discTitle,
+          [
+            for (final t in content.titles)
+              if (content.suggestion.contains(t.displayKey)) t,
+          ],
+          fingerprint: content.fingerprint,
+        );
+      } else if (content is AudioCdContent) {
+        await startAudioCdRip(
+          content.metadata,
+          [for (var i = 1; i <= content.metadata.tracks.length; i++) i],
+          scanFingerprint: content.fingerprint,
+        );
+      }
+      // Anything else (unreadable or empty disc): keep waiting.
+    } catch (_) {
+      // A failed scan leaves the loop waiting for the next disc.
+    } finally {
+      _loopScanRunning = false;
+    }
+  }
+
+  /// The disc in the drive is not the one that was scanned. An attended rip
+  /// shows that and offers a rescan; a loop just scans the new disc.
+  void _discMismatch(DiscChangedException e) {
+    if (ref.read(loopEnabledProvider(devicePath))) {
+      _emit(LoopWaiting(lastOutputFiles: const []));
+      startLoopDisc();
+    } else {
+      _emit(RipDiscMismatch(expected: e.expected, actual: e.actual));
     }
   }
 

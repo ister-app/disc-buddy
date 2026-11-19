@@ -16,6 +16,13 @@ import 'rip_state_provider.dart';
 /// panel is mounted. Compares values, not event occurrence, so udev events
 /// caused by a rip opening the device do not trigger invalidation. During an
 /// active rip nothing is reset — the pre-rip fingerprint guard owns that case.
+///
+/// It also drives loop mode: a drive that is waiting for its next disc is
+/// scanned and ripped as soon as a disc becomes readable in it, whether or
+/// not that drive's panel is the one on screen.
+bool _hasDisc(DiscStatus s) =>
+    s == DiscStatus.audioCD || s == DiscStatus.dataDisc || s == DiscStatus.unknown;
+
 final discChangeWatcherProvider = Provider<void>((ref) {
   var last = <String, ({DiscStatus status, String mediaId})>{};
 
@@ -34,6 +41,10 @@ final discChangeWatcherProvider = Provider<void>((ref) {
         if (!busy) {
           ref.invalidate(discTitlesProvider(d.device));
           ref.read(ripStateProvider(d.device).notifier).reset();
+        } else if (rip is LoopWaiting &&
+            !_hasDisc(p.status) &&
+            _hasDisc(d.status)) {
+          ref.read(ripStateProvider(d.device).notifier).startLoopDisc();
         }
       }
     }

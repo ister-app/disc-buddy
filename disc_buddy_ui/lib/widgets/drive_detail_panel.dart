@@ -45,8 +45,10 @@ class DriveDetailPanel extends ConsumerWidget {
           }
         }
 
-        // Disc became readable: re-scan titles.
-        if (!wasReady && nowReady) {
+        // Disc became readable: re-scan titles. A drive waiting in loop mode
+        // is scanned (once) by the disc-change watcher instead.
+        if (!wasReady && nowReady &&
+            ref.read(ripStateProvider(next.id)) is! LoopWaiting) {
           ref.invalidate(discTitlesProvider(next.id));
           final rip = ref.read(ripStateProvider(next.id));
           if (rip is! RipInProgress && rip is! RipAudioCdProgress &&
@@ -54,55 +56,6 @@ class DriveDetailPanel extends ConsumerWidget {
             ref.read(ripStateProvider(next.id).notifier).reset();
           }
         }
-      }
-    });
-
-    // Disc-swap guard tripped: tell the user and rescan the current disc.
-    ref.listen<RipState>(ripStateProvider(entry.id), (prev, next) async {
-      if (next is! RipDiscMismatch || prev is RipDiscMismatch) return;
-      if (!ref.read(loopEnabledProvider(entry.id))) {
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Disc changed'),
-            content: const Text(
-                'The disc in the drive is not the disc that was scanned, '
-                'so the rip was not started. The drive will be rescanned.'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Rescan'),
-              ),
-            ],
-          ),
-        );
-      }
-      ref.invalidate(discTitlesProvider(entry.id));
-      ref.read(ripStateProvider(entry.id).notifier).reset();
-    });
-
-    // In loop mode: auto-start rip when a new disc is scanned.
-    ref.listen<AsyncValue<DiscContent?>>(discTitlesProvider(entry.id), (prev, next) {
-      final rip = ref.read(ripStateProvider(entry.id));
-      if (rip is! LoopWaiting) return;
-      switch (next) {
-        case AsyncData(:final value):
-          if (value is VideoDiscContent) {
-            final selected = value.titles
-                .where((t) => value.suggestion.contains(t.displayKey))
-                .toList();
-            ref.read(ripStateProvider(entry.id).notifier)
-                .startRipDirect(value.discTitle, selected,
-                    fingerprint: value.fingerprint);
-          } else if (value is AudioCdContent) {
-            final tracks =
-                List.generate(value.metadata.tracks.length, (i) => i + 1);
-            ref.read(ripStateProvider(entry.id).notifier)
-                .startAudioCdRip(value.metadata, tracks,
-                    scanFingerprint: value.fingerprint);
-          }
-        default:
-          break;
       }
     });
 
@@ -119,6 +72,11 @@ class DriveDetailPanel extends ConsumerWidget {
     }
     if (ripState is RipError) {
       return _ErrorPanel(message: ripState.message, devicePath: entry.id);
+    }
+    if (ripState is RipDiscMismatch) {
+      // A state, not a one-off dialog: it must still be explained when the
+      // swap was noticed while another drive was on screen.
+      return _DiscMismatchPanel(devicePath: entry.id);
     }
     if (ripState is LoopWaiting) {
       return _LoopWaitingPanel(devicePath: entry.id, state: ripState);
@@ -353,6 +311,41 @@ class _ErrorPanel extends ConsumerWidget {
           ElevatedButton(
             onPressed: () => ref.read(ripStateProvider(devicePath).notifier).reset(),
             child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscMismatchPanel extends ConsumerWidget {
+  final String devicePath;
+  const _DiscMismatchPanel({required this.devicePath});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.swap_horiz, size: 64,
+              color: Theme.of(context).colorScheme.error),
+          const SizedBox(height: 16),
+          Text('Disc changed', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          const Text(
+            'The disc in the drive is not the disc that was scanned, '
+            'so the rip was not started.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            onPressed: () {
+              ref.invalidate(discTitlesProvider(devicePath));
+              ref.read(ripStateProvider(devicePath).notifier).reset();
+            },
+            child: const Text('Rescan'),
           ),
         ],
       ),
