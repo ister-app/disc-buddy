@@ -101,6 +101,17 @@ both stories are named on their own; the halves replace the original file, and a
 out to hold one long story keeps its full length.
 The GUI offers the same as "Two stories per file" next to the auto-name options of a directory.
 
+### Auto-naming with a local model
+
+Auto-naming talks to any OpenAI-compatible endpoint (`llm-url`, `llm-model`, `llm-key` in the config or as CLI options), so a local [Ollama](https://ollama.com) works: `--llm-url http://127.0.0.1:11434/v1`.
+
+Two things matter with small local models:
+
+- **Turn thinking off.** Models such as `gemma4` and `qwen3` reason before they answer and can spend the whole answer budget on it, returning nothing after minutes. Set `llm-reasoning` to `none` (`--llm-reasoning none`, or the field on the GUI's settings screen). `gpt-oss` cannot switch it off; use `low`.
+- **Give the model enough context.** A request carries up to ~25 000 characters of subtitle text plus the episode list. Ollama's default context is smaller, so create a variant: `printf 'FROM gemma4:12b\nPARAMETER num_ctx 16384\n' > Modelfile && ollama create gemma4-12b-16k -f Modelfile`.
+
+Measured on a 16 GB GPU (2026-11): `gemma4:12b` with reasoning `none` named ten English-subtitled episodes correctly in about 2.5 minutes, and two of three Dutch-subtitled ones; `gpt-oss:20b` at `low` matched the first set and none of the second; `qwen3:8b` was worse on both. A large hosted model remains more accurate on hard cases.
+
 When `--device` is omitted, an interactive drive selection menu is shown. The menu updates in real time as discs are inserted or removed.
 
 ---
