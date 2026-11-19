@@ -172,6 +172,14 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           overwrite: overwrite);
     } else {
       _log('   (libdvdread not found — VOB concat mode; encrypted discs will fail)');
+      if (selected.any((t) => t.pgcCount > 1)) {
+        // This mode feeds ffmpeg the whole VOB set of a VTS; it cannot start
+        // at one title's cells, so every title of a shared VTS begins at the
+        // first one and is then cut off (and reported as failed).
+        _log('   Warning: several titles share one title set on this disc. '
+            'Without libdvdread they cannot be ripped separately — install '
+            'libdvdread to rip them.', isError: true);
+      }
       await _ripWithVobConcat(device, discTitle, selected, outDir, langsMap,
           mountPath: mountPath, overwrite: overwrite);
     }

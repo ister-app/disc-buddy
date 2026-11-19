@@ -13,8 +13,16 @@ Future<ProcessResult> runWithTimeout(
   required Duration timeout,
 }) async {
   final process = await Process.start(executable, arguments);
-  final stdoutText = process.stdout.transform(systemEncoding.decoder).join();
-  final stderrText = process.stderr.transform(systemEncoding.decoder).join();
+  final out = StringBuffer();
+  final err = StringBuffer();
+  final outDone = process.stdout
+      .transform(systemEncoding.decoder)
+      .listen(out.write)
+      .asFuture<void>();
+  final errDone = process.stderr
+      .transform(systemEncoding.decoder)
+      .listen(err.write)
+      .asFuture<void>();
   var timedOut = false;
   final timer = Timer(timeout, () {
     timedOut = true;
@@ -22,12 +30,13 @@ Future<ProcessResult> runWithTimeout(
   });
   try {
     final exitCode = await process.exitCode;
-    final out = await stdoutText;
-    final err = await stderrText;
     if (timedOut) {
+      // Do not wait for the pipes: a grandchild that inherited them (a shell
+      // wrapper's command) can keep them open long after the kill.
       throw TimeoutException('$executable did not finish in time', timeout);
     }
-    return ProcessResult(process.pid, exitCode, out, err);
+    await Future.wait([outDone, errDone]);
+    return ProcessResult(process.pid, exitCode, out.toString(), err.toString());
   } finally {
     timer.cancel();
   }

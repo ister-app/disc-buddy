@@ -20,11 +20,13 @@ void main() {
 
     final sw = Stopwatch()..start();
     await expectLater(
+      // The shell's `sleep` child inherits the pipes and outlives the kill:
+      // the timeout must not wait for it.
       runWithTimeout('sh', ['-c', 'sleep 2; touch "${marker.path}"'],
           timeout: const Duration(milliseconds: 200)),
       throwsA(isA<TimeoutException>()),
     );
-    expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
+    expect(sw.elapsed, lessThan(const Duration(seconds: 1)));
 
     // Had the shell survived, it would create the marker after its sleep.
     await Future<void>.delayed(const Duration(milliseconds: 2500));

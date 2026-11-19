@@ -22,6 +22,40 @@ closed captions, Seinfeld S7 auto-selection) has been removed.
   unless `--dvd-single-pass` is used; the CC fallback re-reads the title a
   third time when the tee is abandoned.
 
+## Review findings left open (2026-11-19)
+
+Reported by a code review, judged plausible, deliberately not changed
+because they touch behaviour tuned on real discs or cannot be checked
+without one:
+
+- **Completion kill counts as failure for video.** `FfmpegRunner` SIGTERMs
+  ffmpeg 3 s after progress reaches the title duration; ffmpeg then exits
+  255 and the DVD/Blu-ray rippers delete the output. Only the libcdio audio
+  path tolerates that. Bites when a source runs past its metadata duration
+  (e.g. the Blu-ray M2TS fallback, which ignores playlist IN/OUT times).
+  Accepting the kill would trade a loud failure for a possibly truncated
+  file, so it needs a disc that shows it.
+- **VOB-concat fallback ignores a title's cells** (no libdvdread): every
+  title of a multi-title VTS starts at the VTS start. It now warns; a real
+  fix streams the cell ranges like the dvdread path does.
+- **Split pair sharing one episode** (`episode_matcher.dart` ~286,
+  `episode_conflicts.dart`): when both halves of a file claim the same
+  episode only the first is registered in `usedStems`; a later conflict
+  that moves the first half leaves the second holding the stem, and the
+  file may be cut in two after all.
+- **CC timing with interleaved `FE`/`FF` triples** (`cc_extractor.dart`
+  `_flushGop`): kept pairs are placed by their index among kept pairs, not
+  by their triple slot; captions late in a GOP could be up to ~0.25 s
+  early on discs with that layout.
+- **Ctrl+C in the CLI**: the SIGINT handler cannot run while a prompt
+  blocks in a synchronous TTY read, and the timed `exit(130)` skips the ISO
+  unmount. Not reproduced (needs a TTY).
+- **UI loop mode with an unchanged volume label**: the second disc's titles
+  are skipped as "already exists" (no longer overwritten); loop mode has no
+  per-disc naming unless auto-naming is on.
+- A cancelled UI rip does not close its libdvdread session (the isolate is
+  killed), leaking a file descriptor per cancel.
+
 ## Library
 
 - A second subtitle track in the same language is not written as a
