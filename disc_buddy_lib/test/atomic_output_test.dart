@@ -39,6 +39,25 @@ void main() {
       expect(File(partPath(finalFile.path)).existsSync(), isFalse);
     });
 
+    test('bestaand eindbestand: vervangen bij succes, behouden bij mislukking',
+        () async {
+      final finalFile = File(p.join(tmp.path, 'out.mkv'))
+        ..writeAsStringSync('old');
+
+      await withPartFile<bool>(finalFile, (part) async {
+        part.writeAsStringSync('half');
+        return false;
+      }, succeeded: (b) => b);
+      expect(finalFile.readAsStringSync(), 'old');
+
+      await withPartFile<bool>(finalFile, (part) async {
+        part.writeAsStringSync('new');
+        return true;
+      }, succeeded: (b) => b);
+      expect(finalFile.readAsStringSync(), 'new');
+      expect(File(partPath(finalFile.path)).existsSync(), isFalse);
+    });
+
     test('exception in body → opgeruimd en exception propageert', () async {
       final finalFile = File(p.join(tmp.path, 'out.mkv'));
       await expectLater(

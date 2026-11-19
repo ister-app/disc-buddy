@@ -32,8 +32,12 @@ Future<File?> writeChapterMetadata(
 
 /// Checks if [file] already exists and asks for overwrite confirmation.
 ///
-/// Returns `true` if ripping may proceed (file did not exist, or was deleted
-/// after confirmation). Returns `false` if the file should be skipped.
+/// Returns `true` if ripping may proceed (file does not exist, or may be
+/// replaced). Returns `false` if the file should be skipped.
+///
+/// The existing file is left in place: the rip writes to a `.part` sibling
+/// and `withPartFile` renames it over [file] only once it succeeded, so a
+/// failed or cancelled re-rip does not cost the user the file they had.
 ///
 /// [overwrite] — when non-null (and not [force]), the decision is made from
 /// the set instead of prompting: paths in the set are deleted and re-ripped,
@@ -53,19 +57,9 @@ Future<bool> confirmOverwrite(File file,
     emitLog(onLog, '   Skipped.');
     return false;
   }
-  final shouldDelete = force || (overwrite != null) ||
-      await prompter.confirm('   File already exists — delete? [y/N] ');
-  if (shouldDelete) {
-    try {
-      await file.delete();
-      return true;
-    } catch (e) {
-      // The delete failed (e.g. permissions). Returning true here would let the
-      // caller write over a file we couldn't remove, so report failure instead.
-      emitLog(onLog, '   Cannot delete file: $e', isError: true);
-      return false;
-    }
-  }
+  final replace = force || (overwrite != null) ||
+      await prompter.confirm('   File already exists — replace? [y/N] ');
+  if (replace) return true;
   emitLog(onLog, '   Skipped.');
   return false;
 }

@@ -654,6 +654,8 @@ class _FooterState extends ConsumerState<_Footer> {
     // Predict output paths (rip output, or the post-rip rename target when a
     // custom name is set) and list the ones that already exist in a per-file
     // overwrite dialog, mirroring the Audio CD flow.
+    // A custom-named title can collide twice: with a leftover under the
+    // rip-phase name and with a file that already carries the custom name.
     final conflictTitles = <String, VideoTitle>{}; // existing path → title
     final ripPhasePaths  = <String, String>{};     // displayKey → rip output
     for (final title in selectedTitles) {
@@ -664,7 +666,9 @@ class _FooterState extends ConsumerState<_Footer> {
       final finalPath = cfg?.customName?.isNotEmpty == true
           ? p.join(outDirPath, '${sanitizeFilename(cfg!.customName!)}.mkv')
           : ripPath;
-      if (await File(finalPath).exists()) conflictTitles[finalPath] = title;
+      for (final path in {ripPath, finalPath}) {
+        if (await File(path).exists()) conflictTitles[path] = title;
+      }
     }
 
     Set<String>? overwrite;
@@ -680,12 +684,19 @@ class _FooterState extends ConsumerState<_Footer> {
       final notifier = ref.read(ripStateProvider(widget.entry.id).notifier);
       overwrite = {};
       var remaining = selState.selectedKeys.length;
-      for (final entry in conflictTitles.entries) {
-        if (chosen.contains(entry.key)) {
-          overwrite.add(ripPhasePaths[entry.value.displayKey]!);
-        } else {
-          notifier.toggleTitle(entry.value.displayKey);
+      // A title is ripped only when every file it would replace was ticked.
+      final declined = <String>{
+        for (final entry in conflictTitles.entries)
+          if (!chosen.contains(entry.key)) entry.value.displayKey,
+      };
+      for (final key in {
+        for (final t in conflictTitles.values) t.displayKey,
+      }) {
+        if (declined.contains(key)) {
+          notifier.toggleTitle(key);
           remaining--;
+        } else {
+          overwrite.add(ripPhasePaths[key]!);
         }
       }
       if (remaining <= 0) return;

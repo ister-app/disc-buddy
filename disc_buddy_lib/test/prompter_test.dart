@@ -137,12 +137,12 @@ void main() {
     });
     tearDown(() => tmp.deleteSync(recursive: true));
 
-    test('prompter ja → verwijderd en true', () async {
+    test('prompter ja → true, bestand blijft tot de rip slaagt', () async {
       final f = File('${tmp.path}/a.mkv')..writeAsStringSync('x');
       final ok = await confirmOverwrite(f,
           force: false, onLog: onLog, prompter: FakePrompter([true]));
       expect(ok, isTrue);
-      expect(f.existsSync(), isFalse);
+      expect(f.readAsStringSync(), 'x');
     });
 
     test('prompter nee → "Skipped" en false', () async {

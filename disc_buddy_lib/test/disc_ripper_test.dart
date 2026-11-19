@@ -260,14 +260,16 @@ void main() {
       );
     });
 
-    test('bestaand bestand in set → verwijderd en true', () async {
+    test('bestaand bestand in set → true, blijft staan tot de rip slaagt',
+        () async {
       final f = File('${tmp.path}/a.mkv')..writeAsStringSync('x');
       expect(
         await confirmOverwrite(f,
             force: false, onLog: log, overwrite: {f.path}),
         isTrue,
       );
-      expect(f.existsSync(), isFalse);
+      // Replaced by withPartFile's rename, not deleted up front.
+      expect(f.readAsStringSync(), 'x');
     });
 
     test('bestaand bestand niet in set → false, bestand blijft', () async {
@@ -279,13 +281,13 @@ void main() {
       expect(f.existsSync(), isTrue);
     });
 
-    test('force verwijdert ook buiten de set', () async {
+    test('force vervangt ook buiten de set', () async {
       final f = File('${tmp.path}/c.mkv')..writeAsStringSync('x');
       expect(
         await confirmOverwrite(f, force: true, onLog: log, overwrite: {}),
         isTrue,
       );
-      expect(f.existsSync(), isFalse);
+      expect(f.readAsStringSync(), 'x');
     });
   });
 }

@@ -129,7 +129,11 @@ class Settings {
     llmUrl: llmUrl,
     llmKey: llmKey,
     llmModel: llmModel,
-    force: true,
+    // Not `force`: that makes the rippers delete every existing output,
+    // also the ones left unticked in the overwrite dialog. Without it (and
+    // without a prompter) questions still take their defaults, and an
+    // existing file is only replaced when it is in the rip's overwrite set.
+    force: false,
     autoName: autoName,
     batchAssign: batchAssign,
     lpcmFlac: lpcmFlac,
