@@ -499,11 +499,17 @@ class RipStateNotifier extends Notifier<RipState> {
     }
   }
 
+  /// Copies a standalone MKV into the video directory and post-processes
+  /// the copy. With [autoName] the copy keeps the source's name until the
+  /// namer has identified it, and [newName]/[seasons] are hints for the
+  /// namer; without it [newName] is simply the new file name.
   Future<void> startMkvProcess({
     required String mkvPath,
     String? newName,
     required bool extractSubtitles,
     required String subtitleLangs,
+    bool autoName = false,
+    List<int> seasons = const [],
   }) async {
     final logs = <String>[];
 
@@ -522,8 +528,9 @@ class RipStateNotifier extends Notifier<RipState> {
     try {
       final settings = _settings;
       final srcFile = File(mkvPath);
-      final stem = newName?.trim().isNotEmpty == true
-          ? sanitizeFilename(newName!.trim())
+      final typed = newName?.trim() ?? '';
+      final stem = !autoName && typed.isNotEmpty
+          ? sanitizeFilename(typed)
           : p.basenameWithoutExtension(mkvPath);
       final destPath = p.join(settings.effectiveOutputDir, '$stem.mkv');
       final destFile = File(destPath);
@@ -540,28 +547,16 @@ class RipStateNotifier extends Notifier<RipState> {
         appendLog('Done.');
       }
 
-      final ocrOk = ref.read(subtitleToolsAvailableProvider);
-      if (extractSubtitles && !ocrOk) {
-        appendLog('Subtitle extraction skipped: mkvextract and subtile-ocr '
-            'were not found (see Settings).', isError: true);
-      }
-      if (extractSubtitles && ocrOk) {
-        appendLog('Extracting subtitles...');
-        final extractor = SubtitleExtractor(
-          ffmpeg: settings.ffmpeg ?? 'ffmpeg',
-          ffprobe: settings.ffprobe ?? 'ffprobe',
-          mkvextract: settings.mkvextract ?? 'mkvextract',
-          subtileOcr: settings.subtileOcr ?? 'subtile-ocr',
-          onLog: appendLog,
-        );
-        final langs = subtitleLangs.trim().isEmpty
-            ? null
-            : subtitleLangs.split(RegExp(r'[,\s]+')).toSet();
-        await extractor.extractAll(destFile, languages: langs);
-        appendLog('Subtitle extraction complete.');
-      }
-
-      _emit(RipCompleted([destPath], log: List.from(logs)));
+      final outputs = await _postProcess(
+        files: [destPath],
+        log: appendLog,
+        extractSubtitles: extractSubtitles,
+        subtitleLangs: subtitleLangs,
+        autoName: autoName,
+        nameHint: autoName && typed.isNotEmpty ? typed : null,
+        seasons: seasons,
+      );
+      _emit(RipCompleted(outputs, log: List.from(logs)));
     } catch (e) {
       _emit(RipError(e.toString()));
     }

@@ -39,7 +39,5 @@ closed captions, Seinfeld S7 auto-selection) has been removed.
 - "Two stories per file" (directory mode) mirrors the CLI's
   `--split-stories` but has not been run against a real LLM/TMDB batch
   from the UI yet.
-- The standalone-MKV panel has no auto-name option (the CLI's `?` answer);
-  opening the file's directory instead does offer it.
 - Rename individual audio/subtitle stream titles per title.
 - Disc-page skeleton should mirror the real page layout.

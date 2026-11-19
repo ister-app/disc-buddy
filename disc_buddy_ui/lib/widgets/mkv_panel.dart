@@ -18,7 +18,10 @@ class MkvPanel extends ConsumerStatefulWidget {
 class _MkvPanelState extends ConsumerState<MkvPanel> {
   late TextEditingController _nameController;
   late TextEditingController _langsController;
+  final _hintController = TextEditingController();
+  final _seasonController = TextEditingController();
   bool _extractSubtitles = false;
+  late bool _autoName;
 
   @override
   void initState() {
@@ -29,19 +32,28 @@ class _MkvPanelState extends ConsumerState<MkvPanel> {
         : filename;
     _nameController = TextEditingController(text: stem);
     _langsController = TextEditingController(text: 'en,nl');
+    _autoName = ref.read(settingsProvider).autoName;
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _langsController.dispose();
+    _hintController.dispose();
+    _seasonController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
-    final canExtract = settings.mkvextract != null && settings.subtileOcr != null;
+    // Configured path or default command on PATH — same check as elsewhere.
+    final canExtract = ref.watch(subtitleToolsAvailableProvider);
+    final canAutoName = settings.tmdbToken != null &&
+        settings.llmUrl != null &&
+        settings.llmModel != null &&
+        (canExtract || ref.watch(whisperAvailableProvider));
+    final autoName = _autoName && canAutoName;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -78,13 +90,50 @@ class _MkvPanelState extends ConsumerState<MkvPanel> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Output name (without .mkv)',
-                  border: OutlineInputBorder(),
+              if (canAutoName)
+                SwitchListTile(
+                  title: const Text('Auto name'),
+                  subtitle: const Text(
+                      'Identify the film or episode from its subtitles or audio'),
+                  value: _autoName,
+                  onChanged: (v) => setState(() => _autoName = v),
+                  contentPadding: EdgeInsets.zero,
                 ),
-              ),
+              if (autoName)
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextField(
+                        controller: _hintController,
+                        decoration: const InputDecoration(
+                          labelText: 'Series / Movie name (optional hint)',
+                          hintText: 'e.g. Seinfeld',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _seasonController,
+                        decoration: const InputDecoration(
+                          labelText: 'Season(s)',
+                          hintText: 'e.g. 7',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              else
+                TextField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Output name (without .mkv)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
               const SizedBox(height: 16),
               if (canExtract) ...[
                 SwitchListTile(
@@ -107,7 +156,7 @@ class _MkvPanelState extends ConsumerState<MkvPanel> {
                 ],
               ] else
                 Text(
-                  'Subtitle extraction unavailable — configure mkvextract and subtile-ocr in Settings.',
+                  'Subtitle extraction unavailable — install mkvextract and subtile-ocr or set their paths in Settings.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Theme.of(context).colorScheme.outline,
                   ),
@@ -129,11 +178,28 @@ class _MkvPanelState extends ConsumerState<MkvPanel> {
   }
 
   void _process() {
+    final settings = ref.read(settingsProvider);
+    final autoName = _autoName &&
+        settings.tmdbToken != null &&
+        settings.llmUrl != null &&
+        settings.llmModel != null &&
+        (ref.read(subtitleToolsAvailableProvider) ||
+            ref.read(whisperAvailableProvider));
+    final typed =
+        (autoName ? _hintController.text : _nameController.text).trim();
     ref.read(ripStateProvider(widget.entry.id).notifier).startMkvProcess(
       mkvPath: widget.content.path,
-      newName: _nameController.text.trim().isEmpty ? null : _nameController.text.trim(),
+      newName: typed.isEmpty ? null : typed,
       extractSubtitles: _extractSubtitles,
       subtitleLangs: _langsController.text.trim(),
+      autoName: autoName,
+      seasons: autoName
+          ? _seasonController.text
+              .split(RegExp(r'[,\s]+'))
+              .map(int.tryParse)
+              .whereType<int>()
+              .toList()
+          : const [],
     );
   }
 }
