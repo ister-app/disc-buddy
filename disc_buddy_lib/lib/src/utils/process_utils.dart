@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 /// Like `Process.run(...).timeout(...)`, but the child does not outlive the
@@ -13,16 +14,23 @@ Future<ProcessResult> runWithTimeout(
   required Duration timeout,
 }) async {
   final process = await Process.start(executable, arguments);
+  // Like Process.run: the child gets no stdin to wait on.
+  unawaited(process.stdin.close().catchError((Object _) {}));
+  // Tolerant decoding: a tool that prints a stray non-UTF-8 byte (a split
+  // multi-byte token, Latin-1 metadata) must not take the caller down.
+  const decoder = Utf8Decoder(allowMalformed: true);
   final out = StringBuffer();
   final err = StringBuffer();
   final outDone = process.stdout
-      .transform(systemEncoding.decoder)
+      .transform(decoder)
       .listen(out.write)
-      .asFuture<void>();
+      .asFuture<void>()
+      .catchError((Object _) {});
   final errDone = process.stderr
-      .transform(systemEncoding.decoder)
+      .transform(decoder)
       .listen(err.write)
-      .asFuture<void>();
+      .asFuture<void>()
+      .catchError((Object _) {});
   var timedOut = false;
   final timer = Timer(timeout, () {
     timedOut = true;

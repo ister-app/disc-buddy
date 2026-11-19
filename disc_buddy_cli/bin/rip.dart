@@ -346,13 +346,21 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
 
     await ripper.rip(discTitle, selected, mountPath: mp);
 
-    // A failed title is only a log line inside rip(); what counts is whether
-    // its file is there (a title skipped because it already exists has one).
+    // A failed title is only a log line inside rip(). The ripper says which
+    // ones failed — the filesystem cannot: a failed re-rip leaves the old
+    // file in place. A missing file counts too (rip() bailed out early).
     final failed = [
       for (final t in selected)
-        if (!File(videoTitleOutputPath(opts.outputDir, discTitle, t))
-            .existsSync())
+        if (ripper.failedTitleKeys.contains(t.displayKey) ||
+            !File(videoTitleOutputPath(opts.outputDir, discTitle, t))
+                .existsSync())
           t.displayKey,
+    ];
+    // Subtitles, names and renames are for what this run produced (or was
+    // told to leave alone), not for a stale file behind a failed title.
+    final done = [
+      for (final t in selected)
+        if (!failed.contains(t.displayKey)) t,
     ];
     if (failed.isNotEmpty) {
       stderr.writeln('');
@@ -378,7 +386,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     final outDir = Directory(p.join(opts.outputDir, sanitizeFilename(discTitle)));
     await resolveSubtitlesAndNames(
       opts, outDir, discTitle,
-      selected.map((t) => (filename: t.filename, displayKey: t.displayKey)).toList(),
+      done.map((t) => (filename: t.filename, displayKey: t.displayKey)).toList(),
       namePrefs,
       doExtract: extractChoice.doExtract,
       extractLangs: extractChoice.langs,
@@ -387,7 +395,7 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     );
 
     await applyRenames(outDir, discTitle,
-        selected.map((t) => t.filename).toList(), namePrefs);
+        done.map((t) => t.filename).toList(), namePrefs);
 
     if (!isIso) {
       // An unattended loop must not eject a disc that did not rip and carry
@@ -455,8 +463,10 @@ Future<bool> _ripAudioCD(RipOptions opts) async {
     for (final nr in selected)
       if (nr >= 1 &&
           nr <= meta.tracks.length &&
-          !File(audioTrackOutputPath(opts.outputDir, meta, meta.tracks[nr - 1]))
-              .existsSync())
+          (ripper.failedTracks.contains(nr) ||
+              !File(audioTrackOutputPath(
+                      opts.outputDir, meta, meta.tracks[nr - 1]))
+                  .existsSync()))
         nr,
   ];
   if (failed.isNotEmpty) {

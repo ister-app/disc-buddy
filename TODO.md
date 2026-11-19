@@ -46,8 +46,16 @@ without one:
   blocks in a synchronous TTY read, and the timed `exit(130)` skips the ISO
   unmount. Not reproduced (needs a TTY).
 - **UI loop mode with an unchanged volume label**: the second disc's titles
-  are skipped as "already exists" (no longer overwritten); loop mode has no
-  per-disc naming unless auto-naming is on.
+  are skipped as "already exists"; the loop now stops there and reports
+  them instead of ejecting. Loop mode has no per-disc naming unless
+  auto-naming is on.
+- **CC sidecar on a failed re-rip**: the closed-caption tee writes straight
+  to `<stem>.en.srt` and deletes it when the rip fails, although the old
+  MKV is now kept. Regenerable from the MKV's embedded track; a real fix
+  tees into a part-named sidecar.
+- **Split stories + subtitle extraction**: subtitles are extracted per
+  story. A file that turns out to be one story keeps no `.srt` (its halves
+  are deleted); extract again for that file.
 - A cancelled UI rip does not close its libdvdread session (the isolate is
   killed), leaking a file descriptor per cancel.
 

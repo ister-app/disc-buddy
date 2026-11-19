@@ -13,6 +13,16 @@ void main() {
     expect(r.stderr, 'err\n');
   });
 
+  test('ongeldige UTF-8 in de uitvoer en een proces dat stdin leest', () async {
+    final r = await runWithTimeout(
+        'sh', ['-c', r"printf 'a\377b' >&2; cat; echo done"],
+        timeout: const Duration(seconds: 10));
+    expect(r.exitCode, 0);
+    expect(r.stdout, 'done\n'); // cat saw end-of-input instead of hanging
+    expect(r.stderr, startsWith('a'));
+    expect(r.stderr, endsWith('b'));
+  });
+
   test('runWithTimeout beëindigt het proces bij een timeout', () async {
     final tmp = Directory.systemTemp.createTempSync('run_timeout_');
     addTearDown(() => tmp.deleteSync(recursive: true));

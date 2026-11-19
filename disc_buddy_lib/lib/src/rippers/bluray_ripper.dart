@@ -25,6 +25,12 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   /// `options.force` set every question is answered with its default.
   final Prompter _prompter;
 
+  @override
+  final Set<String> failedTitleKeys = {};
+
+  @override
+  final Set<String> skippedTitleKeys = {};
+
   BlurayRipper(this.options,
       {this.onLog,
       this.onProgress,
@@ -77,6 +83,8 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
   @override
   Future<void> rip(String discTitle, List<BlurayTitle> selected,
       {String? mountPath, Set<String>? overwrite}) async {
+    failedTitleKeys.clear();
+    skippedTitleKeys.clear();
     final outDir = Directory(p.join(options.outputDir, sanitizeFilename(discTitle)));
     await outDir.create(recursive: true);
 
@@ -489,6 +497,7 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
 
     if (!await confirmOverwrite(outFile,
         force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
+      skippedTitleKeys.add(title.displayKey);
       return;
     }
 
@@ -610,7 +619,11 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     }
     return false;
     }, succeeded: (ok) => ok, onLog: onLog);
-    if (ok) _log('   Done: ${outFile.path}');
+    if (ok) {
+      _log('   Done: ${outFile.path}');
+    } else {
+      failedTitleKeys.add(title.displayKey);
+    }
   }
 
   static List<String> _buildLibblurayArgs({

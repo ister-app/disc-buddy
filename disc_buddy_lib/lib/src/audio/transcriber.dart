@@ -199,8 +199,13 @@ class Transcriber {
           : 'en';
       // A transcript made in another language than the one now forced, or
       // with another model, is exactly what a re-run is trying to replace.
-      final forced = language;
-      if (forced != null && forced.isNotEmpty && forced != cachedLang) {
+      // Same normalisation as transcribe(): `auto` (or nothing) forces no
+      // language, so any cached language is acceptable then.
+      final forced = language?.trim().toLowerCase();
+      if (forced != null &&
+          forced.isNotEmpty &&
+          forced != 'auto' &&
+          forced != cachedLang.trim().toLowerCase()) {
         return null;
       }
       final cachedModel = json['model'];

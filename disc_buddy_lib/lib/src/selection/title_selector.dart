@@ -492,15 +492,23 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
     // will have chapters at clearly different positions (easily > 2 s apart),
     // while navigation duplicates pointing to the same physical VOB content
     // will have near-identical positions.  With different chapter counts the
-    // chapters they have in common are compared (a duplicate may carry one
+    // shorter list must be contained in the longer (a duplicate may carry an
     // extra marker); two episodes of equal length must not be merged just
     // because one has 5 chapters and the other 6.
     final ach = pa.chapters;
     final bch = pb.chapters;
     if (ach.length >= 2 && bch.length >= 2) {
-      final n = ach.length < bch.length ? ach.length : bch.length;
-      for (var i = 0; i < n; i++) {
-        if ((ach[i] - bch[i]).abs() > chapTol) return false;
+      // Every chapter of the shorter list must have a counterpart, in order,
+      // in the longer one — the extra marker may sit anywhere.
+      final shorter = ach.length <= bch.length ? ach : bch;
+      final longer = identical(shorter, ach) ? bch : ach;
+      var j = 0;
+      for (final c in shorter) {
+        while (j < longer.length && (longer[j] - c).abs() > chapTol) {
+          j++;
+        }
+        if (j == longer.length) return false;
+        j++;
       }
       return true;
     }

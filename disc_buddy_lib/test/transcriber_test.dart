@@ -179,6 +179,9 @@ void main() {
       expect(await hit(language: 'en'), isTrue);
       expect(await hit(language: 'nl'), isFalse);
       expect(await hit(model: 'large.bin'), isFalse);
+      // `auto` forces nothing; case and padding do not matter.
+      expect(await hit(language: 'auto'), isTrue);
+      expect(await hit(language: ' EN '), isTrue);
 
       // Sidecars written before the model was recorded stay usable.
       await sidecar

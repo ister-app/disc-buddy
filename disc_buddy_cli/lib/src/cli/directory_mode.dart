@@ -127,10 +127,16 @@ Future<bool> processDirectory(
     }
 
     // --- Step 1: Extract subtitles for all selected files ---
+    // A split file's subtitles are extracted per story: the stories are what
+    // remains when the split is kept, and the whole file's sidecars go with
+    // it. (A file that turns out to be one story loses them with its halves.)
     if (extractChoice.doExtract && extractor != null) {
       for (final file in selected) {
-        log('\n── Extracting subtitles: ${file.path}');
-        await extractor.extractAll(file, languages: extractChoice.langs);
+        final split = splits[file.path];
+        for (final f in split == null ? [file] : [split.first, split.second]) {
+          log('\n── Extracting subtitles: ${f.path}');
+          await extractor.extractAll(f, languages: extractChoice.langs);
+        }
       }
     }
 

@@ -53,6 +53,16 @@ void main() {
       expect(result.map((x) => x.vtsNumber), [1, 2]);
     });
 
+    test('extra marker vooraan in het duplicaat → nog steeds een duplicaat',
+        () {
+      final result = deduplicateDvdTitles([
+        t(vts: 1, pgc: 0, dur: m(22, 5), chapters: [m(0), m(5), m(10)]),
+        t(vts: 2, pgc: 0, dur: m(22, 5),
+            chapters: [m(0), m(0, 30), m(5), m(10)]),
+      ]);
+      expect(result.map((x) => x.vtsNumber), [1]);
+    });
+
     test('navigatie-duplicaat met één extra hoofdstukmarker valt weg', () {
       final result = deduplicateDvdTitles([
         t(vts: 1, pgc: 0, dur: m(22, 5),

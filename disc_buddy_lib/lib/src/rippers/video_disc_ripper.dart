@@ -32,5 +32,15 @@ abstract interface class VideoDiscRipper<T extends VideoTitle> {
   Future<({String discTitle, List<T> titles})?> loadTitles({String? mountPath});
   Future<void> rip(String discTitle, List<T> selected,
       {String? mountPath, Set<String>? overwrite});
+
+  /// Display keys of the titles the last [rip] tried and failed to produce.
+  /// A caller cannot tell that from the filesystem: a failed re-rip leaves
+  /// the previous output in place. Titles skipped because their file exists
+  /// and may not be replaced are not failures.
+  Set<String> get failedTitleKeys;
+
+  /// Display keys of the titles the last [rip] left alone because their
+  /// output exists and may not be replaced. Their file is not this run's.
+  Set<String> get skippedTitleKeys;
 }
 

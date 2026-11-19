@@ -67,6 +67,11 @@ class AudioCDRipper {
   Process? _currentProcess;
   bool _cancelled = false;
 
+  /// Numbers of the tracks the last [rip] tried and failed to produce
+  /// (including one interrupted by [cancel]). Not visible on disk: a failed
+  /// re-rip leaves the previous file in place.
+  final Set<int> failedTracks = {};
+
   /// Whether [cancel] was called during the current or last [rip].
   bool get cancelled => _cancelled;
 
@@ -229,6 +234,7 @@ class AudioCDRipper {
     Set<String>? overwrite,
   }) async {
     _cancelled = false;
+    failedTracks.clear();
     final albumDir = p.join(options.outputDir,
         sanitizeFilename(meta.artistDir), sanitizeFilename(meta.albumDir));
     await Directory(albumDir).create(recursive: true);
@@ -421,7 +427,11 @@ class AudioCDRipper {
       _log('   Error ripping track ${track.number} ($detail).', isError: true);
       return false;
     }, succeeded: (ok) => ok, onLog: onLog);
-    if (ok) _log('   Done: ${outFile.path}');
+    if (ok) {
+      _log('   Done: ${outFile.path}');
+    } else {
+      failedTracks.add(track.number);
+    }
   }
 
   /// Fallback rip via ffmpeg's libcdio input. libcdio hangs after the last
@@ -475,7 +485,11 @@ class AudioCDRipper {
         'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);
     return false;
     }, succeeded: (ok) => ok, onLog: onLog);
-    if (ok) _log('   Done: ${outFile.path}');
+    if (ok) {
+      _log('   Done: ${outFile.path}');
+    } else {
+      failedTracks.add(track.number);
+    }
   }
 
   /// Fetches disc ID and corrected lead-out as a (discId, leadOut) record.

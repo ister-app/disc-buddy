@@ -41,6 +41,12 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   /// warn about zero-filled sectors or a too-short output after [rip].
   final List<TitleRipReport> reports = [];
 
+  @override
+  final Set<String> failedTitleKeys = {};
+
+  @override
+  final Set<String> skippedTitleKeys = {};
+
   /// Asks about languages and overwrites. `force` always wins: with
   /// `options.force` set every question is answered with its default.
   final Prompter _prompter;
@@ -111,6 +117,8 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
   @override
   Future<void> rip(String discTitle, List<DvdTitle> selected,
       {String? mountPath, Set<String>? overwrite}) async {
+    failedTitleKeys.clear();
+    skippedTitleKeys.clear();
     final device = options.device!;
 
     // Remember every IFO-declared stream id per title BEFORE any track
@@ -197,6 +205,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     final session = DVDSession.open(device);
     if (session == null) {
       _log('   Cannot open disc — libdvdread unavailable.', isError: true);
+      failedTitleKeys.addAll(selected.map((t) => t.displayKey));
       return;
     }
 
@@ -216,6 +225,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
       if (!await confirmOverwrite(outFile,
           force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
+        skippedTitleKeys.add(title.displayKey);
         continue;
       }
 
@@ -414,6 +424,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
             'remaining titles.', isError: true);
         produced = await ripAttempt(false);
       }
+      if (!produced) failedTitleKeys.add(title.displayKey);
     }
     } finally {
       session.close();
@@ -437,12 +448,14 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
 
         if (!await confirmOverwrite(outFile,
             force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
+          skippedTitleKeys.add(title.displayKey);
           continue;
         }
 
         final vobFiles = _collectVobs(mp, title.vtsNumber);
         if (vobFiles.isEmpty) {
           _log('   No VOB files found for ${title.displayKey}.', isError: true);
+          failedTitleKeys.add(title.displayKey);
           continue;
         }
 
@@ -502,6 +515,7 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
           return false;
         }, succeeded: (ok) => ok, onLog: onLog);
 
+        if (!produced) failedTitleKeys.add(title.displayKey);
         if (produced) {
           await _reportTitle(title, outFile, null);
           await _injectSubtitlePalette(outFile, title, langs.subLangs);

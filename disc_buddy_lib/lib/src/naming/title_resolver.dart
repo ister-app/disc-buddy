@@ -120,10 +120,12 @@ class TitleResolver {
       ));
     }
     scored.sort((a, b) => b.score.compareTo(a.score));
+    // The best score decides whether the match is trusted and what counts as
+    // a tie — also when a (slightly lower) series is moved to the front.
+    final bestScore = scored.first.score;
     if (preferSeries && scored.first.type == 'movie') {
-      final best = scored.first.score;
       final i = scored.indexWhere(
-          (c) => c.type != 'movie' && (best - c.score) < tieMargin);
+          (c) => c.type != 'movie' && (bestScore - c.score) < tieMargin);
       if (i > 0) scored.insert(0, scored.removeAt(i));
     }
 
@@ -133,10 +135,10 @@ class TitleResolver {
       '${scored.take(5).map((c) => "${c.label}=${c.score.toStringAsFixed(1)}").join(", ")}',
     );
 
-    if (top.score < minTitleScore) {
+    if (bestScore < minTitleScore) {
       log(
         '   AutoNamer: deterministic title score only '
-        '${top.score.toStringAsFixed(1)} — falling back to LLM pick.',
+        '${bestScore.toStringAsFixed(1)} — falling back to LLM pick.',
         isError: true,
       );
       final picked = await _llmFallbackPick(
@@ -152,7 +154,7 @@ class TitleResolver {
     }
 
     final close = scored
-        .where((c) => c != top && (top.score - c.score) < tieMargin)
+        .where((c) => c != top && (bestScore - c.score) < tieMargin)
         .toList();
     if (close.isEmpty) {
       log(
