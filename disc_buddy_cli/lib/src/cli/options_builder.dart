@@ -59,6 +59,11 @@ ArgParser buildArgParser() => ArgParser()
   ..addOption('llm-url',      help: 'OpenAI-compatible LLM base URL (e.g. http://localhost:11434/v1)')
   ..addOption('llm-key',      help: 'LLM API key (default: "ollama" for local)')
   ..addOption('llm-model',    help: 'LLM model name (e.g. gpt-4o, llama3)')
+  ..addOption('llm-reasoning',
+      help: 'reasoning_effort sent to the LLM: none, low, medium or high. '
+            'Use "none" for small local thinking models (qwen3, gemma4 under '
+            'Ollama), which otherwise spend their whole answer budget thinking. '
+            'Omit to send nothing.')
   ..addOption('name',    abbr: 'n', help: 'Film or series title hint for auto-naming')
   ..addOption('season',             help: 'Season number hint for auto-naming (implies series)')
   ..addFlag('split-stories', negatable: false,
@@ -224,6 +229,7 @@ Future<CliOptions> resolveCliOptions(
     llmUrl:     cfgOpt('llm-url'),
     llmKey:     cfgOpt('llm-key'),
     llmModel:   cfgOpt('llm-model'),
+    llmReasoning: cfgOpt('llm-reasoning'),
     titleHint:   cfgOpt('name'),
     seasonHint:  parseSeasons(cfgOpt('season')),
     batchAssign:    (args['batch-assign'] as bool?) ??

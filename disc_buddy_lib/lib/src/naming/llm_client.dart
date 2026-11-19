@@ -9,10 +9,19 @@ class LlmClient {
   final http.Client _http;
   final LogCallback? onLog;
 
+  /// Sent as `reasoning_effort` when set (`none`, `low`, `medium`, `high`).
+  ///
+  /// Small local "thinking" models (qwen3, gemma4 under Ollama) otherwise
+  /// spend the whole token budget reasoning and return an empty answer;
+  /// `none` switches that off. Null sends nothing — for servers and models
+  /// that do not know the field.
+  final String? reasoningEffort;
+
   LlmClient({
     required String baseUrl,
     required this.apiKey,
     required this.model,
+    this.reasoningEffort,
     http.Client? httpClient,
     this.onLog,
   })  : baseUrl = _normalizeBaseUrl(baseUrl),
@@ -68,6 +77,8 @@ class LlmClient {
       if (maxTokens != null) body['max_tokens'] = maxTokens;
       if (stop != null && stop.isNotEmpty) body['stop'] = stop;
       if (jsonMode) body['response_format'] = {'type': 'json_object'};
+      final effort = reasoningEffort?.trim();
+      if (effort != null && effort.isNotEmpty) body['reasoning_effort'] = effort;
 
       final response = await _http
           .post(

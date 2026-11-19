@@ -789,6 +789,7 @@ class RipStateNotifier extends Notifier<RipState> {
             baseUrl: options.llmUrl!,
             apiKey: options.llmKey ?? '',
             model: options.llmModel!,
+            reasoningEffort: options.llmReasoning,
             onLog: log,
           ),
           prompter: prompter,

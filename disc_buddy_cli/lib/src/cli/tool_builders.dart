@@ -44,6 +44,7 @@ AutoNamer buildAutoNamer(
         baseUrl: opts.llmUrl!,
         apiKey:  opts.llmKey ?? 'ollama',
         model:   opts.llmModel!,
+        reasoningEffort: opts.llmReasoning,
       ),
       force: opts.force,
       batchAssign: batchAssign ?? opts.batchAssign,

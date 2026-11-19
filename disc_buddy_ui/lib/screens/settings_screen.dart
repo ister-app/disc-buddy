@@ -83,6 +83,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
   late TextEditingController _llmUrl;
   late TextEditingController _llmKey;
   late TextEditingController _llmModel;
+  late TextEditingController _llmReasoning;
   late TextEditingController _audioLangs;
   late TextEditingController _subtitleTrackLangs;
   bool _autoName = false;
@@ -109,6 +110,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     _llmUrl             = TextEditingController(text: s.llmUrl ?? '');
     _llmKey             = TextEditingController(text: s.llmKey ?? '');
     _llmModel           = TextEditingController(text: s.llmModel ?? '');
+    _llmReasoning       = TextEditingController(text: s.llmReasoning ?? '');
     _audioLangs         = TextEditingController(text: s.audioLangs ?? '');
     _subtitleTrackLangs = TextEditingController(text: s.subtitleTrackLangs ?? '');
     _autoName           = s.autoName;
@@ -158,7 +160,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
     }
     for (final c in [_videoDir, _musicDir, _ffmpeg, _ffprobe, _mkvextract, _subtileOcr,
                      _whisper, _whisperModel,
-                     _tmdbToken, _llmUrl, _llmKey, _llmModel,
+                     _tmdbToken, _llmUrl, _llmKey, _llmModel, _llmReasoning,
                      _audioLangs, _subtitleTrackLangs]) {
       c.dispose();
     }
@@ -182,6 +184,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
       llmUrl:             _llmUrl.text.trim().isEmpty             ? null : _llmUrl.text.trim(),
       llmKey:             _llmKey.text.trim().isEmpty             ? null : _llmKey.text.trim(),
       llmModel:           _llmModel.text.trim().isEmpty           ? null : _llmModel.text.trim(),
+      llmReasoning:       _llmReasoning.text.trim().isEmpty       ? null : _llmReasoning.text.trim(),
       autoName:           _autoName,
       batchAssign:        _batchAssign,
       lpcmFlac:           _lpcmFlac,
@@ -337,6 +340,9 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: 'optional (default: ollama)', obscure: true),
           _TextField(label: 'LLM model', controller: _llmModel,
             hint: 'e.g. gpt-4o or llama3'),
+          _TextField(label: 'LLM reasoning effort', controller: _llmReasoning,
+            hint: 'optional: none / low / medium / high — "none" for small '
+                'local thinking models'),
           SwitchListTile(
             title: const Text('Auto-name all titles with LLM'),
             subtitle: const Text('Requires TMDB token and LLM, plus subtitle tools '

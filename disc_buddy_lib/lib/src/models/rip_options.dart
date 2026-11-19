@@ -24,6 +24,9 @@ class RipOptions {
   final String? llmUrl;
   final String? llmKey;
   final String? llmModel;
+  /// `reasoning_effort` for the LLM (`none`, `low`, …); null sends nothing.
+  /// See `LlmClient.reasoningEffort`.
+  final String? llmReasoning;
   final String? titleHint;
   final List<int>? seasonHint;
   /// null = ask the user interactively; true/false = forced.
@@ -73,6 +76,7 @@ class RipOptions {
     this.llmUrl,
     this.llmKey,
     this.llmModel,
+    this.llmReasoning,
     this.titleHint,
     this.seasonHint,
     this.batchAssign,
@@ -121,6 +125,7 @@ class RipOptions {
     llmUrl: llmUrl,
     llmKey: llmKey,
     llmModel: llmModel,
+    llmReasoning: llmReasoning,
     titleHint: titleHint,
     seasonHint: seasonHint,
     batchAssign: batchAssign,
@@ -151,6 +156,7 @@ class RipOptions {
     llmUrl: llmUrl,
     llmKey: llmKey,
     llmModel: llmModel,
+    llmReasoning: llmReasoning,
     titleHint: titleHint,
     seasonHint: seasonHint,
     batchAssign: batchAssign,
@@ -181,6 +187,7 @@ class RipOptions {
     llmUrl: llmUrl,
     llmKey: llmKey,
     llmModel: llmModel,
+    llmReasoning: llmReasoning,
     titleHint: titleHint ?? this.titleHint,
     seasonHint: seasonHint ?? this.seasonHint,
     batchAssign: batchAssign ?? this.batchAssign,

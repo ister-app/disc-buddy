@@ -17,6 +17,8 @@ class Settings {
   final String? llmUrl;
   final String? llmKey;
   final String? llmModel;
+  /// `reasoning_effort` for the LLM (`none`, `low`, …); null sends nothing.
+  final String? llmReasoning;
   final bool autoName;
   final bool batchAssign;
   /// Re-encode Blu-ray LPCM audio to FLAC (smaller, but CPU-heavy). When false
@@ -40,7 +42,7 @@ class Settings {
   static const _knownKeys = {
     'output', 'music-output', 'ffmpeg', 'ffprobe', 'mkvextract', 'subtile-ocr',
     'whisper', 'whisper-model', 'transcribe-lang', 'tmdb-token', 'llm-url',
-    'llm-key', 'llm-model', 'auto-name', 'batch-assign', 'lpcm-flac',
+    'llm-key', 'llm-model', 'llm-reasoning', 'auto-name', 'batch-assign', 'lpcm-flac',
     'dvd-single-pass', 'audio-langs', 'subtitle-track-langs',
   };
 
@@ -59,6 +61,7 @@ class Settings {
     this.llmUrl,
     this.llmKey,
     this.llmModel,
+    this.llmReasoning,
     this.autoName = false,
     this.batchAssign = false,
     this.lpcmFlac = false,
@@ -92,6 +95,7 @@ class Settings {
     llmUrl: json['llm-url'] as String?,
     llmKey: json['llm-key'] as String?,
     llmModel: json['llm-model'] as String?,
+    llmReasoning: json['llm-reasoning'] as String?,
     autoName: json['auto-name'] as bool? ?? false,
     batchAssign: json['batch-assign'] as bool? ?? false,
     lpcmFlac: json['lpcm-flac'] as bool? ?? false,
@@ -119,6 +123,7 @@ class Settings {
     if (llmUrl != null) 'llm-url': llmUrl,
     if (llmKey != null) 'llm-key': llmKey,
     if (llmModel != null) 'llm-model': llmModel,
+    if (llmReasoning != null) 'llm-reasoning': llmReasoning,
     'auto-name': autoName,
     'batch-assign': batchAssign,
     'lpcm-flac': lpcmFlac,
@@ -147,6 +152,7 @@ class Settings {
     llmUrl: llmUrl,
     llmKey: llmKey,
     llmModel: llmModel,
+    llmReasoning: llmReasoning,
     // Not `force`: that makes the rippers delete every existing output,
     // also the ones left unticked in the overwrite dialog. Without it (and
     // without a prompter) questions still take their defaults, and an
@@ -175,6 +181,7 @@ class Settings {
     Object? llmUrl = _sentinel,
     Object? llmKey = _sentinel,
     Object? llmModel = _sentinel,
+    Object? llmReasoning = _sentinel,
     bool? autoName,
     bool? batchAssign,
     bool? lpcmFlac,
@@ -196,6 +203,7 @@ class Settings {
     llmUrl: llmUrl == _sentinel ? this.llmUrl : llmUrl as String?,
     llmKey: llmKey == _sentinel ? this.llmKey : llmKey as String?,
     llmModel: llmModel == _sentinel ? this.llmModel : llmModel as String?,
+    llmReasoning: llmReasoning == _sentinel ? this.llmReasoning : llmReasoning as String?,
     autoName: autoName ?? this.autoName,
     batchAssign: batchAssign ?? this.batchAssign,
     lpcmFlac: lpcmFlac ?? this.lpcmFlac,
