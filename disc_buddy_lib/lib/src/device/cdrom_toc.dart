@@ -65,8 +65,8 @@ const _sgIo            = 0x2285;
 const _sgDxferFromDev  = -3;
 
 // READ TOC/PMA/ATIP (0x43), format 2 = Full TOC
-// TIME=1 (MSF), session=1, alloc=512
-const _kReadTocCdb = [0x43, 0x02, 0x02, 0, 0, 0, 0x01, 0x02, 0x00, 0x00];
+// TIME=1 (MSF), session=1, alloc=2048 (must match bufSize in readToc)
+const _kReadTocCdb = [0x43, 0x02, 0x02, 0, 0, 0, 0x01, 0x08, 0x00, 0x00];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -81,7 +81,10 @@ const _kReadTocCdb = [0x43, 0x02, 0x02, 0, 0, 0, 0x01, 0x02, 0x00, 0x00];
 Future<({int firstTrack, int lastTrack, List<int> offsets, int leadOut})?> readToc(
   String device,
 ) async {
-  const bufSize = 512;
+  // A full TOC is 4 + 11 bytes per descriptor; 99 tracks plus the A0/A1/A2
+  // points of two sessions and a few mode-5 entries stay well under 2048.
+  // (512 overflowed from 44 tracks on.)
+  const bufSize = 2048;
 
   return using((arena) {
     final dataBuf  = arena<Uint8>(bufSize);
@@ -154,7 +157,7 @@ Future<({int firstTrack, int lastTrack, List<int> offsets, int leadOut})?> readT
       final trackLba = <int, int>{};
 
       var offset = 4;
-      while (offset + 11 <= tocLen + 2) {
+      while (offset + 11 <= tocLen + 2 && offset + 11 <= bufSize) {
         final sess  = bytes[offset];
         final point = bytes[offset + 3];
         final pmin  = bytes[offset + 8];

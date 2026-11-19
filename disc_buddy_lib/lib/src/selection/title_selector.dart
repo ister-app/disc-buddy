@@ -487,15 +487,22 @@ List<DvdTitle> deduplicateDvdTitles(List<DvdTitle> titles) {
     if (pa.subtitleTracks.length != pb.subtitleTracks.length) return false;
 
     // Chapter timestamps are the authoritative signal when both titles have
-    // ≥ 2 chapters of the same count.  A match confirms identical content;
-    // a mismatch actively refutes it — different episodes that happen to share
-    // the same duration will have chapters at clearly different positions
-    // (easily > 2 s apart), while navigation duplicates pointing to the same
-    // physical VOB content will have near-identical positions.
+    // ≥ 2 chapters.  A match confirms identical content; a mismatch actively
+    // refutes it — different episodes that happen to share the same duration
+    // will have chapters at clearly different positions (easily > 2 s apart),
+    // while navigation duplicates pointing to the same physical VOB content
+    // will have near-identical positions.  With different chapter counts the
+    // chapters they have in common are compared (a duplicate may carry one
+    // extra marker); two episodes of equal length must not be merged just
+    // because one has 5 chapters and the other 6.
     final ach = pa.chapters;
     final bch = pb.chapters;
-    if (ach.length >= 2 && ach.length == bch.length) {
-      return ach.indexed.every((e) => (e.$2 - bch[e.$1]).abs() <= chapTol);
+    if (ach.length >= 2 && bch.length >= 2) {
+      final n = ach.length < bch.length ? ach.length : bch.length;
+      for (var i = 0; i < n; i++) {
+        if ((ach[i] - bch[i]).abs() > chapTol) return false;
+      }
+      return true;
     }
 
     // No chapter data available → structural match is sufficient.

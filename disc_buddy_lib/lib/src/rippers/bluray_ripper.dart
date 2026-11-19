@@ -265,9 +265,10 @@ class BlurayRipper implements VideoDiscRipper<BlurayTitle> {
     final itemTicksList = <int>[];   // (OUT − IN) ticks per PlayItem
 
     for (var i = 0; i < nrItems; i++) {
-      if (itemOffset + 20 > data.length) break;
+      // OUT_time ends at +22; a truncated playlist must not throw.
+      if (itemOffset + 22 > data.length) break;
       final itemLen = bd.getUint16(itemOffset, Endian.big);
-      if (itemLen < 16) break;
+      if (itemLen < 20) break;
 
       clipNames.add(String.fromCharCodes(data.sublist(itemOffset + 2, itemOffset + 7)));
 

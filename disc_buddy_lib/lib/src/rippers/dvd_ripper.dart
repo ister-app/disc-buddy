@@ -195,7 +195,11 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
     // Cache scan results per VTS number.
     // SID order is fixed within a VTS across angles on all commercial DVDs
     // (streams are interleaved in a stable order), so one scan per VTS suffices.
-    final scanCache = <int, ({List<int> sidOrder, int lastSidByteOffset})>{};
+    // Keyed per title, not per VTS: each PGC reads its own cells, so where
+    // (and in which order) its sub-streams first appear differs between the
+    // episodes of one VTS. A scan borrowed from another episode gives a
+    // -probesize that can stop short of this one's first subtitle packet.
+    final scanCache = <String, ({List<int> sidOrder, int lastSidByteOffset})>{};
 
     try {
     for (final title in selected) {
@@ -223,15 +227,16 @@ class DVDRipper implements VideoDiscRipper<DvdTitle> {
       // the audio-stream count comes up short, so the caller can fall back.
       Future<bool> ripAttempt(bool singlePass) async {
         // Pass 1: scan for SID order (skipped in single-pass mode). Cached per
-        // VTS; exits early once all wanted SIDs are found.
+        // title (for the retry after a failed single pass); exits early once
+        // all wanted SIDs are found.
         ({List<int> sidOrder, int lastSidByteOffset})? scan;
         if (!singlePass) {
-          if (scanCache.containsKey(title.vtsNumber)) {
-            scan = scanCache[title.vtsNumber]!;
+          if (scanCache.containsKey(title.displayKey)) {
+            scan = scanCache[title.displayKey]!;
           } else {
             final scanStream = session.stream(title.vtsNumber, cells: cells);
             scan = await scanVobSids(scanStream, wantedSids);
-            scanCache[title.vtsNumber] = scan;
+            scanCache[title.displayKey] = scan;
           }
         }
 

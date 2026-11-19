@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -292,9 +293,17 @@ class IsolateCddaReader {
   }
 
   void close() {
+    // The isolate closes the drive and exits on the null message. Killing it
+    // right away would race that message and leak the fd and native buffer,
+    // so the kill is only a safety net for an isolate that does not exit
+    // (stuck inside the blocking ioctl); the timer is dropped as soon as the
+    // isolate is gone, so it does not hold the process open.
+    final exited = ReceivePort();
+    _isolate.addOnExitListener(exited.sendPort);
+    final safetyNet = Timer(const Duration(seconds: 10),
+        () => _isolate.kill(priority: Isolate.immediate));
+    exited.first.then((_) => safetyNet.cancel());
     _commands.send(null);
-    // Safety net in case the isolate is stuck inside the blocking ioctl.
-    _isolate.kill(priority: Isolate.beforeNextEvent);
   }
 
   static void _isolateMain((String, SendPort) args) {
@@ -310,7 +319,7 @@ class IsolateCddaReader {
       if (msg == null) {
         reader.close();
         commands.close();
-        return;
+        Isolate.exit();
       }
       final (lba, count, reply) = msg as (int, int, SendPort);
       reply.send(reader.readSectors(lba, count));

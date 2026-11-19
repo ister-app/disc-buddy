@@ -40,6 +40,30 @@ void main() {
   _seinfeldS7D4Tests();
   _mirrorVtsDiscTests();
   _bonusPlayAllWithFullStreamsTests();
+  group('deduplicateDvdTitles — cross-VTS chapter counts', () {
+    Duration m(int min, [int sec = 0]) => Duration(minutes: min, seconds: sec);
+
+    test('even lange afleveringen met 5 en 6 hoofdstukken blijven beide', () {
+      final result = deduplicateDvdTitles([
+        t(vts: 1, pgc: 0, dur: m(22, 5),
+            chapters: [m(0), m(4), m(9), m(15), m(20)]),
+        t(vts: 2, pgc: 0, dur: m(22, 6),
+            chapters: [m(0), m(2), m(7), m(11), m(16), m(21)]),
+      ]);
+      expect(result.map((x) => x.vtsNumber), [1, 2]);
+    });
+
+    test('navigatie-duplicaat met één extra hoofdstukmarker valt weg', () {
+      final result = deduplicateDvdTitles([
+        t(vts: 1, pgc: 0, dur: m(22, 5),
+            chapters: [m(0), m(4), m(9), m(15), m(20)]),
+        t(vts: 2, pgc: 0, dur: m(22, 5),
+            chapters: [m(0), m(4), m(9), m(15), m(20), m(22)]),
+      ]);
+      expect(result.map((x) => x.vtsNumber), [1]);
+    });
+  });
+
   group('deduplicateDvdTitles — cell overlap authoritative', () {
     // Real data from DVD_VVE4698_2_SAMANDCAT_D2: 7 episodes stored as 7 PGCs
     // in one VTS, chapters authored at fixed ~5-minute intervals so that four
