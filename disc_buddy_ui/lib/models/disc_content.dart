@@ -1,7 +1,11 @@
 import 'dart:io';
 import 'package:disc_buddy/disc_buddy.dart';
 
-sealed class DiscContent {}
+sealed class DiscContent {
+  /// What the scan logged (metadata lookups, mount problems, parser
+  /// warnings); error lines carry the same `[ERR] ` prefix as rip logs.
+  List<String> scanLog = const [];
+}
 
 class EmptyDisc extends DiscContent {}
 

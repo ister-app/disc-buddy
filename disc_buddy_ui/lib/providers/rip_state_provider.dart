@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import '../models/rip_state.dart';
 import '../models/settings.dart';
+import 'disc_titles_provider.dart';
 import 'settings_provider.dart';
 
 /// Runs the disc-swap check in a short-lived isolate (the audio path uses a
@@ -275,6 +276,11 @@ class RipStateNotifier extends Notifier<RipState> {
 
   Settings get _settings => ref.read(settingsProvider);
 
+  /// What the scan of this disc logged; a rip log starts with it so metadata
+  /// lookups and scan warnings sit next to the rip they led to.
+  List<String> get _scanLog =>
+      ref.read(discTitlesProvider(devicePath)).value?.scanLog ?? const [];
+
   void startTitleSelection(String discTitle, List<VideoTitle> titles, Set<String> autoSelected,
       {String? fingerprint}) {
     state = RipTitleSelection(
@@ -421,8 +427,9 @@ class RipStateNotifier extends Notifier<RipState> {
       }
     }
 
-    final logs = <String>[];
-    state = RipAudioCdProgress(metadata: metadata, selectedTracks: tracks);
+    final logs = <String>[..._scanLog];
+    state = RipAudioCdProgress(
+        metadata: metadata, selectedTracks: tracks, log: List.from(logs));
 
     final settings = _settings;
     final options = settings.toRipOptions(
@@ -729,7 +736,7 @@ class RipStateNotifier extends Notifier<RipState> {
     Set<String>? overwrite,
     String? scanFingerprint,
   }) async {
-    final logs = <String>[];
+    final logs = <String>[..._scanLog];
 
     void appendLog(String msg, {bool isError = false}) {
       if (msg.isEmpty) return;

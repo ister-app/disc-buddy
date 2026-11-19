@@ -153,7 +153,9 @@ class _DiscContentView extends ConsumerWidget {
       error: (e, _) => _ErrorPanel(message: e.toString(), devicePath: entry.id),
       data: (content) {
         if (content == null || content is EmptyDisc) {
-          return _NoDiscPlaceholder(status: 'No readable disc');
+          return _NoDiscPlaceholder(
+              status: 'No readable disc',
+              scanLog: content?.scanLog ?? const []);
         }
         return switch (content) {
           AudioCdContent(:final metadata) => AudioCdPanel(
@@ -168,7 +170,8 @@ class _DiscContentView extends ConsumerWidget {
           ),
           MkvContent() => MkvPanel(entry: entry, content: content),
           DirContent() => DirPanel(entry: entry, content: content),
-          EmptyDisc() => _NoDiscPlaceholder(status: 'No readable disc'),
+          EmptyDisc() => _NoDiscPlaceholder(
+              status: 'No readable disc', scanLog: content.scanLog),
         };
       },
     );
@@ -177,7 +180,10 @@ class _DiscContentView extends ConsumerWidget {
 
 class _NoDiscPlaceholder extends StatelessWidget {
   final String status;
-  const _NoDiscPlaceholder({required this.status});
+
+  /// Why the scan found nothing, when the scan had something to say.
+  final List<String> scanLog;
+  const _NoDiscPlaceholder({required this.status, this.scanLog = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -192,6 +198,15 @@ class _NoDiscPlaceholder extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(status, style: Theme.of(context).textTheme.bodyLarge),
+          if (scanLog.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.receipt_long_outlined),
+              label: const Text('View scan log'),
+              onPressed: () =>
+                  _showLogDialog(context, scanLog, title: 'Scan log'),
+            ),
+          ],
         ],
       ),
     );
@@ -296,11 +311,12 @@ class _CompletedPanel extends ConsumerWidget {
   }
 }
 
-void _showLogDialog(BuildContext context, List<String> log) {
+void _showLogDialog(BuildContext context, List<String> log,
+    {String title = 'Rip log'}) {
   showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Rip log'),
+      title: Text(title),
       content: SizedBox(
         width: 700,
         height: 500,

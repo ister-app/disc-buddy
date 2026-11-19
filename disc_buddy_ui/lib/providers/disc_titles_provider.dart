@@ -18,7 +18,22 @@ final discTitlesProvider = FutureProvider.family<DiscContent?, String>((ref, dev
   return Isolate.run(() => _loadContent(devicePath, settings));
 });
 
+/// Scans [devicePath] and attaches everything the scan logged to the result.
+/// A scan that finds nothing still returns an [EmptyDisc], so its log (the
+/// reason nothing was found) reaches the UI.
 Future<DiscContent?> _loadContent(String devicePath, Settings settings) async {
+  final scanLog = <String>[];
+  void log(String msg, {bool isError = false}) {
+    if (msg.isEmpty) return;
+    scanLog.add(isError ? '[ERR] $msg' : msg);
+  }
+
+  final content = await _scan(devicePath, settings, log) ?? EmptyDisc();
+  return content..scanLog = scanLog;
+}
+
+Future<DiscContent?> _scan(
+    String devicePath, Settings settings, LogCallback log) async {
   final options = settings.toRipOptions(device: devicePath);
 
   // Directory of video files.
@@ -33,7 +48,7 @@ Future<DiscContent?> _loadContent(String devicePath, Settings settings) async {
 
   // For ISO files, we need to mount first.
   if (devicePath.toLowerCase().endsWith('.iso')) {
-    return _loadIsoContent(devicePath, options);
+    return _loadIsoContent(devicePath, options, log);
   }
 
   // Optical drive: never touch the device unless a disc is actually loaded.
@@ -57,30 +72,33 @@ Future<DiscContent?> _loadContent(String devicePath, Settings settings) async {
       ? null
       : await readDiscFingerprint(devicePath, discType: discType);
   return switch (discType) {
-    DiscType.audioCD => _loadAudioCD(options, fingerprint),
-    DiscType.dvd => _loadVideoDisc(options, DiscType.dvd, fingerprint),
-    DiscType.bluray => _loadVideoDisc(options, DiscType.bluray, fingerprint),
+    DiscType.audioCD => _loadAudioCD(options, fingerprint, log),
+    DiscType.dvd => _loadVideoDisc(options, DiscType.dvd, fingerprint, log),
+    DiscType.bluray =>
+      _loadVideoDisc(options, DiscType.bluray, fingerprint, log),
     _ => EmptyDisc(),
   };
 }
 
-Future<DiscContent?> _loadAudioCD(RipOptions options, String? fingerprint) async {
-  final ripper = AudioCDRipper(options);
+Future<DiscContent?> _loadAudioCD(
+    RipOptions options, String? fingerprint, LogCallback log) async {
+  final ripper = AudioCDRipper(options, onLog: log);
   final meta = await ripper.loadMetadata();
   if (meta == null) return null;
   return AudioCdContent(meta, fingerprint: fingerprint);
 }
 
 Future<DiscContent?> _loadVideoDisc(
-    RipOptions options, DiscType type, String? fingerprint) async {
+    RipOptions options, DiscType type, String? fingerprint,
+    LogCallback log) async {
   if (type == DiscType.dvd) {
-    final ripper = DVDRipper(options);
+    final ripper = DVDRipper(options, onLog: log);
     final result = await ripper.loadTitles();
     if (result == null) return null;
     return _buildDvdContent(result.discTitle, result.titles,
         fingerprint: fingerprint);
   } else {
-    final ripper = BlurayRipper(options);
+    final ripper = BlurayRipper(options, onLog: log);
     final result = await ripper.loadTitles();
     if (result == null) return null;
     return _buildBlurayContent(result.discTitle, result.titles,
@@ -88,39 +106,30 @@ Future<DiscContent?> _loadVideoDisc(
   }
 }
 
-Future<DiscContent?> _loadIsoContent(String isoPath, RipOptions options) async {
+Future<DiscContent?> _loadIsoContent(
+    String isoPath, RipOptions options, LogCallback log) async {
   final result = await withMountedDisc<DiscContent?>(isoPath, (mountPath) async {
     final type = DiscTypeDetector.detectFromMountPoint(mountPath);
-    final optionsWithMount = RipOptions(
-      device: isoPath,
-      outputDir: options.outputDir,
-      ffmpeg: options.ffmpeg,
-      ffprobe: options.ffprobe,
-      mkvextract: options.mkvextract,
-      subtileOcr: options.subtileOcr,
-      tmdbToken: options.tmdbToken,
-      llmUrl: options.llmUrl,
-      llmKey: options.llmKey,
-      llmModel: options.llmModel,
-      force: true,
-    );
     return switch (type) {
-      DiscType.dvd => _loadVideoDiscFromMount(optionsWithMount, mountPath, DiscType.dvd),
-      DiscType.bluray => _loadVideoDiscFromMount(optionsWithMount, mountPath, DiscType.bluray),
+      DiscType.dvd =>
+        _loadVideoDiscFromMount(options, mountPath, DiscType.dvd, log),
+      DiscType.bluray =>
+        _loadVideoDiscFromMount(options, mountPath, DiscType.bluray, log),
       _ => null,
     };
-  });
+  }, onLog: log);
   return result;
 }
 
-Future<DiscContent?> _loadVideoDiscFromMount(RipOptions options, String mountPath, DiscType type) async {
+Future<DiscContent?> _loadVideoDiscFromMount(RipOptions options,
+    String mountPath, DiscType type, LogCallback log) async {
   if (type == DiscType.dvd) {
-    final ripper = DVDRipper(options);
+    final ripper = DVDRipper(options, onLog: log);
     final result = await ripper.loadTitles(mountPath: mountPath);
     if (result == null) return null;
     return _buildDvdContent(result.discTitle, result.titles);
   } else {
-    final ripper = BlurayRipper(options);
+    final ripper = BlurayRipper(options, onLog: log);
     final result = await ripper.loadTitles(mountPath: mountPath);
     if (result == null) return null;
     return _buildBlurayContent(result.discTitle, result.titles);
