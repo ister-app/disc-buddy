@@ -59,7 +59,7 @@ The UI imports `package:material_ui/material_ui.dart`, not `package:flutter/mate
 ### Disc type handling
 
 - **Audio CD**: TOC read via `discid` binary or `SG_IO` FFI ioctl → MusicBrainz disc ID → metadata lookup (MusicBrainz → CDDB → CD-TEXT) → FLAC via ffmpeg. Ripping reads raw CDDA sectors via `SG_IO` READ CD (`cdda_reader.dart`, run in a dedicated isolate — the ioctl blocks and would freeze a Flutter UI) and pipes PCM to ffmpeg stdin (deterministic end-of-track, exact byte-count verification); falls back to ffmpeg's libcdio input (with kill-timer heuristics) when the FFI TOC or SG_IO reads are unavailable.
-- **DVD**: Parses `VIDEO_TS.IFO` and `VTS_XX_0.IFO` files directly in Dart (no external tool). Two-pass VOB scan: first pass finds MPEG-PS private stream sub-IDs (`_scanVobSids`) to determine correct ffmpeg `-map` ordering; second pass rips. Prefers `libdvdread` FFI for CSS; falls back to VOB concat.
+- **DVD**: Parses `VIDEO_TS.IFO` and `VTS_XX_0.IFO` files directly in Dart (no external tool; pure parsers in `rippers/dvd_ifo.dart`). Two-pass VOB scan: first pass finds MPEG-PS private stream sub-IDs (`scanVobSids` in `rippers/dvd_stream_map.dart`) to determine correct ffmpeg `-map` ordering; second pass rips. Prefers `libdvdread` FFI for CSS; falls back to VOB concat.
 - **Blu-ray**: Parses MPLS playlist and CLPI stream info files. Rips via libbluray (through ffmpeg's `bluray:` protocol) or M2TS concat fallback. LPCM audio is transcoded to FLAC; everything else is stream-copied.
 
 ### Title auto-selection (`disc_buddy_lib/lib/src/selection/title_selector.dart`)
@@ -110,7 +110,7 @@ A `--name` hint is scored against the TMDB candidates (movie and series) even wi
 
 ### DVD stream mapping detail
 
-DVDs store audio at MPEG sub-stream IDs `0x80–0x8F` and subtitles at `0x20–0x3F`. The IFO file specifies which sub-stream ID each track uses per PGC. The two-pass scan (`_scanVobSids`) determines the ffmpeg discovery order of these sub-IDs, which is then used to build explicit `-map 0:a:N` / `-map 0:s:N?` arguments in IFO order, with `-metadata:s:a:N` indices matching the output (IFO) order, not the discovery order.
+DVDs store audio at MPEG sub-stream IDs `0x80–0x8F` and subtitles at `0x20–0x3F`. The IFO file specifies which sub-stream ID each track uses per PGC. The two-pass scan (`scanVobSids`, with the argument builders in `rippers/dvd_stream_map.dart`) determines the ffmpeg discovery order of these sub-IDs, which is then used to build explicit `-map 0:a:N` / `-map 0:s:N?` arguments in IFO order, with `-metadata:s:a:N` indices matching the output (IFO) order, not the discovery order.
 
 ## CI
 
