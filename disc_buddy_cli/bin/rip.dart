@@ -337,9 +337,11 @@ Future<bool> _ripVideoDisc<T extends VideoTitle>(
     final extractChoice = await resolveExtractChoice(opts, Menu.prompter);
 
     // Ask naming hints upfront so no questions interrupt the rip.
-    final namingHints = namePrefs.containsValue('?') && !opts.force
-        ? await askNamingHints(opts, Menu.prompter)
-        : null;
+    // resolveNamingHints, not a bare "ask unless --force": under
+    // `--force --auto-name` titles are auto-named with the --name/--season
+    // hints, and a null here crashed the run after the whole disc was ripped.
+    final namingHints = await resolveNamingHints(opts, Menu.prompter,
+        anyAutoName: namePrefs.containsValue('?'));
 
     // Guard: refuse if the disc was swapped during the prompts above.
     if (scanFp != null) await verifyDiscUnchanged(opts.device!, scanFp);

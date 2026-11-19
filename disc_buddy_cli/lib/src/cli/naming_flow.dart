@@ -245,8 +245,9 @@ Future<void> resolveSubtitlesAndNames(
 
   if (wantNaming) {
     final autoNamer = autoNamerFactory(opts, extractor, batchAssign: batchAssign);
-    // Hints were collected before ripping started; non-null is an invariant here.
-    final hints = namingHints!;
+    // Normally collected before ripping started; fall back to the CLI/config
+    // hints rather than crash after a finished rip if a caller passed none.
+    final hints = namingHints ?? (title: opts.titleHint, season: opts.seasonHint);
     try {
       // Collect all titles that need auto-naming and batch them together.
       final batchItems = <({String filename, String displayKey, File file, List<File> srts})>[];
