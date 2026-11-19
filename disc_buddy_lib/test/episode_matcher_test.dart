@@ -655,6 +655,20 @@ void main() {
       expect(s.llm.systemPrompts.last, contains('episodes next to the one'));
     });
 
+    test('a one-story pair moves together when a conflict reassigns it',
+        () async {
+      final s = setup(3);
+      // Both halves → s07e01, then a third file claims s07e01 too.
+      s.llm.match.addAll(['{"pick":1}', '{"pick":1}', '{"pick":1}']);
+      s.llm.verify.addAll(['{"pick":1}', '{"pick":1}']);
+      // The LLM moves the earlier claimant (first half) to s07e02.
+      s.llm.conflict.add('{"first":2,"second":1}');
+
+      final picks = await runSplit(s, {0: 1, 1: 0});
+      expect(picks, {0: 's07e02', 1: 's07e02', 2: 's07e01'});
+      expect(s.logs, anyElement(contains('follows its other half')));
+    });
+
     test('an unrelated file claiming the same episode is still a conflict',
         () async {
       final s = setup(3);

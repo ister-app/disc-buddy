@@ -293,6 +293,7 @@ class EpisodeMatcher {
         continue;
       }
       if (dup != null) {
+        final contestedStem = picks[dup]?.stem;
         pick = await handleStemConflict(
           i: i,
           dupIdx: dup,
@@ -306,6 +307,24 @@ class EpisodeMatcher {
           durations: durations,
           medianSecs: medianSecs,
         );
+        // The earlier claimant may be one half of a split file whose other
+        // half shares its episode (one story, see above); only the first
+        // half is registered in usedStems. When the conflict moved or
+        // unnamed that half, the story moved: its other half follows, or it
+        // would keep a stem that now belongs to file [i] and the file would
+        // be cut in two after all.
+        final other = siblingOf[dup];
+        if (other != null &&
+            other != i &&
+            contestedStem != null &&
+            picks[other]?.stem == contestedStem &&
+            picks[dup]?.stem != contestedStem) {
+          picks[other] = picks[dup];
+          log(
+            '   ${items[other].file.path}: follows its other half '
+            '→ ${picks[dup]?.stem ?? 'unnamed'}.',
+          );
+        }
         if (pick == null) {
           picks[i] = null;
           specialsCandidates.add(i);
