@@ -85,6 +85,16 @@ class AutoNamer {
     llm.close();
   }
 
+  /// True (after saying so once per call) when the LLM refused service for
+  /// good — see [LlmClient.unavailableReason].
+  bool _llmGone() {
+    final reason = llm.unavailableReason;
+    if (reason == null) return false;
+    _log('   AutoNamer: stopped — the LLM is unavailable ($reason). '
+        'Files keep their current names.', isError: true);
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -100,6 +110,7 @@ class AutoNamer {
     if (sub == null) return null;
 
     final fp = await _subtitles.extractSummary(sub.text);
+    if (_llmGone()) return null;
     _subtitles.logFingerprint(fp);
 
     final winner = await _titles.resolve(
@@ -170,6 +181,9 @@ class AutoNamer {
         '${items[entry.key].file.path}',
       );
       fps[entry.key] = await _subtitles.extractSummary(entry.value.text);
+      // Without an LLM nothing below can work; do not summarise the other
+      // files, and do not ask the user to place every episode by hand.
+      if (_llmGone()) return {for (final it in items) it.file: null};
       _subtitles.logFingerprint(fps[entry.key]!);
     }
 

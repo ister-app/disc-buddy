@@ -497,6 +497,8 @@ enum _EjectAction { none, ejectOnly, ejectAndContinue }
 /// When [opts.loop] is set the prompt is skipped and `ejectAndContinue` is
 /// returned automatically.
 Future<_EjectAction> _promptEject(RipOptions opts) async {
+  // Ctrl+C was pressed: the process is about to exit, do not ask anything.
+  if (_interrupted) return _EjectAction.none;
   if (opts.loop) {
     stdout.writeln('\nEject disc? [y/r/N]  (r = load next disc): r');
     return _EjectAction.ejectAndContinue;

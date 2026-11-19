@@ -68,11 +68,15 @@ without one:
 
 ## UI
 
-- Auto-naming questions (candidate ties, manual episode pick) now open a
-  dialog (`DialogPrompter`), except in loop mode. Not yet verified against
-  a real LLM tie. Questions asked inside the rip isolate (track-language
-  fixes) still take their default; the title panel's per-track language
-  overrides cover that case.
+- Auto-naming questions (candidate ties, manual episode pick) open a
+  dialog (`DialogPrompter`), except in loop mode. The manual-pick question
+  was seen on a real run (2026-11-19); a real candidate tie was not.
+  Questions asked inside the rip isolate (track-language fixes) still take
+  their default; the title panel's per-track language overrides cover
+  that case.
+- Cancelling a video rip on a real drive always takes the 3 s fallback
+  kill: the isolate sits in a blocking libdvdread read and never sees the
+  cancel message.
 - "Two stories per file" (directory mode) mirrors the CLI's
   `--split-stories` but has not been run against a real LLM/TMDB batch
   from the UI yet.

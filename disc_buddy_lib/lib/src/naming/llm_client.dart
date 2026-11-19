@@ -21,6 +21,19 @@ class LlmClient {
   void _log(String msg, {bool isError = false}) =>
       emitLog(onLog, msg, isError: isError);
 
+  /// Set once the server refused a request for a reason no retry will fix:
+  /// bad credentials (401), no credit left (402) or no access to the model
+  /// (403). Further [chat] calls return null without contacting the server,
+  /// and callers can stop instead of working through every file.
+  String? get unavailableReason => _unavailableReason;
+  String? _unavailableReason;
+
+  static const _fatalStatus = {
+    401: 'the API key was rejected',
+    402: 'the account has no credit left',
+    403: 'access to the model was refused',
+  };
+
   /// Appends `/v1` when the URL has no meaningful path (e.g. bare Ollama host).
   static String _normalizeBaseUrl(String url) {
     final trimmed = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
@@ -45,6 +58,7 @@ class LlmClient {
     double temperature = 0.1,
     bool jsonMode = false,
   }) async {
+    if (_unavailableReason != null) return null;
     try {
       final body = <String, dynamic>{
         'model': model,
@@ -69,6 +83,12 @@ class LlmClient {
       if (response.statusCode != 200) {
         _log('   LLM request failed (${response.statusCode}): ${response.body}',
             isError: true);
+        final fatal = _fatalStatus[response.statusCode];
+        if (fatal != null) {
+          _unavailableReason = fatal;
+          _log('   LLM unavailable: $fatal (HTTP ${response.statusCode}) — '
+              'no further requests will be sent.', isError: true);
+        }
         return null;
       }
 
