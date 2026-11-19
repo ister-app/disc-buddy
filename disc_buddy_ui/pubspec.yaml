@@ -13,11 +13,12 @@ dependencies:
     sdk: flutter
   disc_buddy:
     path: ../disc_buddy_lib
-  flutter_riverpod: ^3.4.3
+  flutter_riverpod: ^3.5.0
   skeletonizer: ^3.0.0
-  file_picker: ^13.2.0
+  file_picker: ^13.4.0
   path_provider: ^2.1.6
   path: ^1.9.1
+  material_ui: ^1.11.1
 
 # jni (transitive via path_provider_android) is compiled for the host by its
 # build hook even on Linux. Its dartjni.c calls AttachCurrentThread(vm, &jniEnv,
@@ -29,7 +30,8 @@ dependencies:
 #     third_party/jni.h — but only when JAVA_INCLUDE_PATH is unset, i.e. when no
 #     JDK headers are installed. Machines (and CI runners) that do have a JDK
 #     resolve the JDK header instead and fail to build.
-# Verified 2026-08-13 against jni 1.0.3, and 2026-10-10 against jni 1.1.0
+# Verified 2026-08-13 against jni 1.0.3, 2026-10-10 against jni 1.1.0 and
+# 2026-11-19 against jni 1.1.2
 # (dartjni.h still passes JNIEnv** uncast): builds here only because this host
 # has JDK runtimes but no headers. jni_flutter >= 1.0.3 requires jni ^1.1.0, so
 # it is pinned together with jni.

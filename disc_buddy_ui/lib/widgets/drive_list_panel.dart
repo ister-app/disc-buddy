@@ -1,10 +1,11 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import '../providers/drive_list_provider.dart';
 import 'drive_list_tile.dart';
+import 'pick_directory.dart';
 
 class DriveListPanel extends ConsumerWidget {
   final VoidCallback onSettings;
@@ -116,7 +117,7 @@ class _BottomActions extends ConsumerWidget {
   }
 
   Future<void> _pickFolder(BuildContext context, WidgetRef ref) async {
-    final path = await FilePicker.getDirectoryPath(
+    final path = await pickDirectoryPath(
       dialogTitle: 'Select video directory',
     );
     if (path != null) {

@@ -1,7 +1,7 @@
-import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/settings_provider.dart';
+import 'pick_directory.dart';
 
 class RipOptionsRow extends StatelessWidget {
   final TextEditingController nameController;
@@ -167,7 +167,7 @@ class _DirRow extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             onPressed: () async {
-              final path = await FilePicker.getDirectoryPath(
+              final path = await pickDirectoryPath(
                 dialogTitle: tooltip,
                 initialDirectory: effectiveDir,
               );

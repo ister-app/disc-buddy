@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'package:disc_buddy/disc_buddy.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import '../models/disc_content.dart';

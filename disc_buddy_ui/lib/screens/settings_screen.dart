@@ -1,11 +1,11 @@
 import 'dart:io';
 import 'package:disc_buddy/disc_buddy.dart' show xdgUserDir;
-import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/settings.dart';
 import '../providers/settings_provider.dart';
+import '../widgets/pick_directory.dart';
 
 const _kWarningColor = Colors.amber;
 
@@ -281,7 +281,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: xdgUserDir('VIDEOS', fallback: r'$HOME/Videos'),
             controller: _videoDir,
             onPick: () async {
-              final path = await FilePicker.getDirectoryPath(
+              final path = await pickDirectoryPath(
                 dialogTitle: 'Select video output directory',
               );
               if (path != null) setState(() => _videoDir.text = path);
@@ -292,7 +292,7 @@ class _SettingsBodyState extends ConsumerState<_SettingsBody> {
             hint: xdgUserDir('MUSIC', fallback: r'$HOME/Music'),
             controller: _musicDir,
             onPick: () async {
-              final path = await FilePicker.getDirectoryPath(
+              final path = await pickDirectoryPath(
                 dialogTitle: 'Select music output directory',
               );
               if (path != null) setState(() => _musicDir.text = path);
