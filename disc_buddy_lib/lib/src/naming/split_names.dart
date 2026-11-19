@@ -11,15 +11,36 @@ import '../utils/rename.dart';
 import '../utils/video_files.dart';
 import 'story_splitter.dart';
 
-/// Moves the source of [split] aside to `<stem>.unsplit<ext>` (dropping its
-/// cached sidecars, they describe the whole file), so no story's new name
-/// collides with a source still waiting its turn: in a batch,
+/// Moves the source of [split] aside to `<stem>.unsplit<ext>`, so no story's
+/// new name collides with a source still waiting its turn: in a batch,
 /// `s01e05.mkv` may hold s02e14 while s01e05 sits in another file.
+///
+/// Its cached transcript is dropped (it describes the whole file and can be
+/// regenerated); its `.srt` sidecars move along as `<stem>.unsplit.*.srt` —
+/// they may be the user's own and must survive when the source does. A
+/// leftover `<stem>.unsplit<ext>` from an earlier run is never replaced:
+/// the source then parks as `.unsplit2`, `.unsplit3`, ….
 Future<StorySplit> parkSource(StorySplit split) async {
   final src = split.source;
-  await deleteWithSidecars(src, keepFile: true);
-  final parked = File(p.join(src.parent.path,
-      '${p.basenameWithoutExtension(src.path)}.unsplit${p.extension(src.path)}'));
+  final dir = src.parent.path;
+  final stem = p.basenameWithoutExtension(src.path);
+  final ext = p.extension(src.path);
+
+  var parkedStem = '$stem.unsplit';
+  for (var n = 2; File(p.join(dir, '$parkedStem$ext')).existsSync(); n++) {
+    parkedStem = '$stem.unsplit$n';
+  }
+  final parked = File(p.join(dir, '$parkedStem$ext'));
+
+  for (final sidecar in await _ownSidecars(src)) {
+    final base = p.basename(sidecar.path);
+    if (base.endsWith('.srt')) {
+      await sidecar.rename(
+          p.join(dir, '$parkedStem${base.substring(stem.length)}'));
+    } else {
+      await sidecar.delete();
+    }
+  }
   await src.rename(parked.path);
   return (
     source: parked,
@@ -56,7 +77,8 @@ Future<bool> applySplitNames(
     if (taken.isEmpty &&
         await renameWithSidecars(split.first, firstStem, onLog: onLog)) {
       if (await renameWithSidecars(split.second, secondStem, onLog: onLog)) {
-        await src.delete();
+        // The whole file's subtitles go with it; each story has its own.
+        await deleteWithSidecars(src);
         emitLog(onLog, 'Replaced $originalStem$ext by its two stories.');
         return true;
       }
@@ -99,10 +121,19 @@ Future<void> unparkSource(
 /// Deletes [file] (unless [keepFile]) and its `<stem>.*.srt` /
 /// `<stem>.whisper.json` sidecars.
 Future<void> deleteWithSidecars(File file, {bool keepFile = false}) async {
-  final stem = p.basenameWithoutExtension(file.path);
+  final sidecars = await _ownSidecars(file);
   if (!keepFile && await file.exists()) await file.delete();
+  for (final sidecar in sidecars) {
+    await sidecar.delete();
+  }
+}
+
+/// The `.srt` / `.whisper.json` sidecars of [file] itself. A longer stem
+/// shares the prefix — `<stem>.story1.mkv` next to `<stem>.mkv` — and its
+/// sidecars are not this file's.
+Future<List<File>> _ownSidecars(File file) async {
+  final stem = p.basenameWithoutExtension(file.path);
   final entries = await file.parent.list().toList();
-  // `<stem>.story1.mkv` shares the prefix: its sidecars are not ours.
   final longerStems = [
     for (final e in entries)
       if (e is File &&
@@ -111,13 +142,15 @@ Future<void> deleteWithSidecars(File file, {bool keepFile = false}) async {
           p.basenameWithoutExtension(e.path).startsWith('$stem.'))
         p.basenameWithoutExtension(e.path),
   ];
+  final own = <File>[];
   for (final entry in entries) {
     if (entry is! File) continue;
     final base = p.basename(entry.path);
     if (!base.startsWith('$stem.')) continue;
     if (longerStems.any((other) => base.startsWith('$other.'))) continue;
     if (base.endsWith('.srt') || base.endsWith('.whisper.json')) {
-      await entry.delete();
+      own.add(entry);
     }
   }
+  return own;
 }

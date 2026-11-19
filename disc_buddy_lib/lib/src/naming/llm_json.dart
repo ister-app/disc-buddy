@@ -60,5 +60,20 @@ String repairJson(String raw) {
   return out;
 }
 
-/// Reads an integer field that the LLM may have returned as a string.
-int jsonInt(dynamic v) => v is int ? v : int.tryParse('$v') ?? 0;
+/// Reads an integer field that the LLM may have returned as a string or as
+/// a float (`5.0`). Anything else — including a fractional number — is 0.
+int jsonInt(dynamic v) {
+  if (v is int) return v;
+  final d = v is double ? v : double.tryParse('$v'.trim());
+  if (d == null || !d.isFinite || d != d.truncateToDouble()) return 0;
+  return d.toInt();
+}
+
+/// Reads a text field that the LLM may have returned as a number (a title
+/// like `1917`) or a list of strings. Never throws; unusable values are ''.
+String jsonString(dynamic v) {
+  if (v is String) return v;
+  if (v is num || v is bool) return '$v';
+  if (v is List) return v.whereType<String>().join(' ');
+  return '';
+}

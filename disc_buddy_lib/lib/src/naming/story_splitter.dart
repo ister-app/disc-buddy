@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../utils/log.dart';
 import 'duration_probe.dart';
+import '../utils/process_utils.dart';
 
 /// A black stretch reported by ffmpeg's `blackdetect`, in file seconds.
 typedef BlackInterval = ({double start, double end});
@@ -138,7 +139,7 @@ class StorySplitter {
     double length,
   ) async {
     try {
-      final result = await Process.run(ffmpeg, [
+      final result = await runWithTimeout(ffmpeg, [
         '-hide_banner', '-nostats',
         '-ss', start.toStringAsFixed(2),
         '-t', length.toStringAsFixed(2),
@@ -147,7 +148,7 @@ class StorySplitter {
         '-vf', 'blackdetect=d=$minBlackSecs:pix_th=0.10',
         '-an', '-sn',
         '-f', 'null', '-',
-      ]).timeout(const Duration(minutes: 10));
+      ], timeout: const Duration(minutes: 10));
       if (result.exitCode != 0) {
         _log('   blackdetect failed for ${source.path} '
             '(exit ${result.exitCode}).', isError: true);
@@ -165,7 +166,7 @@ class StorySplitter {
 
   Future<bool> _copy(File source, File out, {double? start, double? end}) async {
     try {
-      final result = await Process.run(ffmpeg, [
+      final result = await runWithTimeout(ffmpeg, [
         '-loglevel', 'error',
         if (start != null) ...['-ss', start.toStringAsFixed(3)],
         '-i', source.path,
@@ -174,7 +175,7 @@ class StorySplitter {
         '-map_chapters', '-1',
         '-c', 'copy',
         '-y', out.path,
-      ]).timeout(const Duration(minutes: 30));
+      ], timeout: const Duration(minutes: 30));
       if (result.exitCode != 0) {
         _log('   ffmpeg split failed for ${source.path} '
             '(exit ${result.exitCode}): ${result.stderr}', isError: true);

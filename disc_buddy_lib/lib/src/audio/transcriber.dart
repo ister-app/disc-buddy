@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../rippers/video_disc_ripper.dart' show LogCallback;
 import '../utils/languages.dart' show convertIso2to1;
+import '../utils/process_utils.dart';
 
 /// Audio-transcription fallback for auto-naming titles without subtitles.
 ///
@@ -193,7 +194,20 @@ class Transcriber {
       if (json is! Map) return null;
       final text = json['text'];
       if (text is! String || text.trim().isEmpty) return null;
-      return (text: text, language: (json['language'] as String?) ?? 'en');
+      final cachedLang = json['language'] is String
+          ? json['language'] as String
+          : 'en';
+      // A transcript made in another language than the one now forced, or
+      // with another model, is exactly what a re-run is trying to replace.
+      final forced = language;
+      if (forced != null && forced.isNotEmpty && forced != cachedLang) {
+        return null;
+      }
+      final cachedModel = json['model'];
+      if (cachedModel is String && cachedModel != p.basename(whisperModel)) {
+        return null;
+      }
+      return (text: text, language: cachedLang);
     } catch (_) {
       return null;
     }
@@ -207,6 +221,7 @@ class Transcriber {
     try {
       await sidecarFor(videoFile).writeAsString(jsonEncode({
         'version': 2,
+        'model': p.basename(whisperModel),
         'language': result.language,
         'languages': windowLanguages,
         'text': result.text,
@@ -263,7 +278,7 @@ class Transcriber {
     File wavOut,
   ) async {
     try {
-      final result = await Process.run(ffmpeg, [
+      final result = await runWithTimeout(ffmpeg, [
         '-loglevel', 'error',
         '-ss', start.toStringAsFixed(2),
         '-t', len.toStringAsFixed(2),
@@ -274,7 +289,7 @@ class Transcriber {
         '-c:a', 'pcm_s16le',
         '-y',
         wavOut.path,
-      ]).timeout(const Duration(minutes: 10));
+      ], timeout: const Duration(minutes: 10));
       if (result.exitCode != 0) {
         _log('   ffmpeg audio extract failed (exit ${result.exitCode}): '
             '${result.stderr}', isError: true);
@@ -300,14 +315,14 @@ class Transcriber {
     String lang,
   ) async {
     try {
-      final result = await Process.run(whisperCli, [
+      final result = await runWithTimeout(whisperCli, [
         '-m', whisperModel,
         '-f', wav.path,
         '-l', lang,
         '-oj',
         '-of', outPrefix,
         '-np',
-      ]).timeout(const Duration(minutes: 10));
+      ], timeout: const Duration(minutes: 10));
       if (result.exitCode != 0) {
         _log('   whisper-cli failed (exit ${result.exitCode}): '
             '${result.stderr}', isError: true);

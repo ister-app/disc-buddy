@@ -180,14 +180,33 @@ class AutoNamer {
       fp: fps[firstIdx]!,
       titleHint: titleHint,
       seasonHint: seasonHint,
+      // Three or more files named together are a series far more often
+      // than one film with extras (the title selector uses the same rule).
+      preferSeries: items.length >= 3,
     );
     if (winner == null) {
       return {for (final it in items) it.file: null};
     }
 
     if (winner.type == 'movie') {
+      // One film, several files: only the main feature (the largest file)
+      // takes the film's name. Giving it to all of them would name a
+      // trailer after the film whenever that file happens to come first.
       final stem = _titles.movieStem(winner);
-      return {for (final it in items) it.file: stem};
+      var main = items.first.file;
+      var mainSize = -1;
+      for (final it in items) {
+        final size = it.file.existsSync() ? it.file.lengthSync() : 0;
+        if (size > mainSize) {
+          main = it.file;
+          mainSize = size;
+        }
+      }
+      if (items.length > 1) {
+        _log('   AutoNamer: "$stem" is a film — naming only the largest '
+            'file, ${main.path}.');
+      }
+      return {for (final it in items) it.file: it.file == main ? stem : null};
     }
 
     // 3. Fetch episodes once.

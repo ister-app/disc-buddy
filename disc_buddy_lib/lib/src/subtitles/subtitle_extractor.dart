@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../rippers/video_disc_ripper.dart' show LogCallback;
+import '../utils/process_utils.dart';
 
 class SubtitleExtractor {
   static const _textCodecs = {
@@ -167,9 +168,9 @@ class SubtitleExtractor {
       }
 
       // Step 2: mkvextract → .sub + .idx
-      final mkvResult = await Process.run(mkvextract, [
+      final mkvResult = await runWithTimeout(mkvextract, [
         mksFile.path, 'tracks', '0:$base',
-      ]).timeout(const Duration(minutes: 10));
+      ], timeout: const Duration(minutes: 10));
       if (mkvResult.exitCode != 0) {
         _log('mkvextract (step 2) failed (exit ${mkvResult.exitCode}):', isError: true);
         if ((mkvResult.stdout as String).isNotEmpty) {
@@ -183,11 +184,11 @@ class SubtitleExtractor {
       }
 
       // Step 3: subtile-ocr → SRT
-      final ocrResult = await Process.run(subtileOcr, [
+      final ocrResult = await runWithTimeout(subtileOcr, [
         '-l', lang,
         '-o', srtOut.path,
         idxFile.path,
-      ]).timeout(const Duration(minutes: 10));
+      ], timeout: const Duration(minutes: 10));
       if (ocrResult.exitCode != 0) {
         _log('subtile-ocr (step 3) failed (exit ${ocrResult.exitCode}):', isError: true);
         if ((ocrResult.stdout as String).isNotEmpty) _log(ocrResult.stdout as String, isError: true);

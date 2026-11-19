@@ -32,11 +32,15 @@ class TitleResolver {
     caseSensitive: false,
   );
 
+  /// [preferSeries] — the caller is naming several files at once: when a
+  /// film and a series score within the tie margin, the series is offered
+  /// first (and is what a non-interactive run picks).
   Future<TitlePick?> resolve({
     required String discName,
     required Fingerprint fp,
     String? titleHint,
     List<int>? seasonHint,
+    bool preferSeries = false,
   }) async {
     final query = (titleHint != null && titleHint.isNotEmpty)
         ? titleHint
@@ -116,6 +120,12 @@ class TitleResolver {
       ));
     }
     scored.sort((a, b) => b.score.compareTo(a.score));
+    if (preferSeries && scored.first.type == 'movie') {
+      final best = scored.first.score;
+      final i = scored.indexWhere(
+          (c) => c.type != 'movie' && (best - c.score) < tieMargin);
+      if (i > 0) scored.insert(0, scored.removeAt(i));
+    }
 
     final top = scored.first;
     log(

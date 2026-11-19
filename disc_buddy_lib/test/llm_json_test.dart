@@ -54,6 +54,22 @@ void main() {
     });
   });
 
+  test('jsonInt accepteert 5.0 en "5.0", weigert breuken', () {
+    expect(jsonInt(5.0), 5);
+    expect(jsonInt('5.0'), 5);
+    expect(jsonInt(' 3 '), 3);
+    expect(jsonInt(2.5), 0);
+    expect(jsonInt([1]), 0);
+  });
+
+  test('jsonString gooit nooit op een niet-string', () {
+    expect(jsonString('a'), 'a');
+    expect(jsonString(1917), '1917');
+    expect(jsonString(['one', 'two', 3]), 'one two');
+    expect(jsonString({'a': 1}), '');
+    expect(jsonString(null), '');
+  });
+
   group('jsonInt', () {
     test('int, string en rommel', () {
       expect(jsonInt(4), 4);

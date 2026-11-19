@@ -155,6 +155,37 @@ void main() {
       expect(result.language, 'nl');
     });
 
+    test('a cache in another language or from another model is a miss',
+        () async {
+      final mkv = File('${tmpDir.path}/episode.mkv');
+      await mkv.writeAsString('');
+      final sidecar = File('${tmpDir.path}/episode.whisper.json');
+
+      // With bogus tools a cache miss ends in null; a hit returns the text.
+      Future<bool> hit({String? language, String model = 'small.bin'}) async =>
+          await Transcriber(
+            ffmpeg: '/nonexistent/ffmpeg',
+            ffprobe: '/nonexistent/ffprobe',
+            whisperCli: '/nonexistent/whisper-cli',
+            whisperModel: '/models/$model',
+            language: language,
+            onLog: (_, {isError = false}) {},
+          ).transcribe(mkv) !=
+          null;
+
+      await sidecar.writeAsString(jsonEncode(
+          {'language': 'en', 'model': 'small.bin', 'text': 'wrong guess'}));
+      expect(await hit(), isTrue);
+      expect(await hit(language: 'en'), isTrue);
+      expect(await hit(language: 'nl'), isFalse);
+      expect(await hit(model: 'large.bin'), isFalse);
+
+      // Sidecars written before the model was recorded stay usable.
+      await sidecar
+          .writeAsString(jsonEncode({'language': 'nl', 'text': 'oud'}));
+      expect(await hit(language: 'nl', model: 'large.bin'), isTrue);
+    });
+
     test('ignores a corrupt sidecar', () async {
       final mkv = File('${tmpDir.path}/episode.mkv');
       await mkv.writeAsString('');

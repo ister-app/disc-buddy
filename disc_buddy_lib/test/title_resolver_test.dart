@@ -64,4 +64,30 @@ void main() {
     expect(pick!.type, 'series');
     expect(pick.id, 537);
   });
+
+  test('film en serie met dezelfde titel: serie wint bij een batch', () async {
+    TitleResolver resolver() => TitleResolver(
+          tmdb: tmdbWith(
+            movies: [
+              {'id': 275, 'title': 'Fargo', 'release_date': '1996-03-08'},
+            ],
+            tv: [
+              {'id': 60622, 'name': 'Fargo', 'first_air_date': '2014-04-15'},
+            ],
+          ),
+          llm: NoLlm(),
+          prompter: const NonInteractivePrompter(),
+          log: (_, {isError = false}) {},
+        );
+    const fp = Fingerprint(summary: 'A crime in Minnesota.', titleGuess: 'x');
+
+    final single = await resolver()
+        .resolve(discName: 'd', fp: fp, titleHint: 'Fargo');
+    final batch = await resolver().resolve(
+        discName: 'd', fp: fp, titleHint: 'Fargo', preferSeries: true);
+
+    expect(single!.type, 'movie');
+    expect(batch!.type, 'series');
+    expect(batch.id, 60622);
+  });
 }

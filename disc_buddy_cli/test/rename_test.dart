@@ -188,6 +188,38 @@ void main() {
       expect(log.text, contains('already exists'));
     });
 
+    test('eigen .srt van het origineel overleeft: mee terug of mee naar de '
+        'nieuwe naam, weg zodra de verhalen het origineel vervangen', () async {
+      touch('s01e10.nl.srt', 'mine');
+      final a = await splitOf('s01e10');
+      expect(names(), contains('s01e10.unsplit.nl.srt'));
+      expect(await applySplitNames(a, null, null,
+          originalStem: 's01e10', onLog: log.call), isFalse);
+      await unparkSource(a, originalStem: 's01e10', onLog: log.call);
+      expect(names(), ['s01e10.mkv', 's01e10.nl.srt']);
+      expect(read('s01e10.nl.srt'), 'mine');
+
+      touch('s01e11.nl.srt', 'mine');
+      final b = await splitOf('s01e11');
+      expect(await applySplitNames(b, 's01e21', 's01e21',
+          originalStem: 's01e11', onLog: log.call), isTrue);
+      expect(read('s01e21.nl.srt'), 'mine');
+
+      touch('s01e12.nl.srt', 'whole-file subs');
+      final c = await splitOf('s01e12');
+      expect(await applySplitNames(c, 's01e30', 's01e31',
+          originalStem: 's01e12', onLog: log.call), isTrue);
+      expect(names().where((n) => n.contains('s01e12')), isEmpty);
+    });
+
+    test('een oud .unsplit-bestand wordt niet overschreven', () async {
+      touch('s01e10.unsplit.mkv', 'older original');
+      final a = await splitOf('s01e10');
+      expect(p.basename(a.source.path), 's01e10.unsplit2.mkv');
+      expect(read('s01e10.unsplit.mkv'), 'older original');
+      expect(read('s01e10.unsplit2.mkv'), 'whole');
+    });
+
     test('een mislukt origineel krijgt zijn naam pas terug als de rest klaar '
         'is, en blijft geparkeerd als een verhaal die naam kreeg', () async {
       final a = await splitOf('s01e16');

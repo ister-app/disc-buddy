@@ -115,8 +115,8 @@ class SubtitleSource {
 
     final obj = parsed.obj;
     return Fingerprint(
-      summary: (obj['summary'] as String? ?? '').trim(),
-      titleGuess: (obj['titleGuess'] as String? ?? '').trim(),
+      summary: jsonString(obj['summary']).trim(),
+      titleGuess: jsonString(obj['titleGuess']).trim(),
     );
   }
 

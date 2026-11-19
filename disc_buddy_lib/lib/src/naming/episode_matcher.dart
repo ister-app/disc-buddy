@@ -846,7 +846,7 @@ class EpisodeMatcher {
     }
 
     if (obj.containsKey('reasoning')) {
-      final reasoning = obj['reasoning'] as String? ?? '';
+      final reasoning = jsonString(obj['reasoning']);
       if (reasoning.isNotEmpty) {
         log('   LLM reasoning: $reasoning');
       }
