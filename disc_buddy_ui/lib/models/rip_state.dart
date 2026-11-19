@@ -151,6 +151,7 @@ class RipAudioCdProgress extends RipState {
   final Duration elapsed;
   final double speed;
   final List<String> log;
+  final bool cancelling;
   RipAudioCdProgress({
     required this.metadata,
     required this.selectedTracks,
@@ -158,12 +159,14 @@ class RipAudioCdProgress extends RipState {
     this.elapsed = Duration.zero,
     this.speed = 0,
     this.log = const [],
+    this.cancelling = false,
   });
   RipAudioCdProgress copyWith({
     int? currentTrack,
     Duration? elapsed,
     double? speed,
     List<String>? log,
+    bool? cancelling,
   }) => RipAudioCdProgress(
     metadata: metadata,
     selectedTracks: selectedTracks,
@@ -171,6 +174,7 @@ class RipAudioCdProgress extends RipState {
     elapsed: elapsed ?? this.elapsed,
     speed: speed ?? this.speed,
     log: log ?? this.log,
+    cancelling: cancelling ?? this.cancelling,
   );
 }
 

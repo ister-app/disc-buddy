@@ -33,7 +33,7 @@ String audioTrackOutputPath(String outputDir, DiscMetadata meta, TrackInfo track
 
 class AudioCDRipper {
   final RipOptions options;
-  final FfmpegRunner _ffmpeg;
+  late final FfmpegRunner _ffmpeg;
   final LogCallback? onLog;
   final ProgressCallback? onProgress;
 
@@ -50,13 +50,34 @@ class AudioCDRipper {
       this.onProgress,
       Prompter? prompter,
       void Function(Process)? onFfmpegProcess})
-      : _ffmpeg = FfmpegRunner(
-            executable: options.ffmpeg,
-            onProcessStarted: onFfmpegProcess,
-            onLog: onLog),
-        _prompter = options.force
+      : _prompter = options.force
             ? const NonInteractivePrompter()
-            : (prompter ?? const NonInteractivePrompter());
+            : (prompter ?? const NonInteractivePrompter()) {
+    _ffmpeg = FfmpegRunner(
+        executable: options.ffmpeg,
+        onProcessStarted: (process) {
+          _currentProcess = process;
+          // cancel() may have landed between the loop's check and the spawn.
+          if (_cancelled) process.kill(ProcessSignal.sigkill);
+          onFfmpegProcess?.call(process);
+        },
+        onLog: onLog);
+  }
+
+  Process? _currentProcess;
+  bool _cancelled = false;
+
+  /// Whether [cancel] was called during the current or last [rip].
+  bool get cancelled => _cancelled;
+
+  /// Stops a running [rip]: kills the ffmpeg of the track in progress (its
+  /// part file is deleted, finished tracks are kept) and skips the remaining
+  /// tracks. [rip] then returns normally; check [cancelled] to tell a
+  /// cancelled rip from a completed one.
+  void cancel() {
+    _cancelled = true;
+    _currentProcess?.kill(ProcessSignal.sigkill);
+  }
 
   void _log(String msg, {bool isError = false}) =>
       emitLog(onLog, msg, isError: isError);
@@ -207,6 +228,7 @@ class AudioCDRipper {
     List<int> trackNumbers, {
     Set<String>? overwrite,
   }) async {
+    _cancelled = false;
     final albumDir = p.join(options.outputDir,
         sanitizeFilename(meta.artistDir), sanitizeFilename(meta.albumDir));
     await Directory(albumDir).create(recursive: true);
@@ -271,6 +293,7 @@ class AudioCDRipper {
 
     try {
       for (final nr in trackNumbers) {
+        if (_cancelled) break;
         final idx = nr - 1;
         if (idx < 0 || idx >= meta.tracks.length) {
           _log('Invalid track: $nr', isError: true);
@@ -286,6 +309,7 @@ class AudioCDRipper {
             force: options.force, onLog: onLog, overwrite: overwrite, prompter: _prompter)) {
           continue;
         }
+        if (_cancelled) break;
 
         final trackArtist = track.artist.isNotEmpty ? track.artist : meta.albumArtist;
 
@@ -295,7 +319,9 @@ class AudioCDRipper {
           await _ripTrackLibcdio(meta, track, outFile, trackArtist);
         }
       }
+      if (_cancelled) _log('Rip cancelled.');
     } finally {
+      _currentProcess = null;
       reader?.close();
     }
   }
@@ -389,6 +415,7 @@ class AudioCDRipper {
       if (exitCode == 0 && producerError == null && bytesPiped == expectedBytes) {
         return true;
       }
+      if (_cancelled) return false;
       final detail = producerError?.toString() ??
           'exit code $exitCode, piped $bytesPiped of $expectedBytes bytes';
       _log('   Error ripping track ${track.number} ($detail).', isError: true);
@@ -442,6 +469,7 @@ class AudioCDRipper {
 
     // 98% tolerance covers the ~last-frame the completion-kill trims.
     final reachedEnd = lastElapsed.inMilliseconds >= expectedDur.inMilliseconds * 0.98;
+    if (_cancelled) return false;
     if (exitCode == 0 || (await part.exists() && reachedEnd)) return true;
     _log('   Error ripping track ${track.number} (exit code $exitCode, '
         'reached ${lastElapsed.inSeconds}s of ${expectedDur.inSeconds}s).', isError: true);

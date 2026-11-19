@@ -243,6 +243,7 @@ class RipStateNotifier extends Notifier<RipState> {
   SendPort? _cancelPort;
   Isolate? _spawnedIsolate;
   ReceivePort? _activeReceivePort;
+  AudioCDRipper? _audioRipper;
   bool _disposed = false;
 
   RipStateNotifier(this.devicePath);
@@ -460,9 +461,13 @@ class RipStateNotifier extends Notifier<RipState> {
       },
     );
 
+    _audioRipper = ripper;
     try {
       await ripper.rip(metadata, tracks, overwrite: overwrite);
-      if (ref.read(loopEnabledProvider(devicePath)) &&
+      if (ripper.cancelled) {
+        // Finished tracks stay on disk; the interrupted one was cleaned up.
+        if (state is RipAudioCdProgress) _emit(RipIdle());
+      } else if (ref.read(loopEnabledProvider(devicePath)) &&
           devicePath.startsWith('/dev/')) {
         await Process.run('eject', [devicePath]);
         _emit(LoopWaiting(lastOutputFiles: [], log: List.from(logs)));
@@ -471,6 +476,8 @@ class RipStateNotifier extends Notifier<RipState> {
       }
     } catch (e) {
       _emit(RipError(e.toString()));
+    } finally {
+      if (identical(_audioRipper, ripper)) _audioRipper = null;
     }
   }
 
@@ -823,6 +830,14 @@ class RipStateNotifier extends Notifier<RipState> {
 
   void cancel() {
     final s = state;
+    if (s is RipAudioCdProgress) {
+      // The audio rip runs in this isolate (only the sector reads are
+      // off-thread), so the ripper can be told directly; startAudioCdRip
+      // returns to idle once rip() has unwound.
+      state = s.copyWith(cancelling: true);
+      _audioRipper?.cancel();
+      return;
+    }
     if (s is RipInProgress) {
       state = s.copyWith(cancelling: true);
       _cancelPort?.send(null);
@@ -858,6 +873,7 @@ class RipStateNotifier extends Notifier<RipState> {
     _cancelPort = null;
     _spawnedIsolate = null;
     _activeReceivePort = null;
+    _audioRipper = null;
     state = RipIdle();
   }
 }

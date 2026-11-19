@@ -21,7 +21,10 @@ class RipProgressPanel extends ConsumerWidget {
           ripState: ripState as RipInProgress,
           onCancel: () => ref.read(ripStateProvider(devicePath).notifier).cancel(),
         ),
-      RipAudioCdProgress() => _AudioRipProgress(ripState: ripState as RipAudioCdProgress),
+      RipAudioCdProgress() => _AudioRipProgress(
+          ripState: ripState as RipAudioCdProgress,
+          onCancel: () => ref.read(ripStateProvider(devicePath).notifier).cancel(),
+        ),
       MkvProcessing() => _MkvProgress(ripState: ripState as MkvProcessing),
       _ => const SizedBox.shrink(),
     };
@@ -53,18 +56,8 @@ class _VideoRipProgress extends StatelessWidget {
                 Text('Ripping: ${ripState.discTitle}',
                   style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
-                if (ripState.cancelling)
-                  Text('Stopping…',
-                    style: TextStyle(color: Theme.of(context).colorScheme.error))
-                else
-                  TextButton.icon(
-                    icon: const Icon(Icons.stop, size: 16),
-                    label: const Text('Cancel'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.error,
-                    ),
-                    onPressed: onCancel,
-                  ),
+                _CancelButton(
+                    cancelling: ripState.cancelling, onCancel: onCancel),
               ]),
               const SizedBox(height: 10),
               // Per-title progress
@@ -114,9 +107,31 @@ class _VideoRipProgress extends StatelessWidget {
   }
 }
 
+/// "Cancel" until pressed, then a "Stopping…" label while the rip unwinds.
+class _CancelButton extends StatelessWidget {
+  final bool cancelling;
+  final VoidCallback? onCancel;
+  const _CancelButton({required this.cancelling, this.onCancel});
+
+  @override
+  Widget build(BuildContext context) {
+    final error = Theme.of(context).colorScheme.error;
+    if (cancelling) {
+      return Text('Stopping…', style: TextStyle(color: error));
+    }
+    return TextButton.icon(
+      icon: const Icon(Icons.stop, size: 16),
+      label: const Text('Cancel'),
+      style: TextButton.styleFrom(foregroundColor: error),
+      onPressed: onCancel,
+    );
+  }
+}
+
 class _AudioRipProgress extends StatelessWidget {
   final RipAudioCdProgress ripState;
-  const _AudioRipProgress({required this.ripState});
+  final VoidCallback? onCancel;
+  const _AudioRipProgress({required this.ripState, this.onCancel});
 
   @override
   Widget build(BuildContext context) {
@@ -144,8 +159,15 @@ class _AudioRipProgress extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Ripping: ${ripState.metadata.album}',
-                  style: Theme.of(context).textTheme.titleLarge),
+              Row(children: [
+                Expanded(
+                  child: Text('Ripping: ${ripState.metadata.album}',
+                      style: Theme.of(context).textTheme.titleLarge,
+                      overflow: TextOverflow.ellipsis),
+                ),
+                _CancelButton(
+                    cancelling: ripState.cancelling, onCancel: onCancel),
+              ]),
               Text(ripState.metadata.artist,
                   style: Theme.of(context).textTheme.bodyMedium),
               const SizedBox(height: 10),

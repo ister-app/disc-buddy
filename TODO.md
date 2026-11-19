@@ -26,8 +26,6 @@ closed captions, Seinfeld S7 auto-selection) has been removed.
 
 - Scan-phase rippers in `disc_titles_provider.dart` get no `onLog`, so
   MusicBrainz/CDDB/mount messages from a scan never reach the log view.
-- Audio-CD rips cannot be cancelled: `AudioCDRipper` now accepts
-  `onFfmpegProcess`, but `rip_state_provider.dart` does not pass it yet.
 - Interactive questions during a rip (language fixes, LLM tie-breaks) are
   always answered with their default because the UI passes `force: true`.
   A dialog-backed `Prompter` over the isolate `SendPort` would allow them.
