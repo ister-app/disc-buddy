@@ -53,11 +53,18 @@ class _VideoRipProgress extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(children: [
-                Text('Ripping: ${ripState.discTitle}',
+                Text(
+                  ripState.finishing
+                      ? 'Finishing: ${ripState.discTitle}'
+                      : 'Ripping: ${ripState.discTitle}',
                   style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
-                _CancelButton(
-                    cancelling: ripState.cancelling, onCancel: onCancel),
+                if (ripState.finishing)
+                  Text('Subtitles and names…',
+                      style: Theme.of(context).textTheme.bodySmall)
+                else
+                  _CancelButton(
+                      cancelling: ripState.cancelling, onCancel: onCancel),
               ]),
               const SizedBox(height: 10),
               // Per-title progress

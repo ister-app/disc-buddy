@@ -156,6 +156,23 @@ BlurayTitle _applyBlurayLangOverrides(
   );
 }
 
+/// Where the rippers write [title]: `<outputDir>/<disc>/<disc>-<title>.mkv`.
+String _ripOutputPath(String outputDir, String discTitle, VideoTitle title) {
+  final disc = sanitizeFilename(discTitle);
+  return p.join(outputDir, disc, '$disc-${title.filename}');
+}
+
+/// The choices of the naming and subtitle steps, kept so that loop mode rips
+/// the next disc of a set the same way as the one the user configured.
+typedef _RipChoices = ({
+  String? nameHint,
+  List<int> seasons,
+  bool extractSubtitles,
+  String subtitleLangs,
+  bool? autoName,
+  bool? batchAssign,
+});
+
 // Top-level entry point — runs entirely in the background isolate so that
 // blocking FFI calls (DVDReadBlocks) never freeze the UI thread.
 void _ripIsolateMain(_RipJob job) async {
@@ -211,25 +228,17 @@ void _ripIsolateMain(_RipJob job) async {
             mountPath: job.mountPath, overwrite: job.overwrite);
       }
 
-      if (config?.customName?.isNotEmpty == true) {
-        final outDirPath = p.join(job.options.outputDir, sanitizeFilename(job.discTitle));
-        final expectedName = '${sanitizeFilename(job.discTitle)}-${title.filename}';
-        final original = File(p.join(outDirPath, expectedName));
-        final renamed = File(
-          p.join(outDirPath, '${sanitizeFilename(config!.customName!)}.mkv'),
-        );
-        if (await original.exists()) await original.rename(renamed.path);
-      }
     }
 
-    final outDirPath = p.join(job.options.outputDir, sanitizeFilename(job.discTitle));
-    final outDir = Directory(outDirPath);
-    final files = outDir.existsSync()
-        ? outDir.listSync().whereType<File>()
-            .where((f) => f.path.endsWith('.mkv'))
-            .map((f) => f.path)
-            .toList()
-        : <String>[];
+    // Report this job's own outputs (not every MKV that happens to be in the
+    // directory): the main isolate extracts subtitles from, names and
+    // renames exactly these.
+    final files = [
+      for (final title in job.selectedTitles)
+        if (File(_ripOutputPath(job.options.outputDir, job.discTitle, title))
+            .existsSync())
+          _ripOutputPath(job.options.outputDir, job.discTitle, title),
+    ];
 
     port.send(_RipDone(files));
   } catch (e) {
@@ -245,6 +254,7 @@ class RipStateNotifier extends Notifier<RipState> {
   Isolate? _spawnedIsolate;
   ReceivePort? _activeReceivePort;
   AudioCDRipper? _audioRipper;
+  _RipChoices? _lastChoices;
   bool _disposed = false;
 
   RipStateNotifier(this.devicePath);
@@ -390,6 +400,7 @@ class RipStateNotifier extends Notifier<RipState> {
       seasons: s.seasons,
       extractSubtitles: extract,
       subtitleLangs: langs,
+      autoName: s.autoName,
       batchAssign: s.batchAssign,
       overwrite: overwrite,
       scanFingerprint: s.scanFingerprint,
@@ -398,14 +409,19 @@ class RipStateNotifier extends Notifier<RipState> {
 
   void startRipDirect(String discTitle, List<VideoTitle> selected,
       {String? fingerprint}) {
+    // Loop mode starts here without the naming/subtitle steps: the next
+    // disc of a set gets the choices made for the previous one.
+    final last = _lastChoices;
     _startRip(
       discTitle: discTitle,
       selectedTitles: selected,
       configs: const {},
-      nameHint: null,
-      seasons: const [],
-      extractSubtitles: false,
-      subtitleLangs: '',
+      nameHint: last?.nameHint,
+      seasons: last?.seasons ?? const [],
+      extractSubtitles: last?.extractSubtitles ?? false,
+      subtitleLangs: last?.subtitleLangs ?? '',
+      autoName: last?.autoName,
+      batchAssign: last?.batchAssign,
       scanFingerprint: fingerprint,
     );
   }
@@ -571,127 +587,150 @@ class RipStateNotifier extends Notifier<RipState> {
     state = MkvProcessing(path: filePaths.first);
 
     try {
-      final settings = _settings;
-      final canExtract = extractSubtitles &&
-          settings.mkvextract != null &&
-          settings.subtileOcr != null;
-      final canAutoName = autoName &&
-          settings.llmUrl != null &&
-          settings.tmdbToken != null;
-
-      SubtitleExtractor? extractor;
-      AutoNamer? namer;
-
-      if (canExtract || canAutoName) {
-        extractor = SubtitleExtractor(
-          ffmpeg: settings.ffmpeg ?? 'ffmpeg',
-          ffprobe: settings.ffprobe ?? 'ffprobe',
-          mkvextract: settings.mkvextract ?? 'mkvextract',
-          subtileOcr: settings.subtileOcr ?? 'subtile-ocr',
-          onLog: appendLog,
-        );
-      }
-
-      if (canAutoName) {
-        namer = AutoNamer(
-          extractor: extractor!,
-          transcriber: (settings.whisper != null && settings.whisperModel != null)
-              ? Transcriber(
-                  ffmpeg: settings.ffmpeg ?? 'ffmpeg',
-                  ffprobe: settings.ffprobe ?? 'ffprobe',
-                  whisperCli: settings.whisper!,
-                  whisperModel: settings.whisperModel!,
-                  language: settings.transcribeLanguage,
-                  onLog: appendLog,
-                )
-              : null,
-          tmdb: TmdbClient(token: settings.tmdbToken!, onLog: appendLog),
-          llm: LlmClient(
-            baseUrl: settings.llmUrl!,
-            apiKey: settings.llmKey ?? '',
-            model: settings.llmModel ?? '',
-            onLog: appendLog,
-          ),
-          force: true,
-          batchAssign: batchAssign ? true : false,
-          onLog: appendLog,
-        );
-      }
-
-      final langs = subtitleLangs.trim().isEmpty
-          ? null
-          : subtitleLangs.split(RegExp(r'[,\s]+')).toSet();
-
-      // Phase 1: resolve names — batch all files needing auto-naming in one call.
-      final resolvedStems = <String, String?>{};
-      for (final path in filePaths) {
-        final custom = fileNames[path];
-        resolvedStems[path] = (custom != null && custom.trim().isNotEmpty)
-            ? custom.trim()
-            : null;
-      }
-
-      if (canAutoName) {
-        final toName = filePaths
-            .where((p) => resolvedStems[p] == null)
-            .toList();
-        if (toName.isNotEmpty) {
-          appendLog('Auto-naming ${toName.length} file(s)...');
-          try {
-            final items = toName.map((path) {
-              final basename = path.split('/').last;
-              final stem = basename.toLowerCase().endsWith('.mkv')
-                  ? basename.substring(0, basename.length - 4)
-                  : basename;
-              return (file: File(path), discName: nameHint ?? stem, srts: <File>[]);
-            }).toList();
-
-            final batchResults = await namer!.nameFilesBatch(
-              items,
-              titleHint: nameHint,
-              seasonHint: seasons.isNotEmpty ? seasons : null,
-            );
-
-            for (final entry in batchResults.entries) {
-              resolvedStems[entry.key.path] = entry.value;
-            }
-          } catch (e) {
-            appendLog('Auto-naming failed: $e', isError: true);
-          }
-        }
-      }
-
-      // Phase 2: copy files and extract subtitles.
-      final outputFiles = <String>[];
-
-      for (final path in filePaths) {
-        final resolvedStem = resolvedStems[path];
-
-        File workingFile;
-        if (resolvedStem != null) {
-          final destPath = p.join(p.dirname(path), '$resolvedStem.mkv');
-          if (destPath != path) {
-            appendLog('Renaming to $resolvedStem.mkv...');
-            await File(path).rename(destPath);
-          }
-          workingFile = File(destPath);
-          outputFiles.add(destPath);
-        } else {
-          workingFile = File(path);
-          outputFiles.add(path);
-        }
-
-        if (canExtract) {
-          appendLog('Extracting subtitles: ${workingFile.path.split('/').last}');
-          await extractor!.extractAll(workingFile, languages: langs);
-        }
-      }
-
-      namer?.close();
+      final outputFiles = await _postProcess(
+        files: filePaths,
+        log: appendLog,
+        extractSubtitles: extractSubtitles,
+        subtitleLangs: subtitleLangs,
+        autoName: autoName,
+        batchAssign: batchAssign,
+        nameHint: nameHint,
+        seasons: seasons,
+        stems: fileNames,
+      );
       _emit(RipCompleted(outputFiles, log: List.from(logs)));
     } catch (e) {
       _emit(RipError(e.toString()));
     }
+  }
+
+  /// Subtitle extraction, auto-naming and renaming for files that are
+  /// already on disk — directory mode, and the tail of a disc rip.
+  ///
+  /// [stems] maps a path to the name the user typed for it; such a file is
+  /// renamed to that and never auto-named. [discName] is what the namer
+  /// falls back to as a title hint (defaults to each file's own stem).
+  /// Subtitles are extracted first so the namer reuses them and the rename
+  /// takes the SRT sidecars along. Returns the final paths in [files] order.
+  Future<List<String>> _postProcess({
+    required List<String> files,
+    required LogCallback log,
+    required bool extractSubtitles,
+    required String subtitleLangs,
+    required bool autoName,
+    bool batchAssign = false,
+    String? nameHint,
+    List<int> seasons = const [],
+    Map<String, String> stems = const {},
+    String? discName,
+  }) async {
+    final options = _settings.toRipOptions(device: devicePath);
+
+    final wantExtract = extractSubtitles && options.canOcrSubtitles;
+    if (extractSubtitles && !wantExtract) {
+      log('Subtitle extraction skipped: set mkvextract and subtile-ocr in '
+          'Settings.', isError: true);
+    }
+    final wantNaming = autoName && options.canAutoName;
+    if (autoName && !wantNaming) {
+      log('Auto-naming skipped: it needs a TMDB token, an LLM URL and model, '
+          'and either the subtitle OCR tools or whisper (see Settings).',
+          isError: true);
+    }
+
+    // path → new stem
+    final resolved = <String, String>{
+      for (final e in stems.entries)
+        if (e.value.trim().isNotEmpty) e.key: sanitizeFilename(e.value.trim()),
+    };
+    final toName = wantNaming
+        ? files.where((f) => !resolved.containsKey(f)).toList()
+        : const <String>[];
+
+    if (wantExtract || toName.isNotEmpty) {
+      final extractor = SubtitleExtractor(
+        ffmpeg: options.ffmpeg,
+        ffprobe: options.ffprobe,
+        // May run without the OCR tools (whisper-only auto-naming).
+        mkvextract: options.mkvextract ?? 'mkvextract',
+        subtileOcr: options.subtileOcr ?? 'subtile-ocr',
+        onLog: log,
+      );
+
+      if (wantExtract) {
+        final langs = subtitleLangs.trim().isEmpty
+            ? null
+            : subtitleLangs.trim().split(RegExp(r'[,\s]+')).toSet();
+        for (final path in files) {
+          log('Extracting subtitles: ${p.basename(path)}');
+          await extractor.extractAll(File(path), languages: langs);
+        }
+      }
+
+      if (toName.isNotEmpty) {
+        log('Auto-naming ${toName.length} file(s)...');
+        final namer = AutoNamer(
+          extractor: extractor,
+          transcriber: options.canTranscribe
+              ? Transcriber(
+                  ffmpeg: options.ffmpeg,
+                  ffprobe: options.ffprobe,
+                  whisperCli: options.whisper!,
+                  whisperModel: options.whisperModel!,
+                  language: options.transcribeLanguage,
+                  onLog: log,
+                )
+              : null,
+          tmdb: TmdbClient(token: options.tmdbToken!, onLog: log),
+          llm: LlmClient(
+            baseUrl: options.llmUrl!,
+            apiKey: options.llmKey ?? '',
+            model: options.llmModel!,
+            onLog: log,
+          ),
+          force: true,
+          batchAssign: batchAssign,
+          onLog: log,
+        );
+        try {
+          final results = await namer.nameFilesBatch(
+            [
+              for (final path in toName)
+                (
+                  file: File(path),
+                  discName: nameHint ??
+                      discName ??
+                      p.basenameWithoutExtension(path),
+                  srts: extractor.findExistingSrts(File(path)),
+                ),
+            ],
+            titleHint: nameHint,
+            seasonHint: seasons.isNotEmpty ? seasons : null,
+          );
+          for (final e in results.entries) {
+            final stem = e.value;
+            if (stem != null) resolved[e.key.path] = stem;
+          }
+        } catch (e) {
+          log('Auto-naming failed: $e', isError: true);
+        } finally {
+          namer.close();
+        }
+      }
+    }
+
+    final out = <String>[];
+    for (final path in files) {
+      final stem = resolved[path];
+      // renameWithSidecars refuses to overwrite an existing file and keeps
+      // the extension; the file stays where it is when the rename is refused.
+      final renamed = stem != null &&
+          await renameWithSidecars(File(path), stem, onLog: log);
+      out.add(renamed
+          ? p.join(p.dirname(path), '$stem${p.extension(path)}')
+          : path);
+    }
+    return out;
   }
 
   void _startRip({
@@ -707,6 +746,14 @@ class RipStateNotifier extends Notifier<RipState> {
     Set<String>? overwrite,
     String? scanFingerprint,
   }) {
+    _lastChoices = (
+      nameHint: nameHint,
+      seasons: seasons,
+      extractSubtitles: extractSubtitles,
+      subtitleLangs: subtitleLangs,
+      autoName: autoName,
+      batchAssign: batchAssign,
+    );
     state = RipInProgress(discTitle: discTitle, selectedTitles: selectedTitles);
     _runRip(
       discTitle: discTitle,
@@ -756,7 +803,9 @@ class RipStateNotifier extends Notifier<RipState> {
     final receivePort = ReceivePort();
     _activeReceivePort = receivePort;
 
-    Future<void> runInIsolate(DiscType discType, {String? mountPath}) async {
+    // Completes with this job's output files, or null when it was cancelled.
+    Future<List<String>?> runInIsolate(DiscType discType,
+        {String? mountPath}) async {
       _spawnedIsolate = await Isolate.spawn(
         _ripIsolateMain,
         _RipJob(
@@ -779,7 +828,7 @@ class RipStateNotifier extends Notifier<RipState> {
             // Isolate confirmed cancellation: close port and return to idle.
             receivePort.close();
             if (state is RipInProgress) _emit(RipIdle());
-            return;
+            return null;
           case _RipLog(:final text, :final isError):
             appendLog(text, isError: isError);
           case _RipProgress(:final elapsed, :final speed):
@@ -792,26 +841,21 @@ class RipStateNotifier extends Notifier<RipState> {
             }
           case _RipDone(:final files):
             receivePort.close();
-            if (ref.read(loopEnabledProvider(devicePath)) &&
-                devicePath.startsWith('/dev/')) {
-              await Process.run('eject', [devicePath]);
-              _emit(LoopWaiting(lastOutputFiles: files, log: List.from(logs)));
-            } else {
-              _emit(RipCompleted(files, log: List.from(logs)));
-            }
-            return;
+            return files;
           case _RipFail(:final error):
             receivePort.close();
             throw Exception(error);
         }
       }
+      return null; // port closed by the cancel fallback
     }
 
+    List<String>? files;
     try {
       if (devicePath.toLowerCase().endsWith('.iso')) {
-        await withMountedDisc(devicePath, (mountPath) async {
+        files = await withMountedDisc(devicePath, (mountPath) async {
           final discType = DiscTypeDetector.detectFromMountPoint(mountPath);
-          await runInIsolate(discType, mountPath: mountPath);
+          return runInIsolate(discType, mountPath: mountPath);
         });
       } else {
         final discType = await DiscTypeDetector.detect(devicePath);
@@ -827,11 +871,50 @@ class RipStateNotifier extends Notifier<RipState> {
             return;
           }
         }
-        await runInIsolate(discType);
+        files = await runInIsolate(discType);
       }
     } catch (e) {
       receivePort.close();
       _emit(RipError(e.toString()));
+      return;
+    }
+    // Cancelled — or the notifier moved on (reset, disposed) meanwhile.
+    final ripped = state;
+    if (files == null || ripped is! RipInProgress) return;
+
+    // The disc is done; what follows only touches the files on disk, so the
+    // drive is free and there is nothing left to cancel.
+    _emit(ripped.copyWith(finishing: true, cancelling: false));
+    var outputs = files;
+    try {
+      outputs = await _postProcess(
+        files: outputs,
+        log: appendLog,
+        extractSubtitles: extractSubtitles,
+        subtitleLangs: subtitleLangs,
+        autoName: options.autoName,
+        batchAssign: batchAssign ?? false,
+        nameHint: options.titleHint,
+        seasons: options.seasonHint ?? const [],
+        stems: {
+          for (final t in selectedTitles)
+            if (configs[t.displayKey]?.customName?.trim().isNotEmpty == true)
+              _ripOutputPath(options.outputDir, discTitle, t):
+                  configs[t.displayKey]!.customName!,
+        },
+        discName: discTitle,
+      );
+    } catch (e) {
+      // The rip itself succeeded; a failing extra must not hide that.
+      appendLog('Post-processing failed: $e', isError: true);
+    }
+
+    if (ref.read(loopEnabledProvider(devicePath)) &&
+        devicePath.startsWith('/dev/')) {
+      await Process.run('eject', [devicePath]);
+      _emit(LoopWaiting(lastOutputFiles: outputs, log: List.from(logs)));
+    } else {
+      _emit(RipCompleted(outputs, log: List.from(logs)));
     }
   }
 
@@ -858,7 +941,9 @@ class RipStateNotifier extends Notifier<RipState> {
         // started within the 3 s window replaces these fields, and killing it
         // (or resetting to idle) would clobber the new rip.
         if (!identical(_spawnedIsolate, capturedIsolate)) return;
-        if (state is! RipInProgress) return;
+        final now = state;
+        // Past the rip (post-processing) there is no isolate left to kill.
+        if (now is! RipInProgress || now.finishing) return;
         capturedIsolate?.kill(priority: Isolate.immediate);
         capturedPort?.close();
         _emit(RipIdle());

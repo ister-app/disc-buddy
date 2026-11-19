@@ -103,6 +103,9 @@ class RipInProgress extends RipState {
   final double speed;
   final List<String> log;
   final bool cancelling;
+
+  /// All titles are ripped; subtitles are being extracted and files named.
+  final bool finishing;
   RipInProgress({
     required this.discTitle,
     required this.selectedTitles,
@@ -111,6 +114,7 @@ class RipInProgress extends RipState {
     this.speed = 0,
     this.log = const [],
     this.cancelling = false,
+    this.finishing = false,
   });
   RipInProgress copyWith({
     int? currentIndex,
@@ -118,6 +122,7 @@ class RipInProgress extends RipState {
     double? speed,
     List<String>? log,
     bool? cancelling,
+    bool? finishing,
   }) => RipInProgress(
     discTitle: discTitle,
     selectedTitles: selectedTitles,
@@ -126,6 +131,7 @@ class RipInProgress extends RipState {
     speed: speed ?? this.speed,
     log: log ?? this.log,
     cancelling: cancelling ?? this.cancelling,
+    finishing: finishing ?? this.finishing,
   );
 
   double get progressFraction {
