@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'naming_types.dart';
 import 'tmdb_client.dart';
 import 'subtitle_text.dart';
@@ -470,4 +472,115 @@ String formatEpisodeList(List<SeasonEpisode> episodes) {
     buf.writeln();
   }
   return buf.toString();
+}
+
+final _discNumberRe = RegExp(
+  r'(?<![A-Za-z0-9])(?:d|disc|disk|dvd|cd)[ ._-]?(\d{1,2})(?![A-Za-z0-9])',
+  caseSensitive: false,
+);
+
+/// Disc number per file index, read from the file names of a multi-disc
+/// set ("SHOW_S1_D2-title_05.mkv", "Show Disc 3 - 01.mkv"). Empty unless at
+/// least two different numbers occur and every numbered name has the same
+/// text before the number: "S1_D1" next to "S2_D1" is two sets, whose disc
+/// numbers say nothing about each other. Files without a number are left
+/// out.
+Map<int, int> discNumbers(List<String> fileNames) {
+  final discs = <int, int>{};
+  String? prefix;
+  for (var i = 0; i < fileNames.length; i++) {
+    final m = _discNumberRe.firstMatch(fileNames[i]);
+    if (m == null) continue;
+    final before = fileNames[i].substring(0, m.start).toLowerCase();
+    if (prefix != null && before != prefix) return {};
+    prefix = before;
+    discs[i] = int.parse(m.group(1)!);
+  }
+  return discs.values.toSet().length < 2 ? {} : discs;
+}
+
+/// Position of a pick in the episode list: the indexes of its first and
+/// last episode.
+typedef EpisodeSpan = ({int first, int last});
+
+/// Where each placed file sits in [episodes]; picks outside the list
+/// (specials) are left out.
+Map<int, EpisodeSpan> episodeSpans(
+  Map<int, EpisodePick?> picks,
+  List<SeasonEpisode> episodes,
+) {
+  int at(int season, int number) => episodes.indexWhere(
+    (e) => e.season == season && e.ep.number == number,
+  );
+  final spans = <int, EpisodeSpan>{};
+  for (final entry in picks.entries) {
+    final p = entry.value;
+    if (p == null) continue;
+    final first = at(p.season, p.ep);
+    final last = at(p.season, p.epEnd);
+    if (first < 0 || last < 0) continue;
+    spans[entry.key] = (first: first, last: last);
+  }
+  return spans;
+}
+
+/// Files whose episode breaks the order of the discs: a set carries its
+/// episodes in order, so everything on disc 1 comes before everything on
+/// disc 2 (the order within one disc is free). The file that contradicts
+/// the most others is taken out, and so on until the rest is consistent.
+///
+/// Conservative on purpose: a file is only an outlier when it contradicts
+/// more files than any file it contradicts (two files that merely disagree
+/// with each other are left alone), and when more than a quarter of the
+/// files would have to go the discs evidently do not follow episode order
+/// and nothing is returned.
+Set<int> discOrderOutliers({
+  required Map<int, int> discs,
+  required Map<int, EpisodeSpan> spans,
+}) {
+  final live = spans.keys.where(discs.containsKey).toSet();
+  final total = live.length;
+  bool clash(int a, int b) {
+    final da = discs[a]!, db = discs[b]!;
+    if (da == db) return false;
+    final (lo, hi) = da < db ? (a, b) : (b, a);
+    return spans[lo]!.last >= spans[hi]!.first;
+  }
+
+  final out = <int>{};
+  while (true) {
+    final clashes = {
+      for (final i in live) i: live.where((j) => j != i && clash(i, j)).toList(),
+    };
+    final worst = live.fold<int?>(
+      null,
+      (best, i) =>
+          best == null || clashes[i]!.length > clashes[best]!.length ? i : best,
+    );
+    if (worst == null || clashes[worst]!.isEmpty) break;
+    final count = clashes[worst]!.length;
+    if (clashes[worst]!.any((j) => clashes[j]!.length >= count)) break;
+    live.remove(worst);
+    out.add(worst);
+  }
+  return out.length > math.max(1, total ~/ 4) ? {} : out;
+}
+
+/// The stretch of the episode list a file on [disc] can lie in, given where
+/// the files of the other discs sit: after everything on earlier discs,
+/// before everything on later ones. Both bounds are exclusive indexes.
+({int after, int before}) discWindow({
+  required int disc,
+  required Map<int, int> discs,
+  required Map<int, EpisodeSpan> spans,
+  required int episodeCount,
+}) {
+  var after = -1, before = episodeCount;
+  for (final entry in spans.entries) {
+    final d = discs[entry.key];
+    if (d == null) continue;
+    if (d < disc) after = math.max(after, entry.value.last);
+    if (d > disc) before = math.min(before, entry.value.first);
+  }
+  return (after: after, before: before);
 }

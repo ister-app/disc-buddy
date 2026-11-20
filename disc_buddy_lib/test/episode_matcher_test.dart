@@ -123,12 +123,17 @@ setup(
   Map<String, double>? durations,
   Map<String, List<String>> audio = const {},
   List<SeasonEpisode> specials = const [],
+  List<String>? names,
 }) {
   final llm = FakeLlm();
   final logs = <String>[];
   final items = <NamingItem>[
     for (var i = 0; i < count; i++)
-      (file: File('/v/title_0${i + 1}.mkv'), discName: 'D1', srts: <File>[]),
+      (
+        file: File('/v/${names?[i] ?? 'title_0${i + 1}.mkv'}'),
+        discName: 'D1',
+        srts: <File>[],
+      ),
   ];
   final matcher = TestMatcher(
     specials: specials,
@@ -506,6 +511,123 @@ void main() {
         );
       },
     );
+  });
+
+  group('disc order', () {
+    test('discNumbers reads the disc from the file names of one set', () {
+      expect(
+        discNumbers([
+          'MAD_MEN__S1_D1-title_04_angle1.mkv',
+          'MAD_MEN__S1_D2-title_05.mkv',
+          'MAD_MEN__S1_bonus.mkv',
+        ]),
+        {0: 1, 1: 2},
+      );
+      expect(discNumbers(['Show Disc 1 - 01.mkv', 'Show disc_3 - 02.mkv']), {
+        0: 1,
+        1: 3,
+      });
+      // One disc, no disc, or two sets with their own numbering: no order.
+      expect(discNumbers(['X_D1-title_01.mkv', 'X_D1-title_02.mkv']), isEmpty);
+      expect(discNumbers(['title_01.mkv', 'dvd.mkv', 'd12345.mkv']), isEmpty);
+      expect(discNumbers(['X_S1_D1-t1.mkv', 'X_S2_D2-t1.mkv']), isEmpty);
+    });
+
+    test('discOrderOutliers takes out the file that contradicts the rest', () {
+      final discs = {0: 1, 1: 1, 2: 2, 3: 2, 4: 3};
+      EpisodeSpan at(int n) => (first: n, last: n);
+      // File 1 (disc 1) sits at episode 9, behind discs 2 and 3.
+      expect(
+        discOrderOutliers(
+          discs: discs,
+          spans: {0: at(1), 1: at(9), 2: at(3), 3: at(2), 4: at(6)},
+        ),
+        {1},
+      );
+      // Free order within a disc is no contradiction.
+      expect(
+        discOrderOutliers(
+          discs: discs,
+          spans: {0: at(1), 1: at(0), 2: at(3), 3: at(2), 4: at(6)},
+        ),
+        isEmpty,
+      );
+      // Two files that only contradict each other: no telling which.
+      expect(
+        discOrderOutliers(discs: {0: 1, 1: 2}, spans: {0: at(3), 1: at(2)}),
+        isEmpty,
+      );
+      // Discs in reverse episode order: the assumption is off, touch nothing.
+      expect(
+        discOrderOutliers(
+          discs: {0: 1, 1: 2, 2: 3, 3: 4},
+          spans: {0: at(7), 1: at(5), 2: at(3), 3: at(1)},
+        ),
+        isEmpty,
+      );
+    });
+
+    test('discWindow bounds a disc by its neighbours', () {
+      EpisodeSpan at(int n) => (first: n, last: n);
+      final discs = {0: 1, 1: 2, 2: 2, 3: 3, 4: 4};
+      final spans = {0: at(2), 2: at(4), 3: (first: 7, last: 8), 4: at(11)};
+      expect(
+        discWindow(disc: 2, discs: discs, spans: spans, episodeCount: 13),
+        (after: 2, before: 7),
+      );
+      expect(
+        discWindow(disc: 4, discs: discs, spans: spans, episodeCount: 13),
+        (after: 8, before: 13),
+      );
+    });
+
+    const set = [
+      'SHOW_S7_D1-title_01.mkv',
+      'SHOW_S7_D2-title_01.mkv',
+      'SHOW_S7_D2-title_02.mkv',
+    ];
+
+    test('a claimant evicted by a conflict is re-matched within its disc', () async {
+      final s = setup(2, names: set);
+      s.llm.match.addAll([
+        '{"pick":3}', // disc 1 file → e03 (wrong)
+        '{"pick":3}', // disc 2 file → e03, conflict
+        '{"pick":1}', // re-match of the disc 1 file
+      ]);
+      // The last blind re-match names e04: impossible on disc 1.
+      s.llm.verify.addAll(['{"pick":3}', '{"pick":3}', '{"pick":4}']);
+      s.llm.conflict.add('{"first":0,"second":3}');
+
+      expect(await run(s), {0: 's07e01', 1: 's07e03'});
+      // Only the episodes before disc 2's were offered.
+      final rematch = s.llm.matchPrompts.last;
+      expect(rematch, contains('1. s07e01'));
+      expect(rematch, contains('2. s07e02'));
+      expect(rematch, isNot(contains('s07e04')));
+      expect(s.logs, anyElement(contains('cannot be on this disc')));
+    });
+
+    test('a pick that breaks disc order is taken back and re-matched', () async {
+      final s = setup(3, names: set);
+      s.llm.match.addAll([
+        '{"pick":4}', // disc 1 file → e04, behind both disc 2 files
+        '{"pick":2}',
+        '{"pick":3}',
+        '{"pick":1}', // re-match: only e01 lies before disc 2
+      ]);
+      s.llm.verify.addAll(['{"pick":4}', '{"pick":2}', '{"pick":3}']);
+
+      expect(await run(s), {0: 's07e01', 1: 's07e02', 2: 's07e03'});
+      expect(s.logs, anyElement(contains('s07e04 does not fit disc 1')));
+      expect(s.llm.matchPrompts.last, isNot(contains('s07e04')));
+    });
+
+    test('two files that merely disagree keep their picks', () async {
+      final s = setup(2, names: set);
+      s.llm.match.addAll(['{"pick":3}', '{"pick":2}']);
+      s.llm.verify.addAll(['{"pick":3}', '{"pick":2}']);
+      expect(await run(s), {0: 's07e03', 1: 's07e02'});
+    });
   });
 
   group('fillSingleGaps', () {

@@ -325,6 +325,9 @@ class EpisodeMatcher {
             '→ ${picks[dup]?.stem ?? 'unnamed'}.',
           );
         }
+        // An earlier claimant the conflict left without a name gets the
+        // same second chance as any other unplaced file.
+        if (picks[dup] == null) specialsCandidates.add(dup);
         if (pick == null) {
           picks[i] = null;
           specialsCandidates.add(i);
@@ -357,6 +360,23 @@ class EpisodeMatcher {
       subs: subs,
       fps: fps,
     );
+    final discs = discNumbers([
+      for (final item in items) item.file.uri.pathSegments.last,
+    ]);
+    for (final i in discOrderOutliers(
+      discs: discs,
+      spans: episodeSpans(picks, episodes),
+    )) {
+      log(
+        '   ${items[i].file.path}: ${picks[i]!.stem} does not fit disc '
+        '${discs[i]} — the other discs hold the episodes around it. '
+        'Re-matching it later.',
+        isError: true,
+      );
+      usedStems.remove(picks[i]!.stem);
+      picks[i] = null;
+      specialsCandidates.add(i);
+    }
     applyGapFills(
       picks: picks,
       eligible: {
@@ -380,6 +400,7 @@ class EpisodeMatcher {
       medianSecs: medianSecs,
       bonus: bonus,
       loadSpecials: loadSpecials,
+      discs: discs,
     );
     return picks;
   }
@@ -516,6 +537,7 @@ class EpisodeMatcher {
     required double? medianSecs,
     required Set<int> bonus,
     required Future<List<SeasonEpisode>> Function() loadSpecials,
+    Map<int, int> discs = const {},
   }) async {
     final claimed = picks.values.where((p) => p != null).length;
     // Bonus content on a season's discs is about that season: when the
@@ -560,6 +582,29 @@ class EpisodeMatcher {
           '   $path fits the season by length and audio layout — not trying '
           'specials; re-matching among the unclaimed episodes.',
         );
+        // In a multi-disc set the other discs' files bound where this one
+        // can lie; only those episodes are offered, and a blind re-match
+        // that names one outside them proves nothing.
+        bool Function(SeasonEpisode)? fitsDisc;
+        final disc = discs[i];
+        if (disc != null) {
+          final w = discWindow(
+            disc: disc,
+            discs: discs,
+            spans: episodeSpans(picks, episodes),
+            episodeCount: episodes.length,
+          );
+          if (w.after >= 0 || w.before < episodes.length) {
+            fitsDisc = (e) {
+              final at = episodes.indexOf(e);
+              return at > w.after && at < w.before;
+            };
+            log(
+              '   $path is on disc $disc: offering only the episodes '
+              'between those of the other discs.',
+            );
+          }
+        }
         pick = await rematchExcludingClaimed(
           i: i,
           fp: fp,
@@ -570,6 +615,7 @@ class EpisodeMatcher {
           usedStems: usedStems,
           durations: durations,
           medianSecs: medianSecs,
+          allowed: fitsDisc,
         );
         if (pick != null &&
             !await verifyPick(
@@ -577,6 +623,7 @@ class EpisodeMatcher {
               pick: pick,
               episodes: episodes,
               claimedBy: usedStems,
+              possible: fitsDisc,
             )) {
           pick = null;
         }
@@ -678,10 +725,13 @@ class EpisodeMatcher {
     EpisodePick? exclude,
     required Map<int, double> durations,
     required double? medianSecs,
+    bool Function(SeasonEpisode)? allowed,
   }) async {
     final claimed = claimedEpisodes([...picks.values, exclude]);
-    final open = unclaimedEpisodes(episodes, claimed);
-    if (open.isEmpty || open.length == episodes.length) return null;
+    final unclaimed = unclaimedEpisodes(episodes, claimed);
+    if (unclaimed.length == episodes.length) return null;
+    final open = allowed == null ? unclaimed : unclaimed.where(allowed).toList();
+    if (open.isEmpty) return null;
     log(
       '   Re-matching ${items[i].file.path} with '
       '${episodes.length - open.length} claimed episode(s) excluded.',
@@ -1188,6 +1238,8 @@ class EpisodeMatcher {
   /// contradiction that names an episode another file already holds count
   /// as inconclusive: two files cannot both be that episode, and the
   /// primary match already settled who is.
+  /// [possible] does the same for an episode the file cannot be at all
+  /// (outside its disc's stretch of the season).
   /// With [requireAgreement] (used for specials) an inconclusive
   /// verification counts as a rejection: a bonus feature needs positive
   /// confirmation, a regular episode only needs no contradiction.
@@ -1197,6 +1249,7 @@ class EpisodeMatcher {
     required List<SeasonEpisode> episodes,
     Map<String, int> claimedBy = const {},
     bool requireAgreement = false,
+    bool Function(SeasonEpisode)? possible,
   }) async {
     if (fp.summary.isEmpty) return !requireAgreement;
     bool inconclusive() {
@@ -1250,6 +1303,13 @@ class EpisodeMatcher {
       log(
         '   Verification: blind re-match says $reStem, but that episode is '
         'already taken by another file — accepting ${pick.stem}.',
+      );
+      return true;
+    }
+    if (possible != null && !possible(re)) {
+      log(
+        '   Verification: blind re-match says $reStem, which cannot be on '
+        'this disc — accepting ${pick.stem}.',
       );
       return true;
     }

@@ -101,6 +101,8 @@ Triggered by `'?'` in naming prefs (disc rippers) or the `?` answer in standalon
 
 A `--name` hint is scored against the TMDB candidates (movie and series) even without `--season`; the LLM's own `titleGuess` is often an episode title.
 
+**Disc order** (per-file matching): when the file names carry disc numbers of one set (`SHOW_S1_D2-title_05.mkv`; `discNumbers` in `episode_math.dart`), everything on disc 1 precedes everything on disc 2. A pick that contradicts the other discs is taken back (`discOrderOutliers`), and an unplaced file is re-matched only among the open episodes between its neighbouring discs (`discWindow`). Order within a disc is free.
+
 **Two stories per file** (`--split-stories`, directory mode): `StorySplitter` (`naming/story_splitter.dart`) cuts each file at the `blackdetect` stretch nearest its middle (±90 s, stream copy, chapters dropped) into `<stem>.story1/2.<ext>`. The halves are named as ordinary items; `nameFilesBatch(splitFrom:)` tells the per-file matcher that the two halves of one source may claim the same episode (one long story) without a stem conflict. The caller then parks every split source as `<stem>.unsplit.<ext>` (a story's new name may be another source's current name) and `applySplitNames` (`naming/split_names.dart`, shared by the CLI and the UI's "Two stories per file" checkbox in directory mode) settles each: two stems → the halves replace the source; one stem twice → the source takes it whole; otherwise the source gets its old name back.
 
 ### Key models
