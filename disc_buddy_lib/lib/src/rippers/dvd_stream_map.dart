@@ -32,10 +32,15 @@ Future<({List<int> sidOrder, int lastSidByteOffset})> scanVobSids(
 ) async {
   if (wantedSids.isEmpty) return (sidOrder: <int>[], lastSidByteOffset: 0);
 
-  // Keep the last [carrySize] bytes of the previous chunk to handle MPEG-PS
-  // packet headers that straddle chunk boundaries. A PES header is at most
-  // 3 (fixed) + 255 (extension) + 1 (sub-stream ID) = 259 bytes from the
-  // start of the start-code, so 512 bytes of carry is more than sufficient.
+  // The scan walks the packet structure instead of searching for the 0xBD
+  // start code byte by byte: a pack header is skipped by its size, every PES
+  // packet (video, audio, padding, navigation) by its declared length. The
+  // bytes 00 00 01 BD also occur by chance inside a video packet; read as a
+  // private-stream header they yield a random "sub-stream ID", and one that
+  // lands in 0x20–0x3F counts as a subtitle stream ffmpeg never sees. That
+  // shifts every real subtitle one index up, so `-map 0:s:N?` points past
+  // the last stream and the title is ripped without subtitles (Mad Men S1
+  // disc 3: phantom 0x34 / 0x2A ahead of the real 0x20).
   //
   // Safety cap: stop scanning after 600 MB even if not all SIDs are found.
   // The scan normally returns early the moment all IFO-declared SIDs have
@@ -52,62 +57,86 @@ Future<({List<int> sidOrder, int lastSidByteOffset})> scanVobSids(
   // staying far below a full title. (Was mistakenly 60000*1024*1024 ≈ 58 GB,
   // which disabled the cap entirely.)
   const kScanCap  = 600 * 1024 * 1024;
-  const carrySize = 512;
   final order   = <int>[];
   final seen    = <int>{};
   var   totalBytes              = 0;
   var   lastTrackedSidByteOffset = 0;
-  var   carry                   = Uint8List(0);
+  // Unparsed tail of the previous chunk (an incomplete header, < 300 bytes).
+  var   carry = Uint8List(0);
+  // Bytes at the start of the next chunk(s) that belong to a packet already
+  // stepped over. [carry] is empty whenever this is non-zero.
+  var   skip  = 0;
 
   await for (final chunk in src) {
-    final window = Uint8List(carry.length + chunk.length)
-      ..setRange(0, carry.length, carry)
-      ..setRange(carry.length, carry.length + chunk.length, chunk);
+    final window = carry.isEmpty
+        ? (chunk is Uint8List ? chunk : Uint8List.fromList(chunk))
+        : (Uint8List(carry.length + chunk.length)
+            ..setRange(0, carry.length, carry)
+            ..setRange(carry.length, carry.length + chunk.length, chunk));
 
     final winBase = totalBytes - carry.length;
-    var   i = 0;
+    final len     = window.length;
+    var   i = skip;
 
-    while (i < window.length - 9) {
-      if (window[i]   == 0x00 && window[i+1] == 0x00 &&
-          window[i+2] == 0x01 && window[i+3] == 0xBD) {
-        final pktLen = (window[i+4] << 8) | window[i+5];
-        final hdrLen = window[i + 8];
-        final sidOff = i + 9 + hdrLen;
-        if (sidOff < window.length) {
-          final sid = window[sidOff];
-          if (!seen.contains(sid)) {
-            // Track ALL subtitle SIDs (0x20–0x3F) even if not in wantedSids.
-            // DVDs sometimes store companion subtitle streams for different
-            // display modes (widescreen/letterbox) alongside the declared
-            // streams. ffmpeg counts all of them when assigning stream indices,
-            // so we must include them in the discovery order too.
-            final isWanted  = wantedSids.contains(sid);
-            final isSubSid  = sid >= 0x20 && sid <= 0x3F;
-            if (isWanted || isSubSid) {
-              order.add(sid);
-              seen.add(sid);
-              lastTrackedSidByteOffset = winBase + sidOff;
-            }
-            if (isWanted) {
-              final wantedSeen = seen.intersection(wantedSids);
-              if (wantedSeen.length == wantedSids.length) {
-                return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
-              }
+    while (i + 4 <= len) {
+      if (window[i] != 0x00 || window[i+1] != 0x00 || window[i+2] != 0x01) {
+        i++;
+        continue;
+      }
+      final id = window[i+3];
+      if (id == 0xBA) {
+        // MPEG-2 pack header: 14 bytes + 0–7 stuffing bytes.
+        if (i + 14 > len) break;
+        i += (window[i+4] & 0xC0) == 0x40 ? 14 + (window[i+13] & 0x07) : 4;
+        continue;
+      }
+      if (id < 0xBB) {
+        // Video-layer start code (only seen while resynchronising).
+        i += 4;
+        continue;
+      }
+      // System header or PES packet: 16-bit length follows the start code.
+      if (i + 6 > len) break;
+      final pktLen = (window[i+4] << 8) | window[i+5];
+      if (id == 0xBD) {
+        if (i + 9 > len) break;
+        final sidOff = i + 9 + window[i + 8];
+        if (sidOff >= len) break;
+        final sid = window[sidOff];
+        if (!seen.contains(sid)) {
+          // Track ALL subtitle SIDs (0x20–0x3F) even if not in wantedSids.
+          // DVDs sometimes store companion subtitle streams for different
+          // display modes (widescreen/letterbox) alongside the declared
+          // streams. ffmpeg counts all of them when assigning stream indices,
+          // so we must include them in the discovery order too.
+          final isWanted  = wantedSids.contains(sid);
+          final isSubSid  = sid >= 0x20 && sid <= 0x3F;
+          if (isWanted || isSubSid) {
+            order.add(sid);
+            seen.add(sid);
+            lastTrackedSidByteOffset = winBase + sidOff;
+          }
+          if (isWanted) {
+            final wantedSeen = seen.intersection(wantedSids);
+            if (wantedSeen.length == wantedSids.length) {
+              return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
             }
           }
         }
-        final step = pktLen > 0 ? 6 + pktLen : 1;
-        if (i + step >= window.length) break;
-        i += step;
-      } else {
-        i++;
       }
+      // Length 0 = unbounded (not used on DVD): fall back to a byte search.
+      i += pktLen > 0 ? 6 + pktLen : 4;
     }
 
     totalBytes += chunk.length;
     if (totalBytes >= kScanCap) break; // Safety cap — don't scan beyond this
-    final keepFrom = window.length > carrySize ? window.length - carrySize : 0;
-    carry = window.sublist(keepFrom);
+    if (i >= len) {
+      skip  = i - len;
+      carry = Uint8List(0);
+    } else {
+      skip  = 0;
+      carry = Uint8List.fromList(Uint8List.sublistView(window, i));
+    }
   }
 
   return (sidOrder: order, lastSidByteOffset: lastTrackedSidByteOffset);
